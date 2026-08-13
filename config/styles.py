@@ -47,11 +47,6 @@ def inyectar_estilos():
         box-shadow: 0 0 8px rgba(212, 175, 55, 0.3) !important;
     }
     
-    /* Textos Generales */
-    p, label, div {
-        color: #0A192F !important;
-    }
-    
     /* PREVENCIÓN DE TRUNCAMIENTO DE TEXTO (...) EN MÉTRICAS */
     div[data-testid="stMetricLabel"] {
         font-size: 12.5px !important; 
@@ -135,7 +130,7 @@ def inyectar_estilos():
         box-shadow: 0 4px 15px rgba(212, 175, 55, 0.4) !important;
         transform: translateY(-1px);
     }
-   /* TOOLTIP EN st.metric */
+    /* TOOLTIP EN st.metric */
     [data-testid="stTooltipIcon"] svg {
         background-color: #0A192F !important;
         border-radius: 50% !important;
@@ -174,23 +169,47 @@ def inyectar_estilos():
         color: #DC2626 !important;
     }
     
-    /* ESTILIZAR LAS PESTAÑAS (TABS) */
+    /* ESTILIZAR LAS PESTAÑAS (TABS) - CORRECCIÓN DE VISIBILIDAD DE TEXTO */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 20px;
+        gap: 10px !important;
+        border-bottom: 2px solid #CBD5E1 !important;
     }
     .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #E2E8F0;
-        border-radius: 8px 8px 0px 0px;
-        padding: 10px 20px;
+        height: auto !important;
+        padding: 10px 18px !important;
+        background-color: #E2E8F0 !important;
+        border-radius: 8px 8px 0px 0px !important;
+        color: #0A192F !important;
+    }
+    .stTabs [data-baseweb="tab"] p, 
+    .stTabs [data-baseweb="tab"] span, 
+    .stTabs [data-baseweb="tab"] div {
         color: #0A192F !important;
         font-weight: 700 !important;
+        font-size: 14px !important;
     }
     .stTabs [aria-selected="true"] {
         background-color: #0A192F !important;
-        color: #FFFFFF !important;
         border-bottom: 3px solid #D4AF37 !important;
+    }
+    .stTabs [aria-selected="true"] p, 
+    .stTabs [aria-selected="true"] span, 
+    .stTabs [aria-selected="true"] div {
+        color: #FFFFFF !important;
+        font-weight: 800 !important;
+        font-size: 14px !important;
+    }
+
+    /* CONTENEDORES DE ALERTAS (ST.INFO, ST.WARNING, ST.ERROR) */
+    div[data-testid="stNotification"],
+    div.stAlert {
+        border-radius: 8px !important;
+        padding: 12px 16px !important;
+        font-size: 13.5px !important;
+    }
+    div.stAlert p, div.stAlert div, div.stAlert span {
+        font-weight: 600 !important;
+        line-height: 1.5 !important;
     }
     </style>
     """, unsafe_allow_html=True)

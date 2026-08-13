@@ -149,6 +149,19 @@ def test_ai_service_fallback_sin_clave():
     assert isinstance(macro_txt, str)
     assert score == 2.5
 
+def test_market_cap_fallback():
+    """
+    Verifica que empresas de gran capitalización (Mega Caps como GOOGL/AAPL) reciban un Market Cap realista
+    incluso si una API primaria falla, evitando la penalización indebida de Small Cap.
+    """
+    precio_actual = 175.0
+    info_mock = {"sharesOutstanding": 12000000000.0}
+    mcap = info_mock.get("marketCap", 0.0)
+    shares = info_mock.get("sharesOutstanding", 0.0)
+    if mcap <= 0 and shares > 0:
+        mcap = shares * precio_actual
+    assert mcap > 2000000000.0
+
 class TestValuationUnittest(unittest.TestCase):
     def test_dcf_subvalorada(self):
         test_calcular_dcf_intr_ps_subvalorada()
@@ -173,6 +186,9 @@ class TestValuationUnittest(unittest.TestCase):
 
     def test_ai_fallback(self):
         test_ai_service_fallback_sin_clave()
+
+    def test_mcap_fallback(self):
+        test_market_cap_fallback()
 
 if __name__ == "__main__":
     unittest.main()

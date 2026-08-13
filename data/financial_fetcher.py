@@ -52,7 +52,7 @@ def fetch_cotizacion_intradia(ticker, fmp_api_key):
                 if precio_actual == 0.0 and len(close_series) > 0:
                     precio_actual = float(close_series.iloc[-1])
                 if prev_close == 0.0 and len(close_series) > 1:
-                    prev_close = float(close_series.iloc[-2])
+                    precio_actual = float(close_series.iloc[-2])
         except Exception:
             pass
 
@@ -119,11 +119,12 @@ def fetch_datos_fundamentales(ticker, fmp_api_key):
                 c_data = res_cf[0]
                 fmp_price = float(p_data.get("price", 1.0))
                 fmp_mcap = float(p_data.get("mktCap", 0.0))
-                shares_out = fmp_mcap / fmp_price if fmp_price > 0 else 1.0
+                shares_out = fmp_mcap / fmp_price if fmp_price > 0 else float(b_data.get("weightedAverageShsOut", 1.0))
                 info.update({
                     "longName": p_data.get("companyName", ticker),
                     "sector": p_data.get("sector", "General"),
                     "industry": p_data.get("industry", "General"),
+                    "marketCap": fmp_mcap,
                     "beta": float(p_data.get("beta", info.get("beta", 1.0))),
                     "dividendRate": float(p_data.get("lastDiv", 0.0)),
                     "sharesOutstanding": shares_out,
@@ -170,6 +171,15 @@ def fetch_datos_fundamentales(ticker, fmp_api_key):
             accion = yf.Ticker(ticker)
             info_fall = accion.info or {}
             info.update(info_fall)
+            
+            # Extraer de forma garantizada marketCap y sharesOutstanding
+            if not info.get("marketCap"):
+                mcap_y = safe_get(info_fall, ["marketCap", "regularMarketMarketCap", "enterpriseValue"], 0.0)
+                if mcap_y > 0: info["marketCap"] = float(mcap_y)
+                
+            if not info.get("sharesOutstanding"):
+                sh_y = safe_get(info_fall, ["sharesOutstanding", "impliedSharesOutstanding", "floatShares"], 0.0)
+                if sh_y > 0: info["sharesOutstanding"] = float(sh_y)
             
             if not info.get("longName"): info["longName"] = ticker
             if not info.get("sector"): info["sector"] = "General"

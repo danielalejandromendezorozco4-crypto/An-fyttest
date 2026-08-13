@@ -195,9 +195,11 @@ else:
             if not info or (hist.empty and inc.empty) or precio_actual == 0:
                 st.error("❌ Ticker no encontrado o problemas de conexión con el proveedor financiero. Verifica el símbolo ingresado.")
                 st.stop()
+
             datos_completos = True
-            if inc.empty or bs.empty or cf.empty or tasa_libre_riesgo == 4.20:
+            if (inc.empty and bs.empty) or tasa_libre_riesgo == 4.20:
                 datos_completos = False
+
             nombre = info.get("longName", ticker_input)
             sector = info.get("sector", "General")
             industria = info.get("industry", "General")
@@ -249,8 +251,26 @@ else:
             is_asset_light = sector in ["Technology", "Communication Services", "Financial Services"]
             
             # --- MÓDULO 1: SOLVENCIA Y DEUDA (15%) ---
-            shares_current = safe_get(info, ["sharesOutstanding"], 1)
-            mcap = shares_current * precio_actual
+            mcap = safe_get(info, ["marketCap", "mktCap", "regularMarketMarketCap"], 0.0)
+            shares_current = safe_get(info, ["sharesOutstanding", "impliedSharesOutstanding", "floatShares"], 0.0)
+
+            if mcap <= 0 and shares_current > 0 and precio_actual > 0:
+                mcap = shares_current * precio_actual
+
+            if mcap <= 0 and not inc.empty and 'Basic Average Shares' in inc.index:
+                try:
+                    sh_val = inc.loc['Basic Average Shares'].iloc[0]
+                    if not pd.isna(sh_val) and float(sh_val) > 0:
+                        shares_current = float(sh_val)
+                        mcap = shares_current * precio_actual
+                except Exception:
+                    pass
+
+            if mcap <= 0 and precio_actual > 0:
+                mcap = 10_000_000_000.0 # Fallback neutro 10B USD para evitar castigos Small Cap falsos en Mega Caps
+
+            if shares_current <= 0:
+                shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 1.0
             
             total_debt = safe_get(info, ["totalDebt"], 0)
             total_cash = safe_get(info, ["totalCash"], 0)
@@ -432,7 +452,7 @@ else:
             
             # --- AJUSTE FINANCIERO DINÁMICO (SMALL CAPS) ---
             if mcap > 0 and mcap < 2000000000:
-                desc_req = 0.20 # 20% Margen de Seguridad por Riesgo de Liquidez
+                desc_req = 0.20 # 20% Margen de Seguridad por Riesgo de Liquidez en Small Caps reales
             else:
                 desc_req = 0.10 # 10% Margen Normal
                 
