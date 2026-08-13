@@ -6,7 +6,7 @@ def inyectar_estilos():
     /* Fondo Global de la Aplicación y Barra Lateral */
     .stApp, section[data-testid="stSidebar"] {
         background-color: #F4F1E8 !important;
-        color: #0A192F !important;
+        color: #0F172A !important;
     }
     
     /* Visibilidad del Botón Retráctil del Sidebar (<< / >>) */
@@ -26,7 +26,7 @@ def inyectar_estilos():
     section[data-testid="stSidebar"] span,
     section[data-testid="stSidebar"] p,
     section[data-testid="stSidebar"] div {
-        color: #0A192F !important;
+        color: #0F172A !important;
         font-weight: 700 !important;
     }
     
@@ -38,7 +38,7 @@ def inyectar_estilos():
     }
     section[data-testid="stSidebar"] input {
         background-color: #FFFFFF !important;
-        color: #0A192F !important;
+        color: #0F172A !important;
         font-weight: 800 !important;
         font-size: 15px !important;
     }
@@ -47,24 +47,28 @@ def inyectar_estilos():
         box-shadow: 0 0 8px rgba(212, 175, 55, 0.3) !important;
     }
     
-    /* PREVENCIÓN DE TRUNCAMIENTO DE TEXTO (...) EN MÉTRICAS */
-    div[data-testid="stMetricLabel"] {
+    /* PREVENCIÓN DE TRUNCAMIENTO DE TEXTO EN MÉTRICAS Y ALTO CONTRASTE */
+    div[data-testid="stMetricLabel"],
+    [data-testid="stMetricLabel"] label,
+    [data-testid="stMetricLabel"] p,
+    [data-testid="stMetricLabel"] span {
         font-size: 12.5px !important; 
         white-space: normal !important; 
         overflow-wrap: break-word !important;
         line-height: 1.3 !important; 
         min-height: 2.6em !important; 
-        color: #0A192F !important;
-        font-weight: 700 !important;
+        color: #0F172A !important;
+        font-weight: 800 !important;
         display: -webkit-box !important;
         -webkit-line-clamp: 2 !important; 
         -webkit-box-orient: vertical !important;
         overflow: hidden !important;
     }
     
-    div[data-testid="stMetricValue"] {
+    div[data-testid="stMetricValue"],
+    [data-testid="stMetricValue"] div {
         font-size: 20px !important;
-        color: #0A192F !important;
+        color: #0F172A !important;
         font-weight: 800 !important;
     }
     
@@ -169,7 +173,7 @@ def inyectar_estilos():
         color: #DC2626 !important;
     }
     
-    /* ESTILIZAR LAS PESTAÑAS (TABS) - CORRECCIÓN DE VISIBILIDAD DE TEXTO */
+    /* ESTILIZAR LAS PESTAÑAS (TABS) - VISIBILIDAD Y CONTRASTE */
     .stTabs [data-baseweb="tab-list"] {
         gap: 10px !important;
         border-bottom: 2px solid #CBD5E1 !important;
@@ -179,12 +183,12 @@ def inyectar_estilos():
         padding: 10px 18px !important;
         background-color: #E2E8F0 !important;
         border-radius: 8px 8px 0px 0px !important;
-        color: #0A192F !important;
+        color: #0F172A !important;
     }
     .stTabs [data-baseweb="tab"] p, 
     .stTabs [data-baseweb="tab"] span, 
     .stTabs [data-baseweb="tab"] div {
-        color: #0A192F !important;
+        color: #0F172A !important;
         font-weight: 700 !important;
         font-size: 14px !important;
     }
@@ -200,16 +204,26 @@ def inyectar_estilos():
         font-size: 14px !important;
     }
 
-    /* CONTENEDORES DE ALERTAS (ST.INFO, ST.WARNING, ST.ERROR) */
+    /* CONTENEDORES DE ALERTAS (ST.INFO, ST.WARNING, ST.ERROR) - ALTO CONTRASTE INTERIOR */
     div[data-testid="stNotification"],
     div.stAlert {
         border-radius: 8px !important;
         padding: 12px 16px !important;
         font-size: 13.5px !important;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
     }
-    div.stAlert p, div.stAlert div, div.stAlert span {
-        font-weight: 600 !important;
+    div.stAlert p, 
+    div.stAlert div, 
+    div.stAlert span, 
+    div.stAlert strong, 
+    div.stAlert b,
+    div[data-testid="stNotification"] p,
+    div[data-testid="stNotification"] div,
+    div[data-testid="stNotification"] span {
+        color: #0F172A !important;
+        font-weight: 700 !important;
         line-height: 1.5 !important;
+        -webkit-text-fill-color: #0F172A !important;
     }
     </style>
     """, unsafe_allow_html=True)

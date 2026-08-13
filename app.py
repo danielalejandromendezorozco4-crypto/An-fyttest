@@ -196,8 +196,34 @@ else:
                 st.error("❌ Ticker no encontrado o problemas de conexión con el proveedor financiero. Verifica el símbolo ingresado.")
                 st.stop()
 
+            # --- MÓDULO 1: SOLVENCIA Y DEUDA (15%) ---
+            mcap = safe_get(info, ["marketCap", "mktCap", "regularMarketMarketCap"], 0.0)
+            shares_current = safe_get(info, ["sharesOutstanding", "impliedSharesOutstanding", "floatShares"], 0.0)
+
+            if mcap <= 0 and shares_current > 0 and precio_actual > 0:
+                mcap = shares_current * precio_actual
+
+            if mcap <= 0 and not inc.empty and 'Basic Average Shares' in inc.index:
+                try:
+                    sh_val = inc.loc['Basic Average Shares'].iloc[0]
+                    if not pd.isna(sh_val) and float(sh_val) > 0:
+                        shares_current = float(sh_val)
+                        mcap = shares_current * precio_actual
+                except Exception:
+                    pass
+
+            if mcap <= 0 and precio_actual > 0:
+                mcap = 10_000_000_000.0 # Fallback neutro 10B USD para evitar castigos Small Cap falsos en Mega Caps
+
+            if shares_current <= 0:
+                shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 1.0
+
+            # EVALUACIÓN DE INTEGRIDAD DE DATOS (Solo marca incompleto si faltan insumos críticos de valuación)
+            net_income_val = safe_get(info, ["netIncomeToCommon", "netIncome"], 0.0)
+            op_cash_val = safe_get(info, ["operatingCashflow", "freeCashflow"], 0.0)
+
             datos_completos = True
-            if (inc.empty and bs.empty) or tasa_libre_riesgo == 4.20:
+            if mcap <= 0 or (net_income_val == 0.0 and op_cash_val == 0.0 and (inc.empty and bs.empty)):
                 datos_completos = False
 
             nombre = info.get("longName", ticker_input)
@@ -249,28 +275,6 @@ else:
                 pass
             is_fibra_util = sector in ["Real Estate", "Utilities", "Communication Services"]
             is_asset_light = sector in ["Technology", "Communication Services", "Financial Services"]
-            
-            # --- MÓDULO 1: SOLVENCIA Y DEUDA (15%) ---
-            mcap = safe_get(info, ["marketCap", "mktCap", "regularMarketMarketCap"], 0.0)
-            shares_current = safe_get(info, ["sharesOutstanding", "impliedSharesOutstanding", "floatShares"], 0.0)
-
-            if mcap <= 0 and shares_current > 0 and precio_actual > 0:
-                mcap = shares_current * precio_actual
-
-            if mcap <= 0 and not inc.empty and 'Basic Average Shares' in inc.index:
-                try:
-                    sh_val = inc.loc['Basic Average Shares'].iloc[0]
-                    if not pd.isna(sh_val) and float(sh_val) > 0:
-                        shares_current = float(sh_val)
-                        mcap = shares_current * precio_actual
-                except Exception:
-                    pass
-
-            if mcap <= 0 and precio_actual > 0:
-                mcap = 10_000_000_000.0 # Fallback neutro 10B USD para evitar castigos Small Cap falsos en Mega Caps
-
-            if shares_current <= 0:
-                shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 1.0
             
             total_debt = safe_get(info, ["totalDebt"], 0.0)
             total_cash = safe_get(info, ["totalCash"], 0.0)
@@ -828,4 +832,4 @@ else:
                 mime="application/pdf"
             )
         except Exception as e:
-            st.error(f"❌ Ocurrió un error procesando los datos: {e}. Revisa si el ticker es correcto.")
+            st.error(f"❌ Ocurrió un error procesando los datos: {e}. Revisa si el ticker me es correcto.")
