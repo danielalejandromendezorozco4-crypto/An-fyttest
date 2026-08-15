@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import statistics
-from typing import Optional
+from typing import List
 
-from data.financial_fetcher import obtener_kd_fmp_fred
-from config.settings import safe_get
+# NOTE: Imports de módulos con dependencia de streamlit (financial_fetcher,
+# config.settings) se hacen de forma diferida (lazy) dentro de cada función
+# para evitar arrastrar streamlit al nivel de módulo. Esto previene
+# ImportError en pytest y en Streamlit Cloud cuando el grafo de dependencias
+# se resuelve antes de que streamlit esté disponible.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,6 +47,8 @@ def calcular_wacc(
     total_capital = mcap + total_debt
     we, wd = (mcap / total_capital, total_debt / total_capital) if total_capital > 0 else (1.0, 0.0)
     ke = tasa_libre_riesgo + (beta * erp)
+    # Import diferido para evitar arrastrar `streamlit` al nivel de módulo
+    from data.financial_fetcher import obtener_kd_fmp_fred  # noqa: PLC0415
     kd_real = obtener_kd_fmp_fred(ticker, fmp_key, fred_key, int_exp, total_debt)
     kd = min(max(kd_real, tasa_libre_riesgo), 15.0)
     wacc = max(min((we * ke) + (wd * kd * (1 - tax_rate)), 15.0), 7.5)
@@ -173,11 +178,11 @@ def calcular_ddm(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def calcular_fcff_valuation(
-    ocf_hist: list[float],
-    capex_hist: list[float],
-    interest_hist: list[float],
-    pretax_hist: list[float],
-    taxprov_hist: list[float],
+    ocf_hist: List[float],
+    capex_hist: List[float],
+    interest_hist: List[float],
+    pretax_hist: List[float],
+    taxprov_hist: List[float],
     total_debt: float,
     total_cash: float,
     shares_diluted: float,
