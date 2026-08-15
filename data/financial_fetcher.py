@@ -391,3 +391,233 @@ def fetch_datos_concurrente(ticker, fmp_key, fred_key):
         "tasa_fred": tasa_fred,
         "news_data": news_data
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NUEVAS FUNCIONES PARA EL MOTOR FCFF
+# ─────────────────────────────────────────────────────────────────────────────
+
+def obtener_capex_historico(cf: pd.DataFrame) -> list[float]:
+    """
+    Extrae el Gasto de Capital (CapEx) del estado de flujos de efectivo y lo
+    retorna como lista de valores **positivos** (gasto real), ordenados del más
+    reciente al más antiguo.
+
+    yfinance reporta CapEx con signo negativo; FMP lo reporta positivo.
+    Esta función normaliza ambas convenciones con `abs()`.
+
+    Args:
+        cf: DataFrame del estado de flujos de efectivo (índice = conceptos, columnas = fechas).
+
+    Returns:
+        Lista de floats con CapEx positivo por período. Lista vacía si no se encuentra.
+    """
+    posibles_filas = [
+        "Capital Expenditure",
+        "CapitalExpenditure",
+        "Capital Expenditures",
+        "Purchase Of Property Plant And Equipment",
+        "Purchases Of Property, Plant And Equipment",
+        "Capital Expenditure Reported",
+    ]
+    if isinstance(cf, pd.DataFrame) and not cf.empty:
+        for fila in posibles_filas:
+            if fila in cf.index:
+                try:
+                    serie = cf.loc[fila].dropna()
+                    if not serie.empty:
+                        return [abs(safe_num(v, 0.0)) for v in serie.values]
+                except Exception:
+                    pass
+    return []
+
+
+@st.cache_data(ttl=300)
+def obtener_rf_tnx(fallback_fred: float = 4.20) -> float:
+    """
+    Obtiene la tasa libre de riesgo (R_f) del bono del Tesoro a 10 años vía
+    yfinance (`^TNX`) con fallback automático al valor FRED proporcionado.
+
+    El ticker `^TNX` cotiza en puntos porcentuales (e.g., 4.35 = 4.35%),
+    por lo que se retorna directamente como porcentaje.
+
+    Args:
+        fallback_fred: Tasa FRED de respaldo a usar si falla la consulta (%).
+
+    Returns:
+        Tasa libre de riesgo en porcentaje (e.g., 4.35 representa 4.35%).
+    """
+    try:
+        session = obtener_session_yfinance()
+        tnx = yf.Ticker("^TNX", session=session)
+        rf_val = safe_num(tnx.fast_info.last_price, default=None)
+        if rf_val is not None and 0.5 < rf_val < 20.0:
+            return rf_val
+    except Exception:
+        pass
+    return float(fallback_fred)
+
+
+def extraer_componentes_fcff(
+    cf: pd.DataFrame,
+    inc: pd.DataFrame,
+    bs: pd.DataFrame,
+    info: dict,
+) -> dict:
+    """
+    Extrae y sanitiza todos los insumos necesarios para el cálculo de FCFF
+    histórico desde los DataFrames de estados financieros.
+
+    Maneja defensivamente:
+    - CapEx reportado como negativo (yfinance) o positivo (FMP).
+    - Interest Expense reportado con/sin signo.
+    - Empresas sin deuda (total_debt = 0).
+    - DataFrames vacíos o con datos parciales.
+
+    Args:
+        cf:   DataFrame del estado de flujos de efectivo.
+        inc:  DataFrame del estado de resultados.
+        bs:   DataFrame del balance general.
+        info: Diccionario con metadatos y métricas del ticker.
+
+    Returns:
+        Diccionario con las siguientes claves:
+        - ``ocf_hist``        (list[float]): Operating Cash Flow por período (más reciente primero).
+        - ``capex_hist``      (list[float]): CapEx positivo por período.
+        - ``interest_hist``   (list[float]): Interest Expense (absoluto) por período.
+        - ``pretax_hist``     (list[float]): Pre-tax Income por período.
+        - ``taxprov_hist``    (list[float]): Tax Provision por período.
+        - ``total_debt``      (float):       Deuda total más reciente.
+        - ``total_cash``      (float):       Efectivo + equivalentes más reciente.
+        - ``shares_diluted``  (float):       Acciones diluidas en circulación.
+        - ``n_periodos``      (int):         Número de períodos históricos con datos completos.
+    """
+    # ── 1. Operating Cash Flow histórico ────────────────────────────────────
+    ocf_hist: list[float] = []
+    for fila in ["Operating Cash Flow", "OperatingCashFlow",
+                 "Cash Flow From Continuing Operating Activities"]:
+        if isinstance(cf, pd.DataFrame) and not cf.empty and fila in cf.index:
+            try:
+                serie = cf.loc[fila].dropna()
+                if not serie.empty:
+                    ocf_hist = [safe_num(v, 0.0) for v in serie.values]
+                    break
+            except Exception:
+                pass
+    if not ocf_hist:
+        # Fallback escalar desde info
+        ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
+        if ocf_ttm != 0.0:
+            ocf_hist = [ocf_ttm]
+
+    # ── 2. CapEx histórico (normalizado como gasto positivo) ────────────────
+    capex_hist = obtener_capex_historico(cf)
+    if not capex_hist:
+        # Inferir desde FCF y OCF escalares
+        fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
+        ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
+        if ocf_ttm != 0.0 and fcf_ttm != 0.0:
+            capex_hist = [abs(ocf_ttm - fcf_ttm)]
+        else:
+            capex_hist = [0.0]
+
+    # ── 3. Interest Expense histórico (absoluto) ────────────────────────────
+    interest_hist: list[float] = []
+    for fila in ["Interest Expense", "InterestExpense",
+                 "Interest Expense Non Operating"]:
+        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
+            try:
+                serie = inc.loc[fila].dropna()
+                if not serie.empty:
+                    interest_hist = [abs(safe_num(v, 0.0)) for v in serie.values]
+                    break
+            except Exception:
+                pass
+    if not interest_hist:
+        int_scalar = abs(safe_num(info.get("interestExpense", 0.0), 0.0))
+        interest_hist = [int_scalar]
+
+    # ── 4. Pre-tax Income histórico ─────────────────────────────────────────
+    pretax_hist: list[float] = []
+    for fila in ["Pretax Income", "Income Before Tax",
+                 "IncomeBeforeTax", "Pretax Income"]:
+        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
+            try:
+                serie = inc.loc[fila].dropna()
+                if not serie.empty:
+                    pretax_hist = [safe_num(v, 0.0) for v in serie.values]
+                    break
+            except Exception:
+                pass
+    if not pretax_hist:
+        pretax_hist = [safe_num(info.get("pretaxIncome", 0.0), 0.0)]
+
+    # ── 5. Tax Provision histórica ──────────────────────────────────────────
+    taxprov_hist: list[float] = []
+    for fila in ["Tax Provision", "IncomeTaxExpense",
+                 "Income Tax Expense", "Tax Effect Of Unusual Items"]:
+        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
+            try:
+                serie = inc.loc[fila].dropna()
+                if not serie.empty:
+                    taxprov_hist = [safe_num(v, 0.0) for v in serie.values]
+                    break
+            except Exception:
+                pass
+    if not taxprov_hist:
+        taxprov_hist = [safe_num(info.get("taxProvision", 0.0), 0.0)]
+
+    # ── 6. Balance: Deuda Total, Efectivo, Acciones Diluidas ────────────────
+    total_debt = safe_num(info.get("totalDebt", 0.0), 0.0)
+    if total_debt == 0.0:
+        total_debt = _extraer_val_df(bs, [
+            "Total Debt", "TotalDebt", "Long Term Debt",
+            "Long Term Debt And Capital Lease Obligation"
+        ], default=0.0)
+
+    total_cash = safe_num(info.get("totalCash", 0.0), 0.0)
+    if total_cash == 0.0:
+        total_cash = _extraer_val_df(bs, [
+            "Cash And Cash Equivalents",
+            "CashCashEquivalentsAndShortTermInvestments",
+            "Cash Financial", "Cash And Short Term Investments"
+        ], default=0.0)
+
+    # Acciones diluidas: preferir diluted shares sobre basic
+    shares_diluted = safe_num(info.get("sharesOutstanding", 0.0), 0.0)
+    for fila in ["Diluted Average Shares", "Ordinary Shares Number",
+                 "Basic Average Shares"]:
+        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
+            try:
+                val = safe_num(inc.loc[fila].dropna().iloc[0], default=None)
+                if val is not None and val > 0:
+                    shares_diluted = val
+                    break
+            except Exception:
+                pass
+
+    # ── 7. Alinear longitudes de arrays al mínimo disponible ────────────────
+    n_max = max(len(ocf_hist), 1)
+    def _pad(lst: list[float], n: int, fill: float = 0.0) -> list[float]:
+        """Extiende o recorta una lista a `n` elementos con valor `fill`."""
+        if len(lst) >= n:
+            return lst[:n]
+        return lst + [fill] * (n - len(lst))
+
+    ocf_hist    = _pad(ocf_hist,      n_max)
+    capex_hist  = _pad(capex_hist,    n_max)
+    interest_hist = _pad(interest_hist, n_max)
+    pretax_hist = _pad(pretax_hist,   n_max)
+    taxprov_hist = _pad(taxprov_hist, n_max)
+
+    return {
+        "ocf_hist":      ocf_hist,
+        "capex_hist":    capex_hist,
+        "interest_hist": interest_hist,
+        "pretax_hist":   pretax_hist,
+        "taxprov_hist":  taxprov_hist,
+        "total_debt":    total_debt,
+        "total_cash":    total_cash,
+        "shares_diluted": shares_diluted,
+        "n_periodos":    n_max,
+    }

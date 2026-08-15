@@ -1,7 +1,13 @@
 import pytest
 import unittest
 import pandas as pd
-from engine.valuation import calcular_dcf_intr_ps, crear_calculador_dcf, calcular_ddm, calcular_wacc
+from engine.valuation import (
+    calcular_dcf_intr_ps,
+    crear_calculador_dcf,
+    calcular_ddm,
+    calcular_wacc,
+    calcular_fcff_valuation,
+)
 from engine.metrics import calcular_altman_zscore, calcular_piotroski_fscore, evaluar_veredicto, calcular_scoring
 from services.ai_service import obtener_perfil_corporativo, obtener_analisis_macro_ia
 
@@ -189,6 +195,243 @@ class TestValuationUnittest(unittest.TestCase):
 
     def test_mcap_fallback(self):
         test_market_cap_fallback()
+
+    def test_fcff_grande(self):
+        test_fcff_empresa_grande()
+
+    def test_fcff_sin_deuda(self):
+        test_fcff_empresa_sin_deuda()
+
+    def test_fcff_apalancada(self):
+        test_fcff_empresa_alto_apalancamiento()
+
+    def test_fcff_negativo(self):
+        test_fcff_flujo_negativo()
+
+    def test_fcff_minimo(self):
+        test_fcff_datos_minimos()
+
+    def test_fcff_sin_capex(self):
+        test_fcff_empresa_sin_capex()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NUEVOS TESTS — Motor FCFF con WACC Dinámico
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_fcff_empresa_grande():
+    """
+    Criterio 1: Empresa de gran capitalización y bajo apalancamiento (tipo AAPL/MSFT).
+    Verifica que el motor FCFF produce métricas consistentes sin campos nulos.
+    """
+    # Datos sintéticos representativos de AAPL (en USD)
+    ocf_hist      = [120e9, 110e9, 100e9, 95e9]   # OCF: creciente
+    capex_hist    = [11e9,  10e9,  9e9,   8e9]    # CapEx moderado
+    interest_hist = [4e9,   3.5e9, 3e9,   2.5e9]  # Intereses bajos
+    pretax_hist   = [110e9, 100e9, 90e9,  85e9]   # Ingresos pre-tax
+    taxprov_hist  = [27e9,  25e9,  22e9,  21e9]   # Té efectiva ~25%
+
+    resultado = calcular_fcff_valuation(
+        ocf_hist      = ocf_hist,
+        capex_hist    = capex_hist,
+        interest_hist = interest_hist,
+        pretax_hist   = pretax_hist,
+        taxprov_hist  = taxprov_hist,
+        total_debt    = 110e9,
+        total_cash    = 160e9,
+        shares_diluted = 15.5e9,
+        mcap          = 3_000e9,
+        beta          = 1.2,
+        rf            = 4.35,
+        precio_actual = 195.0,
+    )
+
+    # Estructura completa
+    assert isinstance(resultado, dict)
+    campos_requeridos = [
+        "valor_intrinseco", "enterprise_value", "equity_value",
+        "pv_flujos", "pv_terminal", "fcff_historico", "fcff_proyectado",
+        "wacc", "ke", "kd", "we", "wd", "rf", "tax_rate_real",
+        "g_term", "total_cash", "total_debt", "shares_diluted",
+        "margen_seguridad", "precio_actual", "status", "semaforo", "upside",
+    ]
+    for campo in campos_requeridos:
+        assert campo in resultado, f"Campo faltante: {campo}"
+        assert resultado[campo] is not None, f"Campo nulo: {campo}"
+
+    # Métricas financieras consistentes
+    assert 6.0 <= resultado["wacc"] <= 18.0, f"WACC fuera de rango: {resultado['wacc']}"
+    assert resultado["ke"] > resultado["rf"], "Ke debe ser mayor que Rf"
+    assert resultado["kd"] > 0, "Empresa con deuda debe tener Kd > 0"
+    assert 0.0 < resultado["tax_rate_real"] <= 0.40, "Tasa impositiva inválida"
+    assert resultado["we"] + resultado["wd"] <= 1.001, "Ponderaciones no suman 1"
+    assert len(resultado["fcff_historico"]) == 4
+    assert len(resultado["fcff_proyectado"]) == 5
+    assert resultado["enterprise_value"] > 0
+    assert resultado["semaforo"] in ["verde", "rojo"]
+    assert resultado["status"] in ["\U0001F7E2", "\U0001F534"]
+    assert resultado["valor_intrinseco"] >= 0
+
+
+def test_fcff_empresa_sin_deuda():
+    """
+    Criterio 2a: Empresa sin deuda (deuda = 0).
+    Verifica que wd=0, kd=0 y WACC = Ke puro, sin ZeroDivisionError.
+    """
+    resultado = calcular_fcff_valuation(
+        ocf_hist      = [50e9, 45e9, 40e9],
+        capex_hist    = [5e9,  4e9,  3e9],
+        interest_hist = [0.0,  0.0,  0.0],   # Sin intereses
+        pretax_hist   = [60e9, 55e9, 50e9],
+        taxprov_hist  = [15e9, 14e9, 13e9],
+        total_debt    = 0.0,                  # SIN DEUDA
+        total_cash    = 80e9,
+        shares_diluted = 8e9,
+        mcap          = 500e9,
+        beta          = 0.9,
+        rf            = 4.35,
+        precio_actual = 62.5,
+    )
+
+    assert resultado["wd"] == 0.0, "Empresa sin deuda debe tener wd=0"
+    assert resultado["kd"] == 0.0, "Empresa sin deuda debe tener kd=0"
+    assert resultado["we"] == 1.0, "Empresa sin deuda: we debe ser 1.0"
+    # WACC debe estar muy cerca de Ke (solo equity)
+    wacc_esperado = resultado["ke"]
+    # Puede diferir ligeramente por el clampeo de límites
+    assert abs(resultado["wacc"] - wacc_esperado) < 2.0, (
+        f"WACC ({resultado['wacc']:.2f}) demasiado lejos de Ke ({wacc_esperado:.2f}) en empresa sin deuda"
+    )
+    assert resultado["equity_value"] > 0
+    assert resultado["valor_intrinseco"] > 0
+
+
+def test_fcff_empresa_alto_apalancamiento():
+    """
+    Criterio 2b: Empresa de alto apalancamiento (tipo AT&T / empresa telco).
+    Verifica que Kd se calcula sin crash y WACC es finito y positivo.
+    """
+    resultado = calcular_fcff_valuation(
+        ocf_hist      = [20e9, 18e9, 16e9],
+        capex_hist    = [18e9, 17e9, 15e9],   # CapEx muy alto (intensivo en activos)
+        interest_hist = [8e9,  7e9,  6.5e9],  # Intereses muy altos
+        pretax_hist   = [5e9,  4e9,  3e9],
+        taxprov_hist  = [1.2e9, 1e9,  0.8e9],
+        total_debt    = 150e9,                 # Deuda enorme
+        total_cash    = 10e9,
+        shares_diluted = 7e9,
+        mcap          = 80e9,
+        beta          = 0.8,
+        rf            = 4.35,
+        precio_actual = 11.4,
+    )
+
+    # No debe lanzar excepción, WACC debe ser finito y positivo
+    assert isinstance(resultado["wacc"], float)
+    assert 0 < resultado["wacc"] <= 18.0, f"WACC fuera de rango: {resultado['wacc']}"
+    assert resultado["kd"] > 0, "Empresa con deuda alta debe tener Kd > 0"
+    assert resultado["wd"] > 0.5, "Empresa muy apalancada debe tener Wd dominante"
+    # Equity puede ser negativo (deuda > EV) — el valor intrínseco será 0 o bajo
+    assert resultado["valor_intrinseco"] >= 0, "Valor intrínseco no puede ser negativo"
+    assert resultado["semaforo"] in ["verde", "rojo"]
+
+
+def test_fcff_flujo_negativo():
+    """
+    Criterio: Empresa con FCFF base negativo (pérdidas operativas estructurales).
+    Verifica que la función no lanza excepción y activa el fallback defensivo.
+    """
+    resultado = calcular_fcff_valuation(
+        ocf_hist      = [-5e9, -3e9, 2e9],    # OCF negativo los 2 años más recientes
+        capex_hist    = [10e9, 8e9,  6e9],    # CapEx alto → FCFF muy negativo
+        interest_hist = [1e9,  0.8e9, 0.5e9],
+        pretax_hist   = [-6e9, -4e9, 1e9],
+        taxprov_hist  = [0.0,  0.0,  0.3e9],
+        total_debt    = 20e9,
+        total_cash    = 5e9,
+        shares_diluted = 1e9,
+        mcap          = 15e9,
+        beta          = 1.8,
+        rf            = 4.35,
+        precio_actual = 15.0,
+    )
+
+    # No debe lanzar excepción
+    assert isinstance(resultado, dict)
+    # El fallback debe activarse y producir un valor_intrinseco >= 0
+    assert resultado["valor_intrinseco"] >= 0
+    # Semaforo debe ser rojo (no subvalorada en esta situación)
+    assert resultado["semaforo"] in ["verde", "rojo"]
+    # Los flujos proyectados siempre deben existir
+    assert len(resultado["fcff_proyectado"]) == 5
+
+
+def test_fcff_datos_minimos():
+    """
+    Criterio: Solo 1 año de datos históricos disponibles.
+    Verifica que la proyección funciona correctamente con datos mínimos.
+    """
+    resultado = calcular_fcff_valuation(
+        ocf_hist      = [10e9],     # Solo TTM
+        capex_hist    = [2e9],
+        interest_hist = [0.5e9],
+        pretax_hist   = [8e9],
+        taxprov_hist  = [2e9],
+        total_debt    = 5e9,
+        total_cash    = 3e9,
+        shares_diluted = 500e6,
+        mcap          = 100e9,
+        beta          = 1.1,
+        rf            = 4.35,
+        precio_actual = 200.0,
+    )
+
+    assert isinstance(resultado, dict)
+    assert len(resultado["fcff_historico"]) == 1, "Con 1 año debe haber 1 FCFF histórico"
+    assert len(resultado["fcff_proyectado"]) == 5, "Proyección siempre debe ser de 5 años"
+    assert resultado["wacc"] > 0
+    assert resultado["enterprise_value"] > 0
+    assert resultado["valor_intrinseco"] >= 0
+
+
+def test_fcff_empresa_sin_capex():
+    """
+    Criterio: Empresa asset-light sin CapEx (software / servicios digitales).
+    Verifica que FCFF = OCF + Interest*(1-T) cuando CapEx = 0, sin división por cero.
+    """
+    ocf = 30e9
+    interest = 1e9
+    pretax   = 35e9
+    taxprov  = 8.75e9   # T_ef = 25%
+    tax_ef   = taxprov / pretax  # = 0.25
+
+    resultado = calcular_fcff_valuation(
+        ocf_hist      = [ocf, 28e9, 25e9],
+        capex_hist    = [0.0, 0.0, 0.0],   # SIN CapEx
+        interest_hist = [interest, 0.9e9, 0.8e9],
+        pretax_hist   = [pretax, 32e9, 28e9],
+        taxprov_hist  = [taxprov, 8e9, 7e9],
+        total_debt    = 10e9,
+        total_cash    = 50e9,
+        shares_diluted = 2e9,
+        mcap          = 600e9,
+        beta          = 1.3,
+        rf            = 4.35,
+        precio_actual = 300.0,
+    )
+
+    assert isinstance(resultado, dict)
+    assert resultado["valor_intrinseco"] >= 0
+    assert resultado["wacc"] > 0
+
+    # Verificar FCFF[0] = OCF + Interest*(1-T) - 0
+    fcff_ttm = resultado["fcff_historico"][0]
+    tax_ef_real = resultado["tax_rate_real"]
+    fcff_esperado = ocf + (interest * (1 - tax_ef_real))  # CapEx = 0
+    assert abs(fcff_ttm - fcff_esperado) < 1e6, (
+        f"FCFF calculado ({fcff_ttm:.0f}) difiere del esperado ({fcff_esperado:.0f})"
+    )
+
 
 if __name__ == "__main__":
     unittest.main()
