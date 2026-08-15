@@ -621,3 +621,181 @@ def extraer_componentes_fcff(
         "shares_diluted": shares_diluted,
         "n_periodos":    n_max,
     }
+
+
+def extraer_metricas_ttm(
+    info: dict,
+    inc: pd.DataFrame,
+    bs: pd.DataFrame,
+    cf: pd.DataFrame,
+    precio_actual: float = 0.0,
+) -> dict:
+    """
+    Extrae, normaliza y consolida todas las métricas y cifras de los estados financieros
+    en base a los últimos 12 meses (TTM) y balance consolidado más reciente, alineado
+    a la metodología institucional (Finviz, Yahoo Finance, Investing.com).
+
+    Garantiza:
+    - FCF TTM = OCF TTM - |CapEx TTM| (sin descalces de signos).
+    - Acciones diluidas consolidadas para evitar distorsiones con tickers multiclase.
+    - Manejo seguro de campos nulos o no disponibles.
+    """
+    # ── 1. Acciones y Market Cap ─────────────────────────────────────────────
+    shares_diluted = safe_num(info.get("impliedSharesOutstanding", 0.0), 0.0)
+    if shares_diluted <= 0:
+        shares_diluted = _extraer_val_df(inc, [
+            "Diluted Average Shares", "Ordinary Shares Number", "Basic Average Shares"
+        ], default=0.0)
+    if shares_diluted <= 0:
+        shares_diluted = safe_num(info.get("sharesOutstanding", 0.0), 0.0)
+    if shares_diluted <= 0:
+        shares_diluted = safe_num(info.get("floatShares", 0.0), 0.0)
+
+    mcap = safe_num(info.get("marketCap", 0.0), 0.0)
+    if mcap <= 0 and precio_actual > 0 and shares_diluted > 0:
+        mcap = shares_diluted * precio_actual
+    if shares_diluted <= 0 and mcap > 0 and precio_actual > 0:
+        shares_diluted = mcap / precio_actual
+
+    # ── 2. Estado de Resultados TTM ──────────────────────────────────────────
+    revenue_ttm = safe_num(info.get("totalRevenue", 0.0), 0.0)
+    if revenue_ttm <= 0:
+        revenue_ttm = _extraer_val_df(inc, ["Total Revenue", "TotalRevenue", "Revenue"], default=0.0)
+
+    gross_profit_ttm = safe_num(info.get("grossProfits", 0.0), 0.0)
+    if gross_profit_ttm <= 0:
+        gross_profit_ttm = _extraer_val_df(inc, ["Gross Profit", "GrossProfit"], default=0.0)
+
+    operating_income_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
+    if operating_income_ttm == 0.0:
+        operating_income_ttm = _extraer_val_df(inc, ["Operating Income", "OperatingIncome", "EBIT"], default=0.0)
+
+    ebitda_ttm = safe_num(info.get("ebitda", 0.0), 0.0)
+    if ebitda_ttm <= 0:
+        ebitda_ttm = _extraer_val_df(inc, ["EBITDA", "Normalized EBITDA"], default=0.0)
+    if ebitda_ttm <= 0 and operating_income_ttm > 0:
+        ebitda_ttm = operating_income_ttm * 1.15
+
+    net_income_ttm = safe_num(info.get("netIncomeToCommon", 0.0), 0.0)
+    if net_income_ttm == 0.0:
+        net_income_ttm = safe_num(info.get("netIncome", 0.0), 0.0)
+    if net_income_ttm == 0.0:
+        net_income_ttm = _extraer_val_df(inc, [
+            "Net Income Common Stockholders", "Net Income", "NetIncome"
+        ], default=0.0)
+
+    eps_diluted_ttm = safe_num(info.get("trailingEps", 0.0), 0.0)
+    if eps_diluted_ttm == 0.0 and shares_diluted > 0 and net_income_ttm != 0.0:
+        eps_diluted_ttm = net_income_ttm / shares_diluted
+
+    forward_eps = safe_num(info.get("forwardEps", 0.0), 0.0)
+
+    pretax_income_ttm = safe_num(info.get("pretaxIncome", 0.0), 0.0)
+    if pretax_income_ttm == 0.0:
+        pretax_income_ttm = _extraer_val_df(inc, ["Pretax Income", "Income Before Tax", "IncomeBeforeTax"], default=0.0)
+
+    tax_provision_ttm = safe_num(info.get("taxProvision", 0.0), 0.0)
+    if tax_provision_ttm == 0.0:
+        tax_provision_ttm = _extraer_val_df(inc, ["Tax Provision", "IncomeTaxExpense", "Income Tax Expense"], default=0.0)
+
+    interest_expense_ttm = abs(safe_num(info.get("interestExpense", 0.0), 0.0))
+    if interest_expense_ttm == 0.0:
+        interest_expense_ttm = abs(_extraer_val_df(inc, ["Interest Expense", "InterestExpense"], default=0.0))
+
+    # ── 3. Flujo de Caja TTM ─────────────────────────────────────────────────
+    ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
+    if ocf_ttm == 0.0:
+        ocf_ttm = _extraer_val_df(cf, [
+            "Operating Cash Flow", "OperatingCashFlow",
+            "Cash Flow From Continuing Operating Activities"
+        ], default=0.0)
+
+    capex_list = obtener_capex_historico(cf)
+    capex_ttm = capex_list[0] if capex_list else 0.0
+    if capex_ttm == 0.0:
+        capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0), 0.0))
+
+    # FCF TTM = OCF - CapEx (estrictamente normalizado)
+    fcf_ttm = ocf_ttm - capex_ttm
+    if fcf_ttm == 0.0 and ocf_ttm == 0.0:
+        fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
+
+    # ── 4. Balance Consolidado ───────────────────────────────────────────────
+    total_debt = safe_num(info.get("totalDebt", 0.0), 0.0)
+    if total_debt == 0.0:
+        total_debt = _extraer_val_df(bs, [
+            "Total Debt", "TotalDebt", "Long Term Debt",
+            "Long Term Debt And Capital Lease Obligation"
+        ], default=0.0)
+
+    total_cash = safe_num(info.get("totalCash", 0.0), 0.0)
+    if total_cash == 0.0:
+        total_cash = _extraer_val_df(bs, [
+            "Cash And Cash Equivalents",
+            "CashCashEquivalentsAndShortTermInvestments",
+            "Cash Financial", "Cash And Short Term Investments"
+        ], default=0.0)
+
+    total_equity = safe_num(info.get("totalStockholderEquity", 0.0), 0.0)
+    if total_equity == 0.0:
+        total_equity = _extraer_val_df(bs, [
+            "Total Stockholder Equity", "Stockholders Equity",
+            "TotalStockholderEquity", "Common Stock Equity"
+        ], default=0.0)
+
+    total_assets = safe_num(info.get("totalAssets", 0.0), 0.0)
+    if total_assets == 0.0:
+        total_assets = _extraer_val_df(bs, ["Total Assets", "TotalAssets", "Total Assets Net"], default=0.0)
+
+    current_assets = safe_num(info.get("totalCurrentAssets", 0.0), 0.0)
+    if current_assets == 0.0:
+        current_assets = _extraer_val_df(bs, ["Total Current Assets", "Current Assets", "CurrentAssets"], default=0.0)
+
+    current_liabilities = safe_num(info.get("totalCurrentLiabilities", 0.0), 0.0)
+    if current_liabilities == 0.0:
+        current_liabilities = _extraer_val_df(bs, ["Total Current Liabilities", "Current Liabilities", "CurrentLiabilities"], default=0.0)
+
+    short_term_debt = _extraer_val_df(bs, [
+        "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt"
+    ], default=0.0)
+
+    # ── 5. Crecimiento y Consenso ────────────────────────────────────────────
+    earnings_growth = safe_num(info.get("earningsGrowth", 0.0), 0.0)
+    revenue_growth = safe_num(info.get("revenueGrowth", 0.0), 0.0)
+    peg_ratio_info = safe_num(info.get("pegRatio", 0.0), 0.0)
+    beta = safe_num(info.get("beta", 1.0), 1.0)
+    short_percent_of_float = safe_num(info.get("shortPercentOfFloat", 0.0), 0.0)
+    target_mean_price = safe_num(info.get("targetMeanPrice", 0.0), 0.0)
+
+    return {
+        "shares_diluted": shares_diluted,
+        "mcap": mcap,
+        "revenue_ttm": revenue_ttm,
+        "gross_profit_ttm": gross_profit_ttm,
+        "operating_income_ttm": operating_income_ttm,
+        "ebitda_ttm": ebitda_ttm,
+        "net_income_ttm": net_income_ttm,
+        "eps_diluted_ttm": eps_diluted_ttm,
+        "forward_eps": forward_eps,
+        "pretax_income_ttm": pretax_income_ttm,
+        "tax_provision_ttm": tax_provision_ttm,
+        "interest_expense_ttm": interest_expense_ttm,
+        "ocf_ttm": ocf_ttm,
+        "capex_ttm": capex_ttm,
+        "fcf_ttm": fcf_ttm,
+        "total_debt": total_debt,
+        "total_cash": total_cash,
+        "net_debt": total_debt - total_cash,
+        "total_equity": total_equity,
+        "total_assets": total_assets,
+        "current_assets": current_assets,
+        "current_liabilities": current_liabilities,
+        "short_term_debt": short_term_debt,
+        "earnings_growth": earnings_growth,
+        "revenue_growth": revenue_growth,
+        "peg_ratio_info": peg_ratio_info,
+        "beta": beta,
+        "short_percent_of_float": short_percent_of_float,
+        "target_mean_price": target_mean_price,
+    }
+

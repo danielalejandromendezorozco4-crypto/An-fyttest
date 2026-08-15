@@ -26,11 +26,15 @@ from data.financial_fetcher import (
     obtener_noticias_financieras,
     obtener_tasa_fred,
     extraer_componentes_fcff,
+    extraer_metricas_ttm,
     obtener_rf_tnx,
 )
 from engine.metrics import (
     calcular_altman_zscore,
     calcular_piotroski_fscore,
+    calcular_multiplos_valuacion,
+    calcular_ratios_rentabilidad,
+    calcular_ratios_solvencia,
     calcular_scoring,
     evaluar_veredicto,
 )
@@ -199,31 +203,16 @@ else:
                 st.error("❌ Ticker no encontrado o problemas de conexión con el proveedor financiero. Verifica el símbolo ingresado.")
                 st.stop()
 
-            # --- MÓDULO 1: SOLVENCIA Y DEUDA (15%) ---
-            mcap = safe_get(info, ["marketCap", "mktCap", "regularMarketMarketCap"], 0.0)
-            shares_current = safe_get(info, ["sharesOutstanding", "impliedSharesOutstanding", "floatShares"], 0.0)
-
-            if mcap <= 0 and shares_current > 0 and precio_actual > 0:
-                mcap = shares_current * precio_actual
-
-            if mcap <= 0 and not inc.empty and 'Basic Average Shares' in inc.index:
-                try:
-                    sh_val = inc.loc['Basic Average Shares'].iloc[0]
-                    if not pd.isna(sh_val) and float(sh_val) > 0:
-                        shares_current = float(sh_val)
-                        mcap = shares_current * precio_actual
-                except Exception:
-                    pass
-
-            if mcap <= 0 and precio_actual > 0:
-                mcap = 10_000_000_000.0 # Fallback neutro 10B USD para evitar castigos Small Cap falsos en Mega Caps
-
+            # --- EXTRACCIÓN Y NORMALIZACIÓN INSTITUCIONAL TTM ---
+            m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual)
+            mcap = m_ttm["mcap"]
+            shares_current = m_ttm["shares_diluted"]
             if shares_current <= 0:
                 shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 1.0
 
             # EVALUACIÓN DE INTEGRIDAD DE DATOS (Solo marca incompleto si faltan insumos críticos de valuación)
-            net_income_val = safe_get(info, ["netIncomeToCommon", "netIncome"], 0.0)
-            op_cash_val = safe_get(info, ["operatingCashflow", "freeCashflow"], 0.0)
+            net_income_val = m_ttm["net_income_ttm"]
+            op_cash_val = m_ttm["ocf_ttm"]
 
             datos_completos = True
             if mcap <= 0 or (net_income_val == 0.0 and op_cash_val == 0.0 and (inc.empty and bs.empty)):
@@ -279,108 +268,103 @@ else:
             is_fibra_util = sector in ["Real Estate", "Utilities", "Communication Services"]
             is_asset_light = sector in ["Technology", "Communication Services", "Financial Services"]
             
-            total_debt = safe_get(info, ["totalDebt"], 0.0)
-            total_cash = safe_get(info, ["totalCash"], 0.0)
-            ebitda = safe_get(info, ["ebitda"], 1.0)
-            net_debt = total_debt - total_cash
-            
-            net_cash_per_share = (total_cash - total_debt) / shares_current if shares_current > 0 else 0.0
-            val_ncps_str = f"${net_cash_per_share:,.2f}" if net_cash_per_share > 0 else f"-${abs(net_cash_per_share):,.2f}"
-            col_ncps = "🟢" if net_cash_per_share > 0 else "🔴"
-            msg_ncps = f"Caja Neta Positiva de {val_ncps_str} por acción." if net_cash_per_share > 0 else f"Deuda Neta de {val_ncps_str} por acción."
-            
-            fcf_ttm = safe_get(info, ["freeCashflow", "operatingCashflow"], 0.0)
-            fcf_debt_ratio = (fcf_ttm / total_debt * 100) if total_debt > 0 else (100.0 if fcf_ttm > 0 else 0.0)
-            if fcf_debt_ratio >= 25.0: col_fcfd, msg_fcfd = "🟢", f"Excelente Cobertura: El FCF paga el {fcf_debt_ratio:.1f}% de toda la deuda en un solo año."
-            elif fcf_debt_ratio >= 10.0: col_fcfd, msg_fcfd = "🟡", f"Cobertura Moderada: El FCF paga el {fcf_debt_ratio:.1f}% de la deuda total."
-            else: col_fcfd, msg_fcfd = "🔴", f"Cobertura Débil: El FCF cubre solo el {fcf_debt_ratio:.1f}% de la deuda total."
-            net_debt_ebitda = (net_debt / ebitda) if ebitda != 0 else 99
-            nde_lim = (3.0, 4.5) if is_fibra_util else (1.5, 2.5)
-            if net_debt < 0:
-                col_nde, msg_nde, val_nde = "🟢", "Caja Neta Positiva: Cuenta con más efectivo que toda su deuda.", f"{net_debt_ebitda:.2f}x"
-            elif net_debt_ebitda <= nde_lim[0]: col_nde, msg_nde, val_nde = "🟢", "Apalancamiento muy sano.", f"{net_debt_ebitda:.2f}x"
-            elif net_debt_ebitda <= nde_lim[1]: col_nde, msg_nde, val_nde = "🟡", "Apalancamiento moderado/aceptable.", f"{net_debt_ebitda:.2f}x"
-            else: col_nde, msg_nde, val_nde = "🔴", "Alto nivel de deuda neta estructural.", f"{net_debt_ebitda:.2f}x"
-            int_exp = abs(safe_get(info, ["interestExpense"], 0.0))
-            ebit = safe_get(info, ["operatingIncome", "ebitda"], ebitda)
-            
-            if int_exp <= 1:
-                cob_int = 999.0
-                col_cob, msg_cob, val_cob = "🟢", "Gastos por intereses nulos o mínimos.", "N/A"
-            else:
-                cob_int = ebit / int_exp
-                if cob_int > 10.0: col_cob, msg_cob, val_cob = "🟢", "Cubre holgadamente sus intereses.", f"{cob_int:.1f}x"
-                elif cob_int >= 4.0: col_cob, msg_cob, val_cob = "🟡", "Cobertura de intereses dentro del promedio.", f"{cob_int:.1f}x"
-                else: col_cob, msg_cob, val_cob = "🔴", "Peligro: El flujo operativo apenas cubre los intereses.", f"{cob_int:.1f}x"
-            cur_ratio = safe_get(info, ["currentRatio"], 1.2)
-            msg_cur_alerta = ""
-            if cur_ratio > 2.5: col_cur, msg_cur = "🟢", "Excelente liquidez, pero posible exceso de capital ocioso."
-            elif cur_ratio >= 1.2: col_cur, msg_cur = "🟢", "Liquidez óptima a corto plazo."
-            elif cur_ratio >= 0.9:
-                col_cur, msg_cur = "🟡", "Liquidez moderada dentro del rango aceptable."
-                if cur_ratio < 1.0: msg_cur_alerta = f"⚠️ Alerta de Liquidez: La Razón Corriente se ubica en {cur_ratio:.2f}x."
-            else: col_cur, msg_cur = "🔴", "Problemas de liquidez a corto plazo."
-                
-            debt_eq = safe_get(info, ["debtToEquity"], 0.0) / 100
-            total_eq = safe_get(info, ["totalStockholderEquity"], 1.0)
-            op_cf = safe_get(info, ["operatingCashflow"], 0.0)
-            
-            if total_eq < 0:
-                if fcf_ttm > 0 and op_cf > 0: col_de, msg_de, val_de = "🟡", "Patrimonio negativo por recompra masiva de acciones.", "Patr. Negativo"
-                else: col_de, msg_de, val_de = "🔴", "Patrimonio negativo por acumulación de pérdidas.", "Insolvencia"
-            else:
-                if debt_eq < 0.8: col_de, msg_de, val_de = "🟢", "Bajo Apalancamiento contra capital.", f"{debt_eq:.2f}x"
-                elif debt_eq <= 1.5: col_de, msg_de, val_de = "🟡", "Apalancamiento Moderado.", f"{debt_eq:.2f}x"
-                else: col_de, msg_de, val_de = "🔴", "Apalancamiento Elevado.", f"{debt_eq:.2f}x"
+            # --- MÓDULO 1: SOLVENCIA Y DEUDA (15%) ---
+            total_debt = m_ttm["total_debt"]
+            total_cash = m_ttm["total_cash"]
+            ebitda = m_ttm["ebitda_ttm"]
+            ebit = m_ttm["operating_income_ttm"]
+            int_exp = m_ttm["interest_expense_ttm"]
+            total_eq = m_ttm["total_equity"]
+            cur_assets = m_ttm["current_assets"]
+            cur_liab = m_ttm["current_liabilities"]
+            fcf_ttm = m_ttm["fcf_ttm"]
+
+            res_solv = calcular_ratios_solvencia(
+                total_debt=total_debt,
+                total_cash=total_cash,
+                total_equity=total_eq,
+                ebitda_ttm=ebitda,
+                ebit_ttm=ebit,
+                interest_expense=int_exp,
+                current_assets=cur_assets,
+                current_liabilities=cur_liab,
+                fcf_ttm=fcf_ttm,
+                shares_current=shares_current,
+                is_fibra_util=is_fibra_util,
+            )
+
+            net_debt = res_solv["net_debt"]
+            net_debt_ebitda = res_solv["net_debt_ebitda"]
+            val_nde = res_solv["val_nde"]
+            col_nde = res_solv["col_nde"]
+            msg_nde = res_solv["msg_nde"]
+
+            cob_int = res_solv["cob_int"]
+            val_cob = res_solv["val_cob"]
+            col_cob = res_solv["col_cob"]
+            msg_cob = res_solv["msg_cob"]
+
+            cur_ratio = res_solv["cur_ratio"]
+            val_cur = res_solv["val_cur"]
+            col_cur = res_solv["col_cur"]
+            msg_cur = res_solv["msg_cur"]
+            msg_cur_alerta = res_solv["msg_cur_alerta"]
+
+            debt_eq = res_solv["debt_eq"]
+            val_de = res_solv["val_de"]
+            col_de = res_solv["col_de"]
+            msg_de = res_solv["msg_de"]
+
+            fcf_debt_ratio = res_solv["fcf_debt_ratio"]
+            col_fcfd = res_solv["col_fcfd"]
+            msg_fcfd = res_solv["msg_fcfd"]
+
+            net_cash_per_share = res_solv["net_cash_per_share"]
+            val_ncps_str = res_solv["val_ncps_str"]
+            col_ncps = res_solv["col_ncps"]
+            msg_ncps = res_solv["msg_ncps"]
                 
             # --- MÓDULO 2: RENTABILIDAD Y EFICIENCIA (25%) ---
-            net_income = safe_get(info, ["netIncomeToCommon"], 0.0)
-            total_assets_val = safe_get(info, ["totalAssets"], 1.0)
-
-            roe = safe_get(info, ["returnOnEquity"], 0.0) * 100
-            if roe == 0.0 and net_income != 0.0 and total_eq > 0:
-                roe = (net_income / total_eq) * 100
-
-            roa = safe_get(info, ["returnOnAssets"], 0.0) * 100
-            if roa == 0.0 and net_income != 0.0 and total_assets_val > 0:
-                roa = (net_income / total_assets_val) * 100
-
-            mg_op = safe_get(info, ["operatingMargins"], 0.0) * 100
-            
-            ebt = safe_get(info, ["pretaxIncome"], 1.0)
-            tax_exp = safe_get(info, ["taxProvision"], 0.0)
+            net_income = m_ttm["net_income_ttm"]
+            total_assets_val = m_ttm["total_assets"]
+            rev_ttm = m_ttm["revenue_ttm"]
+            gross_prof_ttm = m_ttm["gross_profit_ttm"]
+            sh_debt = m_ttm["short_term_debt"]
+            ebt = m_ttm["pretax_income_ttm"]
+            tax_exp = m_ttm["tax_provision_ttm"]
             tax_rate = min(max(tax_exp / ebt, 0.0), 0.35) if ebt > 0 else 0.21
-            nopat = ebit * (1 - tax_rate)
-            
-            def get_bs_val(metric):
-                if not bs.empty and metric in bs.index:
-                    val = bs.loc[metric].iloc[0]
-                    return val if not pd.isna(val) else 0
-                return 0
-            ta = get_bs_val('Total Assets') or total_assets_val
-            cl = get_bs_val('Current Liabilities') or safe_get(info, ["totalCurrentLiabilities"], 0.0)
-            short_term_debt = max(get_bs_val('Current Debt'), get_bs_val('Current Debt And Capital Lease Obligation'))
-            
-            op_cl = max(cl - short_term_debt, 0)
-            invested_capital_op = ta - op_cl
-            if invested_capital_op <= 0:
-                invested_capital_op = max(ta * 0.6, total_eq + total_debt - total_cash, 1.0)
 
-            roic = (nopat / invested_capital_op) * 100 if invested_capital_op > 0 else (roe * 0.85)
-            roic = min(max(roic, -50.0), 95.0) # Acotar ROIC a límites financieros realistas (-50% a 95%)
+            res_rent = calcular_ratios_rentabilidad(
+                revenue_ttm=rev_ttm,
+                gross_profit_ttm=gross_prof_ttm,
+                operating_income_ttm=ebit,
+                net_income_ttm=net_income,
+                total_assets=total_assets_val,
+                total_equity=total_eq,
+                total_debt=total_debt,
+                total_cash=total_cash,
+                current_liabilities=cur_liab,
+                short_term_debt=sh_debt,
+                tax_rate=tax_rate,
+                is_asset_light=is_asset_light,
+            )
 
-            if roic > 20: col_roic, msg_roic = "🟢", "Alta Calidad: Ventaja competitiva clara."
-            elif roic >= 12: col_roic, msg_roic = "🟡", "Retorno sobre el capital aceptable."
-            else: col_roic, msg_roic = "🔴", "Posible destrucción de valor operativo."
-            if total_eq < 0: col_roe, msg_roe, val_roe = "⚪", "ROE No Aplicable (Patrimonio Negativo).", "N/A"
-            else:
-                if roe > 20: col_roe, msg_roe, val_roe = "🟢", "Excelente rentabilidad sobre capital propio.", f"{roe:.1f}%"
-                elif roe >= 10: col_roe, msg_roe, val_roe = "🟡", "Rendimiento aceptable.", f"{roe:.1f}%"
-                else: col_roe, msg_roe, val_roe = "🔴", "Rendimiento deficiente.", f"{roe:.1f}%"
-            if is_asset_light and roa > 15: col_roa, msg_roa = "🟢", "Modelo Asset-Light Sobresaliente."
-            elif roa > 8: col_roa, msg_roa = "🟢", "Alta Eficiencia en Uso de Recursos."
-            elif roa >= 4: col_roa, msg_roa = "🟡", "Eficiencia Moderada."
-            else: col_roa, msg_roa = "🔴", "Baja Eficiencia de Activos."
+            mg_op = res_rent["mg_op"]
+            roe = res_rent["roe"]
+            val_roe = res_rent["val_roe"]
+            col_roe = res_rent["col_roe"]
+            msg_roe = res_rent["msg_roe"]
+
+            roa = res_rent["roa"]
+            col_roa = res_rent["col_roa"]
+            msg_roa = res_rent["msg_roa"]
+
+            roic = res_rent["roic"]
+            col_roic = res_rent["col_roic"]
+            msg_roic = res_rent["msg_roic"]
+            nopat = res_rent["nopat"]
+            invested_capital_op = res_rent["invested_capital"]
+
             divergencia_roa = "⚠️ Alerta de Apalancamiento: Brecha extrema entre ROE y ROA." if (roa > 0 and (roe / roa) > 4.0) else ""
             
             fcf_conv = (fcf_ttm / net_income) if net_income != 0 else 0.0
@@ -389,7 +373,7 @@ else:
             else: col_fcfc, msg_fcfc = "🔴", "Baja conversión contable a flujo de caja."
             
             alerta_fcf_calidad = f"⚠️ Alerta de Calidad de Flujo: Convierte solo el {fcf_conv*100:.1f}% de utilidades en FCF." if (fcf_conv < 0.8 and net_income > 0) else ""
-            eps_growth = safe_get(info, ["earningsGrowth"], 0.0) * 100
+            eps_growth = m_ttm["earnings_growth"] * 100.0 if m_ttm["earnings_growth"] < 1.0 else m_ttm["earnings_growth"]
             ni_growth = safe_get(info, ["netIncomeGrowth"], eps_growth/100) * 100
             msg_eps = ""
             if eps_growth > 10 and ni_growth < 3: col_eps, msg_eps = "🟡", "Alerta: EPS impulsado por recompra de acciones."
@@ -411,7 +395,7 @@ else:
             else: col_fcfy, msg_fcfy = "🔴", f"Rendimiento Exigente ({fcf_yield:.2f}% vs FRED {tasa_libre_riesgo:.2f}%)."
             
             # --- MÓDULO 3: VALUACIÓN, FCFF Y DDM (40%) ---
-            beta = safe_get(info, ["beta"], 1.0)
+            beta = m_ttm["beta"]
             res_wacc = calcular_wacc(tasa_libre_riesgo, beta, mcap, total_debt, int_exp, fmp_key, fred_key, tax_rate, ticker_input)
             ke, kd, wacc, we, wd = res_wacc["ke"], res_wacc["kd"], res_wacc["wacc"], res_wacc["we"], res_wacc["wd"]
 
@@ -441,11 +425,11 @@ else:
             kd_fcff     = res_fcff["kd"]
 
             # ── DCF simplificado (mantener para compatibilidad de scoring y PDF) ──
-            g_1_5 = min(max(safe_get(info, ["earningsGrowth"], safe_get(info, ["revenueGrowth"], 0.08)) * 0.85, 0.04), 0.18)
+            g_1_5 = min(max(m_ttm["earnings_growth"] * 0.85 if m_ttm["earnings_growth"] > 0 else (m_ttm["revenue_growth"] * 0.85 if m_ttm["revenue_growth"] > 0 else 0.08), 0.04), 0.18)
             g_term = 0.025 if 0.025 < (wacc/100) else (wacc/100) - 0.015
 
+            eps_ttm = m_ttm["eps_diluted_ttm"]
             fcf_base_per_share = (fcf_ttm / shares_current) if shares_current > 0 else 0
-            eps_ttm = net_income / shares_current if shares_current > 0 else 0
             flujo_por_accion = max(fcf_base_per_share, eps_ttm * 0.85) or (precio_actual * 0.035)
 
             calcular_dcf_fn = crear_calculador_dcf(flujo_por_accion, g_1_5, precio_actual, eps_ttm, total_cash, total_debt, shares_current)
@@ -462,24 +446,50 @@ else:
             mostrar_ddm = (div_rate > 0 and (div_yield >= 1.8 or is_fibra_util))
             v_intr = v_intr_dcf
                 
-            pe = (precio_actual / eps_ttm) if eps_ttm > 0 else safe_get(info, ["trailingPE"], 0.0)
-            p_fcf = (mcap / fcf_ttm) if fcf_ttm != 0 else 0.0
-            ev_ebitda = ((mcap + total_debt - total_cash) / ebitda) if ebitda > 0 else 0.0
-            peg = safe_get(info, ["pegRatio"], 0.0)
-            target = safe_get(info, ["targetMeanPrice"], 0.0)
+            # ── Múltiplos de Valuación Estandarizados (Finviz / Yahoo Finance) ──
+            res_mult = calcular_multiplos_valuacion(
+                precio_actual=precio_actual,
+                mcap=mcap,
+                eps_ttm=eps_ttm,
+                forward_eps=m_ttm["forward_eps"],
+                fcf_ttm=fcf_ttm,
+                ebitda_ttm=ebitda,
+                total_debt=total_debt,
+                total_cash=total_cash,
+                revenue_ttm=rev_ttm,
+                total_equity=total_eq,
+                peg_info=m_ttm["peg_ratio_info"],
+                earnings_growth=m_ttm["earnings_growth"],
+            )
+
+            pe = res_mult["pe"]
+            col_pe = res_mult["col_pe"]
+            msg_pe = res_mult["msg_pe"]
+
+            p_fcf = res_mult["p_fcf"]
+            col_pfcf = res_mult["col_pfcf"]
+            msg_pfcf = res_mult["msg_pfcf"]
+
+            ev_ebitda = res_mult["ev_ebitda"]
+            col_ev = res_mult["col_ev"]
+            msg_ev = res_mult["msg_ev"]
+
+            peg = res_mult["peg"]
+            col_peg = res_mult["col_peg"]
+            msg_peg = res_mult["msg_peg"]
+
+            p_s = res_mult["p_s"]
+            p_b = res_mult["p_b"]
+
+            target = m_ttm["target_mean_price"]
             upside = (((target - precio_actual) / precio_actual) * 100) if precio_actual != 0 else 0.0
-            
-            col_pfcf, msg_pfcf = ("🟢", "Gran Rendimiento de Caja.") if (0 < p_fcf < 18) else (("🟡", "Valuación de caja moderada.") if p_fcf <= 25 else ("🔴", "Valuación exigente."))
-            col_ev, msg_ev = ("🟢", "Valuación Atractiva.") if (0 < ev_ebitda < 12) else (("🟡", "Valuación Razonable.") if ev_ebitda <= 18 else ("🔴", "Valuación Elevada."))
-            col_peg, msg_peg = ("🟢", "Crecimiento a muy buen precio.") if (0 < peg < 1.2) else (("🟡", "Valuación justa por crecimiento.") if peg <= 2.0 else ("🔴", "Exceso de prima por crecimiento."))
-            col_pe, msg_pe = ("🟢", "Descuento histórico/sectorial.") if (0 < pe < 20) else (("🟡", "Valuación razonable.") if (0 < pe <= 30) else ("🔴", "Sobrevalorada por PER."))
             col_upside = "🟢" if upside > 0 else "🔴"
             col_vintr = "🟢" if v_intr_dcf >= precio_actual else "🔴"
             
             # --- MÓDULO 4: RIESGOS Y SALUD CONTABLE (15%) ---
             res_z = calcular_altman_zscore(debt_eq, roa)
             z_score, col_z, msg_z = res_z["z_score"], res_z["status"], res_z["msg_z"]
-            short_int = safe_get(info, ["shortPercentOfFloat"], 0.0) * 100
+            short_int = m_ttm["short_percent_of_float"] * 100.0 if m_ttm["short_percent_of_float"] < 1.0 else m_ttm["short_percent_of_float"]
             
             col_b, msg_b = ("🟢", "Volatilidad baja (Defensiva).") if beta < 0.8 else (("🟡", "Volatilidad moderada.") if beta <= 1.4 else ("🔴", "Alta volatilidad sistémica."))
             col_s, msg_s = ("🟢", "Bajo interés en corto.") if short_int < 5 else (("🟡", "Posicionamiento en corto moderado.") if short_int <= 10 else ("🔴", "Fuerte pesimismo en corto."))
@@ -930,6 +940,11 @@ else:
                 "pe": pe,
                 "p_fcf": p_fcf,
                 "peg": peg,
+                "ev_ebitda": ev_ebitda,
+                "p_s": p_s,
+                "p_b": p_b,
+                "gross_margin": res_rent.get("gross_margin", 0.0),
+                "net_margin": res_rent.get("net_margin", 0.0),
                 "texto_ia_final": texto_ia_final,
                 "wacc": wacc,
                 "g_term": g_term,

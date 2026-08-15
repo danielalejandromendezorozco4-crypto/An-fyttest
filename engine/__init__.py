@@ -10,6 +10,15 @@ try:
         calcular_ddm,
         calcular_fcff_valuation,
     )
+    from engine.metrics import (
+        calcular_multiplos_valuacion,
+        calcular_ratios_rentabilidad,
+        calcular_ratios_solvencia,
+        calcular_piotroski_fscore,
+        calcular_altman_zscore,
+        calcular_scoring,
+        evaluar_veredicto,
+    )
 
     __all__ = [
         "calcular_wacc",
@@ -17,8 +26,13 @@ try:
         "crear_calculador_dcf",
         "calcular_ddm",
         "calcular_fcff_valuation",
+        "calcular_multiplos_valuacion",
+        "calcular_ratios_rentabilidad",
+        "calcular_ratios_solvencia",
+        "calcular_piotroski_fscore",
+        "calcular_altman_zscore",
+        "calcular_scoring",
+        "evaluar_veredicto",
     ]
 except ImportError:
-    # Fallback silencioso: los consumidores importan directamente desde
-    # engine.valuation (e.g., `from engine.valuation import calcular_fcff_valuation`)
     __all__ = []

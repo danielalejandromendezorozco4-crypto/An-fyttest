@@ -127,9 +127,14 @@ def generar_pdf_reporte(analysis_data: dict) -> bytes:
     pdf.draw_row_3col("FCF Conversion:", f"{fcf_conv:.1f}x", "FCF Yield (FRED):", f"{fcf_yield:.2f}% ({tasa_libre_riesgo:.2f}%)", "Dividendos (Yield):", val_div_metric)
     pdf.ln(3)
 
+    ev_ebitda_val = analysis_data.get("ev_ebitda", 0.0)
+    p_s_val = analysis_data.get("p_s", 0.0)
+    p_b_val = analysis_data.get("p_b", 0.0)
+
     pdf.draw_section_header("M3. Valuación y Múltiplos de Mercado")
     pdf.draw_row_3col("V. Int. DCF:", v_intr_txt, "V. Int. DDM:", val_ddm_str, "Precio Máx. C.:", f"${precio_max_compra:,.2f}")
-    pdf.draw_row_3col("PER (P/E):", f"{pe:.1f}x", "P/FCF:", f"{p_fcf:.1f}x", "PEG Forward:", f"{peg:.2f}x")
+    pdf.draw_row_3col("PER (P/E):", f"{pe:.1f}x" if pe > 0 else "N/A", "P/FCF:", f"{p_fcf:.1f}x" if p_fcf > 0 else "N/A", "PEG Forward:", f"{peg:.2f}x" if peg > 0 else "N/A")
+    pdf.draw_row_3col("EV / EBITDA:", f"{ev_ebitda_val:.1f}x" if ev_ebitda_val > 0 else "N/A", "P/S (Ventas):", f"{p_s_val:.2f}x" if p_s_val > 0 else "N/A", "P/B (Libros):", f"{p_b_val:.2f}x" if p_b_val > 0 else "N/A")
     pdf.ln(3)
 
     pdf.draw_section_header("M5. Análisis Macroeconómico y Geopolítico (IA Gemini)")
