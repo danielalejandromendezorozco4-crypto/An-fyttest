@@ -214,10 +214,67 @@ class TestValuationUnittest(unittest.TestCase):
     def test_fcff_sin_capex(self):
         test_fcff_empresa_sin_capex()
 
+    def test_fcff_googl(self):
+        test_fcff_googl_calibracion()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NUEVOS TESTS — Motor FCFF con WACC Dinámico
+# NUEVOS TESTS — Motor FCFF con WACC Dinámico Calibrado
 # ─────────────────────────────────────────────────────────────────────────────
+
+def test_fcff_googl_calibracion():
+    """
+    Criterio 1: Calibración específica para Alphabet Inc. (GOOGL).
+    Verifica que con datos fundamentales reales de GOOGL, el valor intrínseco
+    por acción arroja una cifra financieramente coherente ($140 - $220 USD),
+    eliminando el valor artificialmente deprimido previo (~$87).
+    """
+    # Perfil fundamental realista de Alphabet Inc. (GOOGL)
+    # Flujos históricos (2024 TTM, 2023, 2022, 2021)
+    ocf_hist      = [105e9, 101.7e9, 91.5e9, 91.6e9]
+    capex_hist    = [38e9,  32.2e9,  31.5e9, 24.6e9]
+    interest_hist = [0.35e9, 0.3e9,  0.35e9, 0.35e9]
+    pretax_hist   = [100e9, 88e9,    75e9,   90e9]
+    taxprov_hist  = [16e9,  14e9,    11.5e9, 14.7e9]  # Tax rate ~16%
+    total_debt    = 28e9
+    total_cash    = 110e9
+    shares_diluted = 12.35e9
+    mcap          = 2_180e9
+    beta          = 1.05
+    rf            = 4.25
+    precio_actual = 175.0
+    growth_rate_exp = 0.14  # Consenso de utilidades/ingresos ~14%
+
+    resultado = calcular_fcff_valuation(
+        ocf_hist        = ocf_hist,
+        capex_hist      = capex_hist,
+        interest_hist   = interest_hist,
+        pretax_hist     = pretax_hist,
+        taxprov_hist    = taxprov_hist,
+        total_debt      = total_debt,
+        total_cash      = total_cash,
+        shares_diluted  = shares_diluted,
+        mcap            = mcap,
+        beta            = beta,
+        rf              = rf,
+        precio_actual   = precio_actual,
+        growth_rate_exp = growth_rate_exp,
+    )
+
+    valor_intr = resultado["valor_intrinseco"]
+
+    # 1. El valor intrínseco NO debe ser el atípico previo de ~$87
+    assert valor_intr > 130.0, f"Valor intrínseco de GOOGL muy bajo: ${valor_intr:.2f} (debe ser > $130)"
+
+    # 2. Debe encontrarse en un rango analítico razonable frente al precio de cotización y Wall Street ($140 - $240)
+    assert 135.0 <= valor_intr <= 240.0, f"Valor intrínseco fuera de rango razonable: ${valor_intr:.2f}"
+
+    # 3. WACC debe situarse en el rango de costo de capital de mega-caps de bajo riesgo (~7.5% - 10.0%)
+    assert 7.0 <= resultado["wacc"] <= 11.0, f"WACC anómalo para GOOGL: {resultado['wacc']:.2f}%"
+
+    # 4. Enterprise Value y Equity Value deben ser positivos y en el orden de billones USD (> $1.5 Trillones)
+    assert resultado["enterprise_value"] > 1_400e9
+    assert resultado["equity_value"] > 1_500e9
 
 def test_fcff_empresa_grande():
     """

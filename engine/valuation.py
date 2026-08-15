@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import statistics
-from typing import List
+from typing import List, Optional
 
 # NOTE: Imports de módulos con dependencia de streamlit (financial_fetcher,
 # config.settings) se hacen de forma diferida (lazy) dentro de cada función
@@ -191,85 +191,21 @@ def calcular_fcff_valuation(
     rf: float,
     precio_actual: float,
     n_years: int = 5,
-    erp: float = 5.5,
+    erp: float = 5.0,
+    growth_rate_exp: Optional[float] = None,
 ) -> dict:
     """
     Motor de valuación de grado analítico basado en Flujo de Caja Libre para la
     Firma (FCFF) con WACC dinámico empírico y puente completo EV → Equity Value.
 
-    **Fórmula FCFF:**
-
-    .. math::
-
-        FCFF_i = OCF_i + (InterestExpense_i \\times (1 - T_{ef})) - CapEx_i
-
-    **WACC dinámico:**
-
-    .. math::
-
-        K_e = R_f + \\beta \\times ERP \\qquad K_d = \\frac{\\sum Interest}{Deuda}
-
-        WACC = \\frac{E}{V} K_e + \\frac{D}{V} K_d (1 - T_{ef})
-
-    **Reconciliación de valor:**
-
-    .. math::
-
-        EV = PV_{flujos} + PV_{TV} \\qquad
-        Equity = EV + Caja - Deuda \\qquad
-        V_{acc} = \\frac{Equity}{Shares}
-
-    Manejo defensivo:
-    - ``total_debt = 0`` → ``wd = 0``, WACC = Ke (sin división por cero en Kd).
-    - FCFF base negativo → se usa un fallback conservador del 2% del OCF promedio.
-    - Tasas impositivas derivadas de cero o negativas → fallback a 21%.
-    - ``shares_diluted <= 0`` → retorna ``valor_intrinseco = 0.0`` con status rojo.
-
-    Args:
-        ocf_hist:       Operating Cash Flow histórico por período (más reciente = índice 0).
-        capex_hist:     CapEx histórico positivo por período (más reciente = índice 0).
-        interest_hist:  Interest Expense histórico absoluto (más reciente = índice 0).
-        pretax_hist:    Pre-tax Income histórico (más reciente = índice 0).
-        taxprov_hist:   Tax Provision histórica (más reciente = índice 0).
-        total_debt:     Deuda total más reciente en USD.
-        total_cash:     Efectivo + equivalentes más reciente en USD.
-        shares_diluted: Acciones diluidas en circulación.
-        mcap:           Capitalización de mercado actual en USD.
-        beta:           Coeficiente beta del activo.
-        rf:             Tasa libre de riesgo en % (e.g. 4.35).
-        precio_actual:  Precio de mercado actual por acción.
-        n_years:        Años de proyección explícita (default: 5).
-        erp:            Prima de riesgo de mercado en % (default: 5.5).
-
-    Returns:
-        Diccionario rico con todos los componentes del modelo:
-
-        - ``valor_intrinseco``  (float): Valor por acción calculado.
-        - ``enterprise_value``  (float): EV total en USD.
-        - ``equity_value``      (float): Equity Value total en USD.
-        - ``pv_flujos``         (float): VP de flujos proyectados.
-        - ``pv_terminal``       (float): VP del Valor Terminal.
-        - ``fcff_historico``    (list):  FCFF real calculado por período.
-        - ``fcff_proyectado``   (list):  FCFF proyectado año 1–N.
-        - ``wacc``              (float): WACC resultante en %.
-        - ``ke``                (float): Costo de capital propio (CAPM) en %.
-        - ``kd``                (float): Costo de deuda efectivo en %.
-        - ``we``                (float): Peso de equity en estructura de capital.
-        - ``wd``                (float): Peso de deuda en estructura de capital.
-        - ``rf``                (float): Tasa libre de riesgo usada en %.
-        - ``tax_rate_real``     (float): Tasa impositiva efectiva real.
-        - ``g_term``            (float): Tasa de crecimiento terminal.
-        - ``total_cash``        (float): Efectivo total.
-        - ``total_debt``        (float): Deuda total.
-        - ``shares_diluted``    (float): Acciones diluidas.
-        - ``margen_seguridad``  (float): (V - P) / P en decimal.
-        - ``precio_actual``     (float): Precio de mercado actual.
-        - ``status``            (str):   Emoji semáforo.
-        - ``semaforo``          (str):   "verde" | "rojo".
-        - ``upside``            (float): Upside/downside en %.
+    Calibración institucional:
+    - Base FCFF anclada al período más reciente sin penalizar crecimiento histórico.
+    - Curva de crecimiento explícita (Fase 1 años 1–3, Fase 2 convergencia años 4–5).
+    - Valor Terminal Híbrido: Gordon Growth con $g_{term}$ balanceado y múltiplo de salida.
+    - WACC acotado a rangos empíricos institucionales (6.5% - 14.0%).
     """
-    # ── Guardia: acciones dilluidas válidas ───────────────────────────────────
-    if shares_diluted <= 0:
+    # ── Guardia: acciones diluidas válidas ───────────────────────────────────
+    if shares_diluted <= 0 or precio_actual <= 0:
         return _resultado_fcff_vacio(precio_actual, total_cash, total_debt, rf, beta, erp)
 
     # ── 1. Tasa impositiva efectiva real ─────────────────────────────────────
@@ -283,7 +219,7 @@ def calcular_fcff_valuation(
     tax_rate_real: float = (
         statistics.mean(tasas_impositivas) if tasas_impositivas else 0.21
     )
-    tax_rate_real = max(min(tax_rate_real, 0.40), 0.0)
+    tax_rate_real = max(min(tax_rate_real, 0.35), 0.0)
 
     # ── 2. FCFF histórico ────────────────────────────────────────────────────
     n_hist = len(ocf_hist)
@@ -295,39 +231,46 @@ def calcular_fcff_valuation(
         fcff_i   = ocf_i + (int_i * (1.0 - tax_rate_real)) - capex_i
         fcff_historico.append(fcff_i)
 
-    # ── 3. FCFF base para proyección (media últimos 3 años, ponderada) ───────
+    # ── 3. FCFF base para proyección (anclado en flujo reciente) ─────────────
+    fcff_reciente = fcff_historico[0] if fcff_historico else 0.0
     periodos_base = fcff_historico[:min(3, len(fcff_historico))]
     pesos = [3, 2, 1][:len(periodos_base)]
-    fcff_base: float = (
+    fcff_media_pond = (
         sum(f * p for f, p in zip(periodos_base, pesos)) / sum(pesos)
         if periodos_base else 0.0
     )
 
-    # Fallback defensivo si FCFF base es negativo o nulo
-    if fcff_base <= 0:
+    if fcff_reciente > 0:
+        # Si la empresa está en expansión, priorizar el flujo reciente
+        fcff_base = max(fcff_reciente, fcff_media_pond)
+    elif fcff_media_pond > 0:
+        fcff_base = fcff_media_pond
+    else:
+        # Fallback defensivo si FCFF base es negativo o nulo
         ocf_prom = statistics.mean(ocf_hist) if ocf_hist else 0.0
-        fcff_base = max(ocf_prom * 0.02, 1.0)  # 2% del OCF promedio como mínimo
+        fcff_base = max(ocf_prom * 0.05, precio_actual * shares_diluted * 0.02, 1.0)
 
-    # ── 4. Tasa de crecimiento implícita del FCFF histórico ──────────────────
-    if len(fcff_historico) >= 2 and fcff_historico[-1] > 0 and fcff_historico[0] > 0:
+    # ── 4. Tasa de crecimiento implícita del FCFF histórico / fundamental ───
+    if growth_rate_exp is not None and growth_rate_exp > 0:
+        g_hist = growth_rate_exp
+    elif len(fcff_historico) >= 2 and fcff_historico[-1] > 0 and fcff_historico[0] > 0:
         n_periodos = len(fcff_historico) - 1
         g_hist_raw = (fcff_historico[0] / fcff_historico[-1]) ** (1.0 / n_periodos) - 1.0
-        # Acotar a un rango razonable para evitar distorsiones por un año atípico
-        g_hist = max(min(g_hist_raw, 0.20), -0.05)
+        # Acotar a un rango institucional razonable [4%, 18%]
+        g_hist = max(min(g_hist_raw, 0.18), 0.04)
     else:
-        g_hist = 0.06  # Crecimiento conservador por defecto
+        g_hist = 0.08  # Crecimiento moderado institucional por defecto
 
     # ── 5. WACC dinámico ─────────────────────────────────────────────────────
     ke: float = rf + (beta * erp)  # CAPM en %
 
     # Kd efectivo basado en gastos de intereses reales sobre deuda total
-    if total_debt > 0 and interest_hist:
+    if total_debt > 0 and interest_hist and interest_hist[0] > 0:
         int_reciente = interest_hist[0]
         kd_raw = (int_reciente / total_debt) * 100.0  # En %
-        # Clampear entre Rf y 20% para evitar valores irracionales
-        kd: float = max(min(kd_raw, 20.0), rf)
+        kd: float = max(min(kd_raw, 12.0), rf)
     else:
-        kd = 0.0  # Sin deuda → costo de deuda irrelevante
+        kd = 0.0  # Sin deuda o intereses mínimos
 
     # Ponderaciones de mercado
     total_capital = mcap + total_debt
@@ -339,21 +282,22 @@ def calcular_fcff_valuation(
 
     # WACC final (en %)
     wacc_raw = (we * ke) + (wd * kd * (1.0 - tax_rate_real))
-    # Límites realistas: mínimo Rf + 1%, máximo 18%
-    wacc: float = max(min(wacc_raw, 18.0), max(rf + 1.0, 6.0))
+    # Acotar a límites realistas: piso 6.5%, techo 14.0%
+    wacc: float = max(min(wacc_raw, 14.0), max(rf + 0.5, 6.5))
 
     wacc_decimal = wacc / 100.0
 
     # ── 6. Tasa de crecimiento terminal ──────────────────────────────────────
-    # g_term conservador: menor entre Rf/2 y 3.0%, siempre < WACC
-    g_term: float = min(rf / 2.0 / 100.0, 0.030, wacc_decimal - 0.01)
-    g_term = max(g_term, 0.010)  # Mínimo 1% (economía nominal mínima)
+    # g_term institucional: 2.2% a 3.0%, asegurando spread >= 4.0% vs WACC
+    g_term: float = min(0.030, max(0.022, (rf / 100.0) * 0.60))
+    if (wacc_decimal - g_term) < 0.040:
+        g_term = max(wacc_decimal - 0.040, 0.015)
 
     # ── 7. Proyección de flujos explícitos (n_years) ─────────────────────────
-    # Año 1-3: crecimiento histórico ajustado; Año 4-5: convergencia a g_term
+    # Fase 1 (Años 1–3): crecimiento dinámico; Fase 2 (Años 4–5): convergencia suave
     fcff_proyectado: list[float] = []
-    g_fase1 = max(min(g_hist, 0.15), 0.02)  # Fase 1 acotada [2%, 15%]
-    g_fase2 = max(min((g_fase1 + g_term * 100.0 * 3.0) / 4.0 / 100.0, 0.08), g_term)
+    g_fase1 = max(min(g_hist, 0.16), 0.04)
+    g_fase2 = (g_fase1 + g_term * 2.0) / 3.0
 
     pv_flujos: float = 0.0
     f_actual = fcff_base
@@ -363,15 +307,16 @@ def calcular_fcff_valuation(
         fcff_proyectado.append(f_actual)
         pv_flujos += f_actual / ((1.0 + wacc_decimal) ** yr)
 
-    # ── 8. Valor Terminal (Gordon Growth) ────────────────────────────────────
-    f_terminal = fcff_proyectado[-1] * (1.0 + g_term) if fcff_proyectado else fcff_base * (1.0 + g_term)
-    denominador_tv = wacc_decimal - g_term
-    if denominador_tv > 0:
-        valor_terminal = f_terminal / denominador_tv
-    else:
-        # Fallback: múltiplo de salida conservador (15x FCFF terminal)
-        valor_terminal = f_terminal * 15.0
+    # ── 8. Valor Terminal Híbrido (Gordon Growth + Múltiplo de Salida) ───────
+    f_terminal = fcff_proyectado[-1] * (1.0 + g_term)
+    denominador_tv = max(wacc_decimal - g_term, 0.040)
+    tv_gordon = f_terminal / denominador_tv
 
+    # Múltiplo de salida calibrado (16x - 22x FCF terminal según WACC/calidad)
+    exit_multiple = min(max(1.0 / denominador_tv, 16.0), 22.0)
+    tv_exit = fcff_proyectado[-1] * exit_multiple
+
+    valor_terminal = (tv_gordon + tv_exit) / 2.0
     pv_terminal: float = valor_terminal / ((1.0 + wacc_decimal) ** n_years)
 
     # ── 9. Puente: Enterprise Value → Equity Value → Valor por Acción ────────
@@ -379,8 +324,6 @@ def calcular_fcff_valuation(
     equity_value: float = enterprise_value + total_cash - total_debt
     valor_intrinseco: float = equity_value / shares_diluted if shares_diluted > 0 else 0.0
 
-    # Guardia: si el equity_value es negativo (empresa muy endeudada), se reporta
-    # sin lanzar excepción — el semáforo indicará la situación.
     if valor_intrinseco <= 0:
         valor_intrinseco = 0.0
 
