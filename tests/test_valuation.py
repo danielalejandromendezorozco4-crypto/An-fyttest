@@ -542,6 +542,25 @@ def test_fcff_perfil_jnj_empirico():
     assert res["tax_rate_real"] < 0.20
 
 
+def test_obtener_erp_mercado_import_y_fallback():
+    """
+    Verifica que la función obtener_erp_mercado se importe limpiamente desde
+    data.financial_fetcher y retorne un ERP consistente en caso de contingencia (fallback).
+    """
+    from data.financial_fetcher import obtener_erp_mercado
+    
+    # Caso 1: Sin clave FRED (fallback seguro)
+    erp_def = obtener_erp_mercado(fred_api_key="", rf_actual=4.25)
+    assert isinstance(erp_def, float)
+    assert 4.50 <= erp_def <= 6.00
+    assert erp_def == 5.00
+
+    # Caso 2: Con clave vacía y diferente rf
+    erp_alt = obtener_erp_mercado("", rf_actual=3.80)
+    assert isinstance(erp_alt, float)
+    assert 4.50 <= erp_alt <= 6.00
+
+
 class TestValuationUnittest(unittest.TestCase):
     def test_fcff_normalizado(self):
         test_calcular_fcff_normalizado_no_circular()
@@ -611,6 +630,9 @@ class TestValuationUnittest(unittest.TestCase):
 
     def test_knockout(self):
         test_evaluar_veredicto_knockout()
+
+    def test_erp_mercado(self):
+        test_obtener_erp_mercado_import_y_fallback()
 
 
 if __name__ == "__main__":

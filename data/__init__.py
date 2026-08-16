@@ -1,1 +1,34 @@
 # Data package
+from data.financial_fetcher import (
+    obtener_session_yfinance,
+    safe_num,
+    obtener_tasa_fred,
+    obtener_erp_mercado,
+    fetch_cotizacion_intradia,
+    fetch_datos_fundamentales,
+    fetch_datos_concurrente,
+    obtener_rf_tnx,
+    extraer_componentes_fcff,
+    extraer_metricas_ttm,
+    obtener_capex_historico,
+    obtener_kd_fmp_fred,
+    obtener_datos_dividendos,
+    obtener_noticias_financieras,
+)
+
+__all__ = [
+    "obtener_session_yfinance",
+    "safe_num",
+    "obtener_tasa_fred",
+    "obtener_erp_mercado",
+    "fetch_cotizacion_intradia",
+    "fetch_datos_fundamentales",
+    "fetch_datos_concurrente",
+    "obtener_rf_tnx",
+    "extraer_componentes_fcff",
+    "extraer_metricas_ttm",
+    "obtener_capex_historico",
+    "obtener_kd_fmp_fred",
+    "obtener_datos_dividendos",
+    "obtener_noticias_financieras",
+]
