@@ -206,15 +206,20 @@ else:
 
             # --- EXTRACCIÓN Y NORMALIZACIÓN INSTITUCIONAL TTM ---
             m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual)
-            mcap = m_ttm["mcap"]
-            shares_current = m_ttm["shares_diluted"]
+            mcap = safe_num(m_ttm.get("mcap", 0.0), 0.0)
+            shares_current = safe_num(m_ttm.get("shares_diluted", 0.0), 0.0)
             if shares_current <= 0:
                 shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 1.0
 
-            # EVALUACIÓN DE INTEGRIDAD DE DATOS (Solo marca incompleto si faltan insumos críticos de valuación)
-            net_income_val = m_ttm["net_income_ttm"]
-            op_cash_val = m_ttm["ocf_ttm"]
+            net_income_val = safe_num(m_ttm.get("net_income_ttm", 0.0), 0.0)
+            op_cash_val = safe_num(m_ttm.get("ocf_ttm", 0.0), 0.0)
+            
+            # Inicialización defensiva universal de EPS TTM
+            eps_ttm = safe_num(m_ttm.get("eps_diluted_ttm", 0.0), 0.0)
+            if eps_ttm == 0.0 and shares_current > 0 and net_income_val != 0.0:
+                eps_ttm = net_income_val / shares_current
 
+            # EVALUACIÓN DE INTEGRIDAD DE DATOS (Solo marca incompleto si faltan insumos críticos de valuación)
             datos_completos = True
             if mcap <= 0 or (net_income_val == 0.0 and op_cash_val == 0.0 and (inc.empty and bs.empty)):
                 datos_completos = False

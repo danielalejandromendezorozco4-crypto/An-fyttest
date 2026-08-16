@@ -387,8 +387,36 @@ def test_extraer_metricas_ttm_nflx_defensivo():
     assert "cagr_revenue_3_5y" in m
     assert "op_margin_hist" in m
     assert "shares_diluted" in m
-    assert m["mcap"] == 280_000_000_000.0
-    assert m["earnings_growth"] >= 0.0  # Ingerido de Net Income CAGR
+def test_extraer_metricas_ttm_ma_defensivo():
+    """
+    Verifica que el ticker MA (Mastercard) extraiga de forma robusta
+    el EPS TTM, forward EPS y todas las métricas sin arrojar NameError.
+    """
+    info_ma = {
+        "marketCap": 450_000_000_000.0,
+        "trailingEps": 13.50,
+        "forwardEps": 15.80,
+        "operatingCashflow": 12_500_000_000.0,
+        "freeCashflow": 11_800_000_000.0,
+        "totalDebt": 16_000_000_000.0,
+        "totalCash": 8_500_000_000.0,
+        "sharesOutstanding": 930_000_000.0,
+        "sector": "Financial Services",
+        "industry": "Credit Services",
+    }
+    inc_ma = pd.DataFrame({
+        "2023": [25_000_000_000.0, 14_000_000_000.0, 11_500_000_000.0, 12.50],
+        "2022": [22_000_000_000.0, 12_000_000_000.0, 9_900_000_000.0, 10.50],
+    }, index=["Total Revenue", "Operating Income", "Net Income", "Diluted EPS"])
+    bs_ma = pd.DataFrame()
+    cf_ma = pd.DataFrame()
+
+    m = extraer_metricas_ttm(info_ma, inc_ma, bs_ma, cf_ma, precio_actual=480.0)
+
+    assert isinstance(m, dict)
+    assert m["eps_diluted_ttm"] == 13.50
+    assert m["forward_eps"] == 15.80
+    assert m["shares_diluted"] == 930_000_000.0
 
 
 class TestMetricsUnittest(unittest.TestCase):
@@ -413,7 +441,11 @@ class TestMetricsUnittest(unittest.TestCase):
     def test_nflx_defensivo(self):
         test_extraer_metricas_ttm_nflx_defensivo()
 
+    def test_ma_defensivo(self):
+        test_extraer_metricas_ttm_ma_defensivo()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

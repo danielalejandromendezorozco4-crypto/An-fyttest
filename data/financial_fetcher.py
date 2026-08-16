@@ -703,10 +703,19 @@ def extraer_metricas_ttm(
         ], default=0.0)
 
     eps_diluted_ttm = safe_num(info.get("trailingEps", 0.0), 0.0)
+    if eps_diluted_ttm == 0.0:
+        eps_diluted_ttm = safe_num(info.get("epsTrailingTwelveMonths", 0.0), 0.0)
     if eps_diluted_ttm == 0.0 and shares_diluted > 0 and net_income_ttm != 0.0:
         eps_diluted_ttm = net_income_ttm / shares_diluted
+    if eps_diluted_ttm == 0.0:
+        eps_diluted_ttm = _extraer_val_df(inc, [
+            "Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
+            "Diluted EPS from Continuing Operations", "EPS"
+        ], default=0.0)
 
     forward_eps = safe_num(info.get("forwardEps", 0.0), 0.0)
+    if forward_eps == 0.0:
+        forward_eps = safe_num(info.get("epsForward", 0.0), 0.0)
 
     pretax_income_ttm = safe_num(info.get("pretaxIncome", 0.0), 0.0)
     if pretax_income_ttm == 0.0:
