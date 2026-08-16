@@ -408,43 +408,55 @@ else:
             else: col_fcfy, msg_fcfy = "🔴", f"Rendimiento Exigente ({fcf_yield:.2f}% vs FRED {tasa_libre_riesgo:.2f}%)."
             
             # --- MÓDULO 3: VALUACIÓN, FCFF Y DDM (40%) ---
-            beta = m_ttm.get("beta", 1.0)
+            beta = m_ttm["beta"]
             rf_tnx = obtener_rf_tnx(fallback_fred=tasa_libre_riesgo)
             erp_mercado = obtener_erp_mercado(fred_key, rf_tnx)
+            comp_fcff = extraer_componentes_fcff(cf, inc, bs, info)
 
-            # 1. Cálculo del WACC y Estructura de Capital
-            res_wacc = calcular_wacc(
-                tasa_libre_riesgo = rf_tnx,
-                beta              = beta,
-                mcap              = mcap,
-                total_debt        = total_debt,
-                int_exp           = int_exp,
-                tax_rate          = tax_rate,
-                fmp_key           = fmp_key,
-                fred_key          = fred_key,
-                ticker            = ticker_input,
-                erp               = erp_mercado,
+            # ── MOTOR FCFF INSTITUCIONAL (Fuente única de verdad para WACC y Valuación) ──
+            res_fcff = calcular_fcff_valuation(
+                ocf_hist              = comp_fcff["ocf_hist"],
+                capex_hist            = comp_fcff["capex_hist"],
+                interest_hist         = comp_fcff["interest_hist"],
+                pretax_hist           = comp_fcff["pretax_hist"],
+                taxprov_hist          = comp_fcff["taxprov_hist"],
+                total_debt            = comp_fcff["total_debt"] or total_debt,
+                total_cash            = comp_fcff["total_cash"] or total_cash,
+                shares_diluted        = comp_fcff["shares_diluted"] or shares_current,
+                mcap                  = mcap,
+                beta                  = beta,
+                rf                    = rf_tnx,
+                precio_actual         = precio_actual,
+                erp                   = erp_mercado,
+                cagr_revenue_hist     = m_ttm.get("cagr_revenue_3_5y", 0.0),
+                revenue_growth_api    = m_ttm.get("revenue_growth", 0.0),
+                revenue_ttm           = m_ttm.get("revenue_ttm", rev_ttm),
+                operating_margin_hist = m_ttm.get("op_margin_hist", mg_op / 100.0 if mg_op > 0 else 0.12),
+                fmp_key               = fmp_key,
+                fred_key              = fred_key,
+                ticker                = ticker_input,
             )
-            ke, kd, wacc, we, wd = res_wacc["ke"], res_wacc["kd"], res_wacc["wacc"], res_wacc["we"], res_wacc["wd"]
 
-            # 2. Determinación de Tasas de Crecimiento y Flujo Base por Acción
-            crecimiento = m_ttm.get("earnings_growth", 0.0) if m_ttm.get("earnings_growth", 0.0) > 0 else (
-                m_ttm.get("revenue_growth", 0.0) if m_ttm.get("revenue_growth", 0.0) > 0 else 0.08
-            )
-            g_1_5 = min(max(crecimiento * 0.85, 0.04), 0.18)
-            g_term = 0.025 if 0.025 < (wacc / 100.0) else ((wacc / 100.0) - 0.015)
+            # Extraer métricas unificadas del motor único
+            wacc        = res_fcff["wacc"]
+            ke          = res_fcff["ke"]
+            kd          = res_fcff["kd"]
+            we          = res_fcff["we"]
+            wd          = res_fcff["wd"]
+            g_term      = res_fcff["g_term"]
+            v_intr_fcff = res_fcff["valor_intrinseco"]
 
-            eps_ttm = m_ttm["eps_diluted_ttm"]
-            fcf_base_per_share = (fcf_ttm / shares_current) if (shares_current > 0 and fcf_ttm > 0) else 0.0
-            flujo_por_accion = max(fcf_base_per_share, eps_ttm * 0.85) or (precio_actual * 0.035)
-
-            # 3. Motor de Valuación DCF Híbrido (por Acción) y Matriz de Sensibilidad
+            # ── Factory de Sensibilidad DCF y Valor Intrínseco ──
+            fcff_base = res_fcff.get("fcff_base", 0.0)
+            flujo_por_accion = (fcff_base / shares_current) if (shares_current > 0 and fcff_base > 0) else 0.0
+            if flujo_por_accion <= 0:
+                flujo_por_accion = max((fcf_ttm / shares_current) if shares_current > 0 else 0.0, eps_ttm * 0.85)
+            
+            g_1_5 = res_fcff.get("g_fase1", 0.08)
             calcular_dcf_fn = crear_calculador_dcf(flujo_por_accion, g_1_5, precio_actual, eps_ttm, total_cash, total_debt, shares_current)
-            res_dcf = calcular_dcf_intr_ps(wacc, g_term, flujo_por_accion, g_1_5, precio_actual, eps_ttm, total_cash, total_debt, shares_current)
-            v_intr_dcf = float(res_dcf["valor_intrinseco"])
+            v_intr_dcf = v_intr_fcff if v_intr_fcff > 0 else calcular_dcf_fn(wacc, g_term)
             v_intr = v_intr_dcf
 
-            # 4. Modelo de Descuento de Dividendos (DDM Gordon Growth)
             g_div = min(max(g_1_5 * 0.5, 0.02), 0.04)
             res_ddm = calcular_ddm(div_rate, ke, g_div, precio_actual)
             v_intr_ddm = res_ddm["valor_intrinseco_ddm"]
@@ -879,20 +891,20 @@ else:
                 "inc": inc,
                 "cf": cf,
                 "perfil_texto": perfil_texto,
-                # ── Campos FCFF / Valuación para PDF ─────────────────────
-                "fcff_wacc":      wacc,
-                "fcff_ke":        ke,
-                "fcff_kd":        kd,
-                "fcff_rf":        rf_tnx,
-                "fcff_erp":       erp_mercado,
-                "fcff_we":        we,
-                "fcff_wd":        wd,
-                "fcff_tax_rate":  tax_rate,
-                "fcff_ev":        v_intr_dcf * shares_current,
-                "fcff_equity":    v_intr_dcf * shares_current,
-                "fcff_margen":    ((v_intr_dcf - precio_actual) / precio_actual) if precio_actual > 0 else 0.0,
-                "fcff_historico": [],
-                "fcff_g_term":    g_term,
+                # ── Campos FCFF para PDF ──────────────────────────────────
+                "fcff_wacc":      res_fcff.get("wacc", wacc),
+                "fcff_ke":        res_fcff.get("ke", ke),
+                "fcff_kd":        res_fcff.get("kd", 0.0),
+                "fcff_rf":        res_fcff.get("rf", tasa_libre_riesgo),
+                "fcff_erp":       res_fcff.get("erp", erp_mercado),
+                "fcff_we":        res_fcff.get("we", we),
+                "fcff_wd":        res_fcff.get("wd", wd),
+                "fcff_tax_rate":  res_fcff.get("tax_rate_real", tax_rate),
+                "fcff_ev":        res_fcff.get("enterprise_value", 0.0),
+                "fcff_equity":    res_fcff.get("equity_value", 0.0),
+                "fcff_margen":    res_fcff.get("margen_seguridad", 0.0),
+                "fcff_historico": res_fcff.get("fcff_historico", []),
+                "fcff_g_term":    res_fcff.get("g_term", 0.025),
             }
             pdf_bytes = generar_pdf_reporte(analysis_data)
             st.download_button(
