@@ -11,6 +11,7 @@ from config.settings import (
     cargar_secrets,
     obtener_ruta_logo,
     safe_get,
+    safe_num,
 )
 from config.styles import inyectar_estilos
 from data.sp1500 import obtener_directorio_sp1500, obtener_peers

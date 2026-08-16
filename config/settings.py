@@ -1,5 +1,7 @@
 import os
 import unicodedata
+import numpy as np
+import pandas as pd
 import streamlit as st
 
 SECTOR_BENCHMARKS = {
@@ -25,10 +27,35 @@ def sanitizar_para_pdf(texto):
     return texto.encode('latin-1', 'ignore').decode('latin-1').strip()
 
 def safe_get(d, keys, default=0):
+    if not isinstance(d, dict):
+        return default
     for key in keys:
         if key in d and d[key] is not None:
             return d[key]
     return default
+
+def safe_num(val, default=0.0):
+    """
+    Convierte cualquier valor de forma segura a float o al valor por defecto especificado.
+    Maneja None, np.nan, float('nan'), inf, -inf, strings no numéricos y tipos corruptos.
+    """
+    if val is None:
+        return default if default is None else float(default)
+    try:
+        if isinstance(val, (int, float)):
+            if np.isnan(val) or np.isinf(val):
+                return default if default is None else float(default)
+            return float(val)
+        if isinstance(val, str):
+            clean_str = val.replace(',', '').replace('$', '').replace('%', '').strip()
+            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf'):
+                return default if default is None else float(default)
+            return float(clean_str)
+        if pd.isna(val):
+            return default if default is None else float(default)
+        return float(val)
+    except (ValueError, TypeError, Exception):
+        return default if default is None else float(default)
 
 def obtener_ruta_logo():
     posibles_rutas = ["logo.png", "logo.jpg", "logo.jpeg", "assets/logo.png", "images/logo.png"]

@@ -419,6 +419,33 @@ def test_extraer_metricas_ttm_ma_defensivo():
     assert m["shares_diluted"] == 930_000_000.0
 
 
+def test_safe_num_blindaje():
+    """
+    Verifica que safe_num maneje de forma robusta e infalible todos los tipos
+    de datos corruptos, no numéricos, NaN, None, Inf y strings formateados.
+    """
+    from config.settings import safe_num as safe_num_config
+    from data.financial_fetcher import safe_num as safe_num_data
+    from engine.metrics import safe_num as safe_num_metrics
+
+    for fn in (safe_num_config, safe_num_data, safe_num_metrics):
+        assert fn(None) == 0.0
+        assert fn(None, default=5.0) == 5.0
+        assert fn(np.nan) == 0.0
+        assert fn(float("nan"), default=10.0) == 10.0
+        assert fn(float("inf"), default=0.0) == 0.0
+        assert fn(float("-inf"), default=-1.0) == -1.0
+        assert fn("123.45") == 123.45
+        assert fn("$1,250.50") == 1250.50
+        assert fn("15.5%") == 15.5
+        assert fn("N/A", default=0.0) == 0.0
+        assert fn("NaN", default=0.0) == 0.0
+        assert fn("null", default=0.0) == 0.0
+        assert fn("", default=4.2) == 4.2
+        assert fn({"dict": 1}, default=0.0) == 0.0
+        assert fn([1, 2, 3], default=0.0) == 0.0
+
+
 class TestMetricsUnittest(unittest.TestCase):
     def test_multiplos_estandar(self):
         test_multiplos_valuacion_estandar()
@@ -444,8 +471,12 @@ class TestMetricsUnittest(unittest.TestCase):
     def test_ma_defensivo(self):
         test_extraer_metricas_ttm_ma_defensivo()
 
+    def test_safe_num(self):
+        test_safe_num_blindaje()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

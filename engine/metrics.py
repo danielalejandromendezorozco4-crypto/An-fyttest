@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import numpy as np
 import pandas as pd
 from typing import Optional, Dict, Any
 
@@ -12,6 +11,30 @@ def safe_get(d: Any, keys: list, default: Any = 0) -> Any:
         if key in d and d[key] is not None:
             return d[key]
     return default
+
+
+def safe_num(val: Any, default: float = 0.0) -> float:
+    """
+    Convierte cualquier valor de forma segura a float o al valor por defecto especificado.
+    Maneja None, np.nan, float('nan'), inf, -inf, strings no numéricos y tipos corruptos.
+    """
+    if val is None:
+        return float(default) if default is not None else 0.0
+    try:
+        if isinstance(val, (int, float)):
+            if np.isnan(val) or np.isinf(val):
+                return float(default) if default is not None else 0.0
+            return float(val)
+        if isinstance(val, str):
+            clean_str = val.replace(',', '').replace('$', '').replace('%', '').strip()
+            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf'):
+                return float(default) if default is not None else 0.0
+            return float(clean_str)
+        if pd.isna(val):
+            return float(default) if default is not None else 0.0
+        return float(val)
+    except (ValueError, TypeError, Exception):
+        return float(default) if default is not None else 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
