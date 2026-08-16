@@ -759,13 +759,51 @@ def extraer_metricas_ttm(
         "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt"
     ], default=0.0)
 
-    # ── 5. Crecimiento y Consenso ────────────────────────────────────────────
-    earnings_growth = safe_num(info.get("earningsGrowth", 0.0), 0.0)
-    revenue_growth = safe_num(info.get("revenueGrowth", 0.0), 0.0)
-    peg_ratio_info = safe_num(info.get("pegRatio", 0.0), 0.0)
-    beta = safe_num(info.get("beta", 1.0), 1.0)
-    short_percent_of_float = safe_num(info.get("shortPercentOfFloat", 0.0), 0.0)
-    target_mean_price = safe_num(info.get("targetMeanPrice", 0.0), 0.0)
+    # ── 6. CAGR Histórico de Ingresos (3-5 años) y Margen Operativo Medio ───
+    cagr_revenue_3_5y = 0.0
+    op_margin_hist = 0.0
+    if isinstance(inc, pd.DataFrame) and not inc.empty:
+        for fila_rev in ["Total Revenue", "TotalRevenue", "Revenue"]:
+            if fila_rev in inc.index:
+                try:
+                    s_rev = inc.loc[fila_rev].dropna()
+                    vals_rev = [safe_num(v, 0.0) for v in s_rev.values if safe_num(v, 0.0) > 0]
+                    if len(vals_rev) >= 2:
+                        n_anios = min(len(vals_rev) - 1, 4)
+                        r_reciente = vals_rev[0]
+                        r_antiguo = vals_rev[n_anios]
+                        if r_reciente > 0 and r_antiguo > 0:
+                            cagr_raw = (r_reciente / r_antiguo) ** (1.0 / n_anios) - 1.0
+                            if -0.30 <= cagr_raw <= 0.80:
+                                cagr_revenue_3_5y = cagr_raw
+                    break
+                except Exception:
+                    pass
+
+        for fila_op in ["Operating Income", "OperatingIncome", "EBIT"]:
+            if fila_op in inc.index:
+                try:
+                    s_op = inc.loc[fila_op].dropna()
+                    for fila_rev in ["Total Revenue", "TotalRevenue", "Revenue"]:
+                        if fila_rev in inc.index:
+                            s_rev = inc.loc[fila_rev].dropna()
+                            common_cols = [c for c in s_rev.index if c in s_op.index]
+                            mgs = []
+                            for col_c in common_cols:
+                                r_val = safe_num(s_rev[col_c], 0.0)
+                                o_val = safe_num(s_op[col_c], 0.0)
+                                if r_val > 0:
+                                    mgs.append(o_val / r_val)
+                            if mgs:
+                                op_margin_hist = max(float(np.mean(mgs)), 0.0)
+                            break
+                    if op_margin_hist > 0:
+                        break
+                except Exception:
+                    pass
+
+    if op_margin_hist == 0.0 and revenue_ttm > 0 and operating_income_ttm > 0:
+        op_margin_hist = operating_income_ttm / revenue_ttm
 
     return {
         "shares_diluted": shares_diluted,
@@ -793,6 +831,8 @@ def extraer_metricas_ttm(
         "short_term_debt": short_term_debt,
         "earnings_growth": earnings_growth,
         "revenue_growth": revenue_growth,
+        "cagr_revenue_3_5y": cagr_revenue_3_5y,
+        "op_margin_hist": op_margin_hist,
         "peg_ratio_info": peg_ratio_info,
         "beta": beta,
         "short_percent_of_float": short_percent_of_float,

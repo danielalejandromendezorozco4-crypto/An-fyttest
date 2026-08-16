@@ -396,50 +396,63 @@ else:
             
             # --- MÓDULO 3: VALUACIÓN, FCFF Y DDM (40%) ---
             beta = m_ttm["beta"]
-            res_wacc = calcular_wacc(tasa_libre_riesgo, beta, mcap, total_debt, int_exp, fmp_key, fred_key, tax_rate, ticker_input)
-            ke, kd, wacc, we, wd = res_wacc["ke"], res_wacc["kd"], res_wacc["wacc"], res_wacc["we"], res_wacc["wd"]
-
-            # ── MOTOR FCFF: extracción de componentes y valuación ─────────────
             rf_tnx = obtener_rf_tnx(fallback_fred=tasa_libre_riesgo)
             comp_fcff = extraer_componentes_fcff(cf, inc, bs, info)
 
+            # ── MOTOR FCFF INSTITUCIONAL (Fuente única de verdad para WACC y Valuación) ──
             res_fcff = calcular_fcff_valuation(
-                ocf_hist       = comp_fcff["ocf_hist"],
-                capex_hist     = comp_fcff["capex_hist"],
-                interest_hist  = comp_fcff["interest_hist"],
-                pretax_hist    = comp_fcff["pretax_hist"],
-                taxprov_hist   = comp_fcff["taxprov_hist"],
-                total_debt     = comp_fcff["total_debt"] or total_debt,
-                total_cash     = comp_fcff["total_cash"] or total_cash,
-                shares_diluted = comp_fcff["shares_diluted"] or shares_current,
-                mcap           = mcap,
-                beta           = beta,
-                rf             = rf_tnx,
-                precio_actual  = precio_actual,
-                growth_rate_exp = m_ttm["earnings_growth"] if m_ttm["earnings_growth"] > 0 else m_ttm["revenue_growth"],
+                ocf_hist              = comp_fcff["ocf_hist"],
+                capex_hist            = comp_fcff["capex_hist"],
+                interest_hist         = comp_fcff["interest_hist"],
+                pretax_hist           = comp_fcff["pretax_hist"],
+                taxprov_hist          = comp_fcff["taxprov_hist"],
+                total_debt            = comp_fcff["total_debt"] or total_debt,
+                total_cash            = comp_fcff["total_cash"] or total_cash,
+                shares_diluted        = comp_fcff["shares_diluted"] or shares_current,
+                mcap                  = mcap,
+                beta                  = beta,
+                rf                    = rf_tnx,
+                precio_actual         = precio_actual,
+                cagr_revenue_hist     = m_ttm.get("cagr_revenue_3_5y", 0.0),
+                revenue_growth_api    = m_ttm.get("revenue_growth", 0.0),
+                revenue_ttm           = m_ttm.get("revenue_ttm", rev_ttm),
+                operating_margin_hist = m_ttm.get("op_margin_hist", mg_op / 100.0 if mg_op > 0 else 0.12),
+                fmp_key               = fmp_key,
+                fred_key              = fred_key,
+                ticker                = ticker_input,
             )
 
-            # Usar FCFF como valor intrínseco principal; DCF simplificado como respaldo
+            # Extraer métricas unificadas del motor único
+            wacc        = res_fcff["wacc"]
+            ke          = res_fcff["ke"]
+            kd          = res_fcff["kd"]
+            we          = res_fcff["we"]
+            wd          = res_fcff["wd"]
+            g_term      = res_fcff["g_term"]
             v_intr_fcff = res_fcff["valor_intrinseco"]
-            wacc_fcff   = res_fcff["wacc"]
-            ke_fcff     = res_fcff["ke"]
-            kd_fcff     = res_fcff["kd"]
 
-            # ── DCF simplificado (mantener para compatibilidad de scoring y PDF) ──
-            g_1_5 = min(max(m_ttm["earnings_growth"] * 0.85 if m_ttm["earnings_growth"] > 0 else (m_ttm["revenue_growth"] * 0.85 if m_ttm["revenue_growth"] > 0 else 0.08), 0.04), 0.18)
-            g_term = 0.025 if 0.025 < (wacc/100) else (wacc/100) - 0.015
+            # ── DCF simplificado / Sensibilidad (sin circularidad con precio de mercado) ──
+            g_base_dcf = m_ttm.get("cagr_revenue_3_5y", 0.0) or m_ttm.get("revenue_growth", 0.0) or 0.06
+            g_1_5 = min(max(g_base_dcf, 0.030), 0.150)
 
             eps_ttm = m_ttm["eps_diluted_ttm"]
-            fcf_base_per_share = (fcf_ttm / shares_current) if shares_current > 0 else 0
-            flujo_por_accion = max(fcf_base_per_share, eps_ttm * 0.85) or (precio_actual * 0.035)
+            fcf_base_per_share = (fcf_ttm / shares_current) if (shares_current > 0 and fcf_ttm > 0) else 0.0
+            if fcf_base_per_share <= 0:
+                _, fcff_norm_ps = calcular_fcff_normalizado(
+                    revenue_ttm           = m_ttm.get("revenue_ttm", rev_ttm),
+                    operating_margin_hist = m_ttm.get("op_margin_hist", 0.12),
+                    tax_rate              = tax_rate,
+                    shares_diluted        = shares_current,
+                    eps_ttm               = eps_ttm,
+                )
+                flujo_por_accion = max(fcff_norm_ps, eps_ttm * 0.75, 0.0)
+            else:
+                flujo_por_accion = fcf_base_per_share
 
             calcular_dcf_fn = crear_calculador_dcf(flujo_por_accion, g_1_5, precio_actual, eps_ttm, total_cash, total_debt, shares_current)
-            v_intr_dcf = calcular_dcf_fn(wacc, g_term)
+            v_intr_dcf = v_intr_fcff if v_intr_fcff > 0 else calcular_dcf_fn(wacc, g_term)
 
-            # ── Valor intrínseco final: FCFF si es positivo, DCF como fallback ──
-            v_intr_dcf = v_intr_fcff if v_intr_fcff > 0 else v_intr_dcf
-
-            g_div = min(max(g_1_5 * 0.5, 0.02), 0.04)
+            g_div = min(max(g_1_5 * 0.5, 0.015), 0.035)
             res_ddm = calcular_ddm(div_rate, ke, g_div, precio_actual)
             v_intr_ddm = res_ddm["valor_intrinseco_ddm"]
             val_ddm_str = res_ddm["val_ddm_str"]

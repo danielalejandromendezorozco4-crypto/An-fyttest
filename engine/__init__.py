@@ -9,6 +9,9 @@ try:
         crear_calculador_dcf,
         calcular_ddm,
         calcular_fcff_valuation,
+        calcular_fcff_normalizado,
+        calcular_g_term_restringido,
+        calcular_curva_crecimiento_5y,
     )
     from engine.metrics import (
         calcular_multiplos_valuacion,
@@ -26,6 +29,9 @@ try:
         "crear_calculador_dcf",
         "calcular_ddm",
         "calcular_fcff_valuation",
+        "calcular_fcff_normalizado",
+        "calcular_g_term_restringido",
+        "calcular_curva_crecimiento_5y",
         "calcular_multiplos_valuacion",
         "calcular_ratios_rentabilidad",
         "calcular_ratios_solvencia",
