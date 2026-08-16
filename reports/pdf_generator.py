@@ -243,4 +243,11 @@ def generar_pdf_reporte(analysis_data: dict) -> bytes:
     )
     pdf.multi_cell(0, 3, txt=sanitizar_para_pdf(disclaimer_text), align='J')
 
-    return pdf.output(dest='S').encode('latin-1', 'ignore')
+    raw_pdf = pdf.output(dest='S')
+    if isinstance(raw_pdf, bytes):
+        return raw_pdf
+    elif isinstance(raw_pdf, bytearray):
+        return bytes(raw_pdf)
+    elif isinstance(raw_pdf, str):
+        return raw_pdf.encode('latin-1', 'ignore')
+    return bytes(raw_pdf)

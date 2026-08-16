@@ -19,12 +19,47 @@ SECTOR_BENCHMARKS = {
 }
 
 def limpiar_texto(texto):
-    return unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode('ascii')
+    if texto is None:
+        return ""
+    if isinstance(texto, (bytes, bytearray)):
+        try:
+            texto = texto.decode('utf-8', 'ignore')
+        except Exception:
+            texto = str(texto)
+    elif not isinstance(texto, str):
+        texto = str(texto)
+    try:
+        return unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode('ascii')
+    except Exception:
+        return str(texto)
 
 def sanitizar_para_pdf(texto):
-    if not isinstance(texto, str): return str(texto)
-    texto = texto.replace('**', '').replace('•', '-').replace('–', '-').replace('—', '-').replace('”', '"').replace('“', '"')
-    return texto.encode('latin-1', 'ignore').decode('latin-1').strip()
+    if texto is None:
+        return ""
+    if isinstance(texto, (bytes, bytearray)):
+        try:
+            texto = texto.decode('utf-8', 'ignore')
+        except Exception:
+            texto = str(texto)
+    elif not isinstance(texto, str):
+        texto = str(texto)
+        
+    texto = (
+        texto.replace('**', '')
+        .replace('•', '-')
+        .replace('–', '-')
+        .replace('—', '-')
+        .replace('”', '"')
+        .replace('“', '"')
+        .replace('’', "'")
+        .replace('‘', "'")
+        .replace('…', '...')
+        .replace('€', 'EUR')
+    )
+    try:
+        return texto.encode('latin-1', 'ignore').decode('latin-1').strip()
+    except Exception:
+        return str(texto).strip()
 
 def safe_get(d, keys, default=0):
     if not isinstance(d, dict):
