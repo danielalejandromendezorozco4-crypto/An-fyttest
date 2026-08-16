@@ -19,6 +19,7 @@ from engine.valuation import (
     calcular_ddm,
     calcular_wacc,
     calcular_fcff_valuation,
+    calcular_valuacion_adaptativa,
     crear_calculador_dcf,
 )
 from data.financial_fetcher import (
@@ -413,62 +414,84 @@ else:
             elif fcf_yield >= tasa_libre_riesgo: col_fcfy, msg_fcfy = "🟡", f"Rendimiento de Caja Aceptable ({fcf_yield:.2f}% vs FRED {tasa_libre_riesgo:.2f}%)."
             else: col_fcfy, msg_fcfy = "🔴", f"Rendimiento Exigente ({fcf_yield:.2f}% vs FRED {tasa_libre_riesgo:.2f}%)."
             
-            # --- MÓDULO 3: VALUACIÓN, FCFF Y DDM (40%) ---
-            beta = m_ttm["beta"]
+            # --- MÓDULO 3: VALUACIÓN ADAPTATIVA Y MULTIMODELO (40%) ---
+            beta = m_ttm.get("beta", 1.0)
             rf_tnx = obtener_rf_tnx(fallback_fred=tasa_libre_riesgo)
             erp_mercado = obtener_erp_mercado(fred_key, rf_tnx)
             comp_fcff = extraer_componentes_fcff(cf, inc, bs, info)
+            
+            bench_dict = SECTOR_BENCHMARKS.get(sector, SECTOR_BENCHMARKS["Technology"])
 
-            # ── MOTOR FCFF INSTITUCIONAL (Fuente única de verdad para WACC y Valuación) ──
-            res_fcff = calcular_fcff_valuation(
+            # ── MOTOR ADAPTATIVO MULTIMODELO (Fuente central de verdad) ──
+            res_adapt = calcular_valuacion_adaptativa(
+                precio_actual         = precio_actual,
+                mcap                  = mcap,
+                shares_diluted        = comp_fcff["shares_diluted"] or shares_current,
+                total_debt            = comp_fcff["total_debt"] or total_debt,
+                total_cash            = comp_fcff["total_cash"] or total_cash,
+                beta                  = beta,
+                rf                    = rf_tnx,
+                erp                   = erp_mercado,
                 ocf_hist              = comp_fcff["ocf_hist"],
                 capex_hist            = comp_fcff["capex_hist"],
                 interest_hist         = comp_fcff["interest_hist"],
                 pretax_hist           = comp_fcff["pretax_hist"],
                 taxprov_hist          = comp_fcff["taxprov_hist"],
-                total_debt            = comp_fcff["total_debt"] or total_debt,
-                total_cash            = comp_fcff["total_cash"] or total_cash,
-                shares_diluted        = comp_fcff["shares_diluted"] or shares_current,
-                mcap                  = mcap,
-                beta                  = beta,
-                rf                    = rf_tnx,
-                precio_actual         = precio_actual,
-                erp                   = erp_mercado,
+                revenue_ttm           = rev_ttm,
+                gross_profit_ttm      = gross_prof_ttm,
+                operating_income_ttm  = ebit,
+                net_income_ttm        = net_income,
+                ebitda_ttm            = ebitda,
+                fcf_ttm               = fcf_ttm,
+                total_equity          = total_eq,
+                eps_ttm               = eps_ttm,
+                forward_eps           = m_ttm.get("forward_eps", 0.0),
+                div_rate              = div_rate,
+                div_yield             = div_yield,
                 cagr_revenue_hist     = m_ttm.get("cagr_revenue_3_5y", 0.0),
                 revenue_growth_api    = m_ttm.get("revenue_growth", 0.0),
-                revenue_ttm           = m_ttm.get("revenue_ttm", rev_ttm),
-                operating_margin_hist = m_ttm.get("op_margin_hist", mg_op / 100.0 if mg_op > 0 else 0.12),
+                earnings_growth_api   = m_ttm.get("earnings_growth", 0.0),
+                sector                = sector,
+                benchmark_pe          = bench_dict.get("PE", 20.0),
+                benchmark_pfcf        = bench_dict.get("PFCF", 18.0),
+                benchmark_ev_ebitda   = 14.0,
+                benchmark_pb          = 3.5,
                 fmp_key               = fmp_key,
                 fred_key              = fred_key,
                 ticker                = ticker_input,
             )
 
-            # Extraer métricas unificadas del motor único
-            wacc        = res_fcff["wacc"]
-            ke          = res_fcff["ke"]
-            kd          = res_fcff["kd"]
-            we          = res_fcff["we"]
-            wd          = res_fcff["wd"]
-            g_term      = res_fcff["g_term"]
-            v_intr_fcff = res_fcff["valor_intrinseco"]
+            # Métricas centrales
+            v_intr              = res_adapt["valor_intrinseco"]
+            escenario_pesimista = res_adapt["escenario_pesimista"]
+            escenario_base      = res_adapt["escenario_base"]
+            escenario_optimista = res_adapt["escenario_optimista"]
+            margen_seguridad    = res_adapt["margen_seguridad"]
+            precio_max_compra   = res_adapt["precio_max_compra"]
+            perfil_empresa      = res_adapt["perfil_empresa"]
+            modelos_detalle     = res_adapt["modelos_detalle"]
+            supuestos_clave     = res_adapt["supuestos_clave"]
+            advertencia_calidad = res_adapt["advertencia_calidad"]
 
-            # ── Factory de Sensibilidad DCF y Valor Intrínseco ──
-            fcff_base = res_fcff.get("fcff_base", 0.0)
-            flujo_por_accion = (fcff_base / shares_current) if (shares_current > 0 and fcff_base > 0) else 0.0
-            if flujo_por_accion <= 0:
-                flujo_por_accion = max((fcf_ttm / shares_current) if shares_current > 0 else 0.0, eps_ttm * 0.85)
-            
-            g_1_5 = res_fcff.get("g_fase1", 0.08)
+            wacc        = res_adapt["wacc"]
+            ke          = res_adapt["ke"]
+            kd          = res_adapt["kd"]
+            g_term      = res_adapt["g_term"]
+            v_intr_dcf  = res_adapt["v_intr_dcf"]
+            v_intr_ddm  = res_adapt["v_intr_ddm"]
+            v_intr_mult = res_adapt["v_intr_mult"]
+
+            # Factory para matriz de sensibilidad
+            fcff_base = res_adapt.get("fcff_base", 0.0)
+            flujo_por_accion = (fcff_base / shares_current) if (shares_current > 0 and fcff_base > 0) else (
+                max((fcf_ttm / shares_current) if shares_current > 0 else 0.0, eps_ttm * 0.85)
+            )
+            g_1_5 = supuestos_clave["g_fase1"] / 100.0
             calcular_dcf_fn = crear_calculador_dcf(flujo_por_accion, g_1_5, precio_actual, eps_ttm, total_cash, total_debt, shares_current)
-            v_intr_dcf = v_intr_fcff if v_intr_fcff > 0 else calcular_dcf_fn(wacc, g_term)
-            v_intr = v_intr_dcf
 
-            g_div = min(max(g_1_5 * 0.5, 0.02), 0.04)
-            res_ddm = calcular_ddm(div_rate, ke, g_div, precio_actual)
-            v_intr_ddm = res_ddm["valor_intrinseco_ddm"]
-            val_ddm_str = res_ddm["val_ddm_str"]
-            col_ddm = res_ddm["status"]
-            mostrar_ddm = (div_rate > 0 and (div_yield >= 1.8 or is_fibra_util))
+            val_ddm_str = f"${v_intr_ddm:,.2f}" if v_intr_ddm > 0 else "N/A"
+            col_ddm = "🟢" if v_intr_ddm >= precio_actual else ("⚪" if v_intr_ddm == 0 else "🔴")
+            mostrar_ddm = (div_rate > 0 and (div_yield >= 1.5 or is_fibra_util))
                 
             # ── Múltiplos de Valuación Estandarizados (Finviz / Yahoo Finance) ──
             res_mult = calcular_multiplos_valuacion(
@@ -708,42 +731,78 @@ else:
                             st.plotly_chart(fig_cf, use_container_width=True)
                         except Exception:
                             st.write("Gráfico de flujos no disponible para este ticker.")
-                st.markdown("### 🏷️ Módulo 3: Valuación y Valor Intrínseco (40%)")
+                st.markdown(f"### 🏷️ Módulo 3: Valuación Adaptativa y Multimodelo (40%)")
+                st.caption(f"🎯 **Perfil Financiero Detectado:** {perfil_empresa}")
 
-                if mostrar_ddm:
-                    row1_c1, row1_c2, row1_c3, row1_c4 = st.columns(4)
-                    row1_c1.metric(f"{col_vintr} V. Intrínseco (FCFF)", f"${v_intr_dcf:,.2f}", help=h_vint)
-                    row1_c2.metric(f"{col_ddm} V. Intrínseco (DDM)", val_ddm_str, help=h_ddm)
-                    row1_c3.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", help=h_pmax)
-                    row1_c4.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}", f"{upside:.1f}%", help=h_ws)
-                else:
-                    row1_c1, row1_c2, row1_c3 = st.columns(3)
-                    row1_c1.metric(f"{col_vintr} V. Intrínseco (FCFF)", f"${v_intr_dcf:,.2f}", help=h_vint)
-                    row1_c2.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", help=h_pmax)
-                    row1_c3.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}", f"{upside:.1f}%", help=h_ws)
-                st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+                # ── Fila 1: Valor Intrínseco Central, Margen de Seguridad y Precios Objetivo ──
+                row1_c1, row1_c2, row1_c3, row1_c4 = st.columns(4)
+                upside_vs_precio = ((v_intr - precio_actual) / precio_actual * 100.0) if precio_actual > 0 else 0.0
+                col_vintr_comp = "🟢" if v_intr >= precio_actual else "🔴"
+                col_mseg = "🟢" if margen_seguridad >= 0.10 else ("🟡" if margen_seguridad >= 0.0 else "🔴")
+
+                row1_c1.metric(f"{col_vintr_comp} V. Intrínseco Adaptativo", f"${v_intr:,.2f}", f"{upside_vs_precio:+.1f}% vs Mercado", help="Valor intrínseco compuesto ponderado dinámicamente según el perfil de la empresa (DCF, DDM y Múltiplos Normalizados).")
+                row1_c2.metric(f"{col_mseg} Margen de Seguridad", f"{margen_seguridad*100:+.1f}%", help="Diferencial porcentual entre el valor intrínseco compuesto y la cotización actual.")
+                row1_c3.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% de Descuento", help=h_pmax)
+                row1_c4.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}" if target > 0 else "N/D", f"{upside:+.1f}%" if target > 0 else None, help=h_ws)
+
+                st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+
+                # ── Fila 2: Rango de Escenarios (Pesimista - Base - Optimista) ──
                 row2_c1, row2_c2, row2_c3, row2_c4 = st.columns(4)
-                row2_c1.metric(f"{col_pe} PER (P/E)", f"{pe:.1f}x", help=h_pe)
-                row2_c2.metric(f"{col_pfcf} P/FCF", f"{p_fcf:.1f}x", help=h_pfcf)
-                row2_c3.metric(f"{col_peg} PEG Forward", f"{peg:.2f}x", help=h_peg)
-                row2_c4.metric(f"{col_ev} EV / EBITDA", f"{ev_ebitda:.1f}x", help=h_ev)
+                delta_bear = ((escenario_pesimista - precio_actual) / precio_actual * 100.0) if precio_actual > 0 else 0.0
+                delta_base = ((escenario_base - precio_actual) / precio_actual * 100.0) if precio_actual > 0 else 0.0
+                delta_bull = ((escenario_optimista - precio_actual) / precio_actual * 100.0) if precio_actual > 0 else 0.0
 
+                row2_c1.metric("🐻 Escenario Pesimista", f"${escenario_pesimista:,.2f}", f"{delta_bear:+.1f}%", help="Escenario conservador: Crecimiento -30%, WACC +1.0%, Terminal 2.0%.")
+                row2_c2.metric("⚖️ Escenario Base", f"${escenario_base:,.2f}", f"{delta_base:+.1f}%", help="Escenario central con supuestos fundamentales observables.")
+                row2_c3.metric("🐂 Escenario Optimista", f"${escenario_optimista:,.2f}", f"{delta_bull:+.1f}%", help="Escenario expansivo: Crecimiento +20%, WACC -0.75%, Terminal 3.0%.")
+                row2_c4.metric("💵 Cotización Mercado", f"${precio_actual:,.2f}", help="Último precio de cierre registrado.")
 
+                if advertencia_calidad:
+                    st.warning(advertencia_calidad)
 
-                if mostrar_ddm:
-                    explicacion_modelo = (
-                        f"💡 **Análisis Comparativo de Valuación (FCFF vs. DDM):**\n\n"
-                        f"* **Modelo FCFF:** Valúa el 100% de la caja libre generada por {nombre} disponible para todos los proveedores de capital (deuda + equity), reconciliando vía puente EV→Equity.\n"
-                        f"* **Modelo DDM (Gordon Growth):** Valúa únicamente la corriente directa de dividendos en efectivo distribuidos al accionista (Yield: {div_yield:.2f}%).\n\n"
-                        f"**Criterio:** Al ser una empresa madura o de alto dividendo, ambos modelos ofrecen una perspectiva complementaria."
+                # ── Fila 3: Desglose de Metodologías y Supuestos Clave ──
+                with st.expander("📊 Desglose de Metodologías y Supuestos del Motor Adaptativo (Desplegar)", expanded=False):
+                    dcf_det = modelos_detalle.get("dcf", {})
+                    ddm_det = modelos_detalle.get("ddm", {})
+                    mult_det = modelos_detalle.get("multiplos", {})
+
+                    df_modelos = pd.DataFrame({
+                        "Metodología de Valoración": ["DCF Multietapa (FCFF)", "Descuento de Dividendos (DDM)", "Múltiplos Normalizados"],
+                        "Valor Estimado ($USD)": [
+                            f"${dcf_det.get('valor', 0.0):,.2f}" if dcf_det.get("viable") else "N/A (FCF No Viable)",
+                            f"${ddm_det.get('valor', 0.0):,.2f}" if ddm_det.get("viable") else "N/A (Sin Dividendo Significativo)",
+                            f"${mult_det.get('valor', 0.0):,.2f}" if mult_det.get("viable") else "N/A",
+                        ],
+                        "Ponderación Asignada": [
+                            f"{dcf_det.get('peso', 0.0):.1f}%",
+                            f"{ddm_det.get('peso', 0.0):.1f}%",
+                            f"{mult_det.get('peso', 0.0):.1f}%",
+                        ],
+                        "Estado de Viabilidad": [
+                            "🟢 Viable y Considerado" if dcf_det.get("viable") else "⚪ Omitido / No aplicable",
+                            "🟢 Viable y Considerado" if ddm_det.get("viable") else "⚪ Omitido / No aplicable",
+                            "🟢 Viable y Considerado" if mult_det.get("viable") else "⚪ Omitido / No aplicable",
+                        ],
+                    })
+                    st.dataframe(df_modelos, use_container_width=True, hide_index=True)
+
+                    st.markdown(
+                        f"**Parámetros Macro y Supuestos Clave:** "
+                        f"• **WACC:** `{wacc:.2f}%` "
+                        f"• **Cost of Equity ($K_e$):** `{ke:.2f}%` "
+                        f"• **Tasa Libre de Riesgo ($R_f$):** `{supuestos_clave.get('rf', 4.20):.2f}%` "
+                        f"• **Equity Risk Premium (ERP):** `{supuestos_clave.get('erp', 5.0):.2f}%` "
+                        f"• **Crecimiento $g_{{1-5}}$:** `{supuestos_clave.get('g_fase1', 8.0):.1f}%` "
+                        f"• **Crecimiento Terminal ($g_{{term}}$):** `{supuestos_clave.get('g_term', 2.5):.1f}%`"
                     )
-                else:
-                    explicacion_modelo = (
-                        f"💡 **Criterio de Valuación Seleccionado (FCFF):**\n\n"
-                        f"Para **{nombre}** (empresa orientada a crecimiento o con bajo dividendo del {div_yield:.2f}%), el **Modelo de Flujo de Caja Libre para la Firma (FCFF)** es el estándar analítico institucional utilizado por el sistema. "
-                        f"Este método calcula el flujo de caja disponible **antes** del pago de deuda, descontándolo al WACC empírico calculado con datos de mercado reales, y reconcilia vía puente EV → Equity Value → Valor por Acción."
-                    )
-                st.info(explicacion_modelo)
+
+                st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+                row3_c1, row3_c2, row3_c3, row3_c4 = st.columns(4)
+                row3_c1.metric(f"{col_pe} PER (P/E)", f"{pe:.1f}x", help=h_pe)
+                row3_c2.metric(f"{col_pfcf} P/FCF", f"{p_fcf:.1f}x", help=h_pfcf)
+                row3_c3.metric(f"{col_peg} PEG Forward", f"{peg:.2f}x", help=h_peg)
+                row3_c4.metric(f"{col_ev} EV / EBITDA", f"{ev_ebitda:.1f}x", help=h_ev)
                 st.markdown("### 🛡️ Módulo 4: Capa de Riesgos y Salud Contable (15%)")
                 c16, c17, c18, c19 = st.columns(4)
                 c16.metric(f"{col_z} Altman Z-Score", f"{z_score:.2f}", help=h_z)
@@ -897,20 +956,20 @@ else:
                 "inc": inc,
                 "cf": cf,
                 "perfil_texto": perfil_texto,
-                # ── Campos FCFF para PDF ──────────────────────────────────
-                "fcff_wacc":      res_fcff.get("wacc", wacc),
-                "fcff_ke":        res_fcff.get("ke", ke),
-                "fcff_kd":        res_fcff.get("kd", 0.0),
-                "fcff_rf":        res_fcff.get("rf", tasa_libre_riesgo),
-                "fcff_erp":       res_fcff.get("erp", erp_mercado),
-                "fcff_we":        res_fcff.get("we", we),
-                "fcff_wd":        res_fcff.get("wd", wd),
-                "fcff_tax_rate":  res_fcff.get("tax_rate_real", tax_rate),
-                "fcff_ev":        res_fcff.get("enterprise_value", 0.0),
-                "fcff_equity":    res_fcff.get("equity_value", 0.0),
-                "fcff_margen":    res_fcff.get("margen_seguridad", 0.0),
-                "fcff_historico": res_fcff.get("fcff_historico", []),
-                "fcff_g_term":    res_fcff.get("g_term", 0.025),
+                # ── Campos FCFF / Valuación Adaptativa para PDF ──────────
+                "fcff_wacc":      res_adapt.get("wacc", wacc),
+                "fcff_ke":        res_adapt.get("ke", ke),
+                "fcff_kd":        res_adapt.get("kd", kd),
+                "fcff_rf":        res_adapt.get("rf", rf_tnx),
+                "fcff_erp":       res_adapt.get("erp", erp_mercado),
+                "fcff_we":        res_adapt.get("we", 0.90),
+                "fcff_wd":        res_adapt.get("wd", 0.10),
+                "fcff_tax_rate":  supuestos_clave.get("tax_rate", 0.21),
+                "fcff_ev":        res_adapt.get("enterprise_value", 0.0),
+                "fcff_equity":    res_adapt.get("equity_value", 0.0),
+                "fcff_margen":    res_adapt.get("margen_seguridad", 0.0),
+                "fcff_historico": res_adapt.get("fcff_historico", []),
+                "fcff_g_term":    res_adapt.get("g_term", 0.025),
             }
             pdf_bytes = generar_pdf_reporte(analysis_data)
             st.download_button(
