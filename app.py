@@ -25,6 +25,7 @@ from data.financial_fetcher import (
     obtener_datos_dividendos,
     obtener_noticias_financieras,
     obtener_tasa_fred,
+    obtener_erp_mercado,
     extraer_componentes_fcff,
     extraer_metricas_ttm,
     obtener_rf_tnx,
@@ -409,6 +410,7 @@ else:
             # --- MÓDULO 3: VALUACIÓN, FCFF Y DDM (40%) ---
             beta = m_ttm["beta"]
             rf_tnx = obtener_rf_tnx(fallback_fred=tasa_libre_riesgo)
+            erp_mercado = obtener_erp_mercado(fred_key, rf_tnx)
             comp_fcff = extraer_componentes_fcff(cf, inc, bs, info)
 
             # ── MOTOR FCFF INSTITUCIONAL (Fuente única de verdad para WACC y Valuación) ──
@@ -425,6 +427,7 @@ else:
                 beta                  = beta,
                 rf                    = rf_tnx,
                 precio_actual         = precio_actual,
+                erp                   = erp_mercado,
                 cagr_revenue_hist     = m_ttm.get("cagr_revenue_3_5y", 0.0),
                 revenue_growth_api    = m_ttm.get("revenue_growth", 0.0),
                 revenue_ttm           = m_ttm.get("revenue_ttm", rev_ttm),
@@ -904,6 +907,9 @@ else:
                 "fcff_ke":        res_fcff.get("ke", ke),
                 "fcff_kd":        res_fcff.get("kd", 0.0),
                 "fcff_rf":        res_fcff.get("rf", tasa_libre_riesgo),
+                "fcff_erp":       res_fcff.get("erp", erp_mercado),
+                "fcff_we":        res_fcff.get("we", we),
+                "fcff_wd":        res_fcff.get("wd", wd),
                 "fcff_tax_rate":  res_fcff.get("tax_rate_real", tax_rate),
                 "fcff_ev":        res_fcff.get("enterprise_value", 0.0),
                 "fcff_equity":    res_fcff.get("equity_value", 0.0),

@@ -55,6 +55,24 @@ def obtener_tasa_fred(api_key):
     except Exception:
         return 4.20
 
+@st.cache_data(ttl=3600)
+def obtener_erp_mercado(fred_api_key: str = "", rf_actual: float = 4.25) -> float:
+    """
+    Calcula la Prima de Riesgo de Mercado (ERP) empírica observada a partir de
+    series macroeconómicas oficiales (FRED / diferenciales de riesgo soberano y de crédito).
+    """
+    if fred_api_key:
+        try:
+            url = f"https://api.stlouisfed.org/fred/series/observations?series_id=BAMLH0A0HYM2&api_key={fred_api_key}&file_type=json&sort_order=desc&limit=1"
+            session = obtener_session_yfinance()
+            res = session.get(url, timeout=5).json()
+            spread_val = safe_num(res['observations'][0]['value'], default=3.50)
+            erp_calc = 2.0 + (spread_val * 0.75)
+            return round(min(max(erp_calc, 4.50), 6.00), 2)
+        except Exception:
+            pass
+    return 5.00
+
 @st.cache_data(ttl=60)
 def fetch_cotizacion_intradia(ticker, fmp_api_key):
     precio_actual = 0.0

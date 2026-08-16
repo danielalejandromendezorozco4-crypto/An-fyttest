@@ -435,6 +435,113 @@ def test_evaluar_veredicto_knockout():
     assert "VETO DE INVERSIÓN" in res["veredicto"]
 
 
+def test_fcff_perfil_nflx_empirico():
+    """
+    Verifica valuación con estructura de capital de streaming / media (NFLX):
+    Deuda moderada, alto FCF operativo, amortización de contenido y beta dinámico.
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist          = [7.5e9, 6.0e9, 2.0e9],
+        capex_hist        = [0.4e9, 0.35e9, 0.3e9],
+        interest_hist     = [0.70e9, 0.75e9, 0.80e9],
+        pretax_hist       = [8.0e9, 6.5e9, 5.0e9],
+        taxprov_hist      = [1.5e9, 1.2e9, 0.9e9],
+        total_debt        = 14.0e9,
+        total_cash        = 7.0e9,
+        shares_diluted    = 430e6,
+        mcap              = 280.0e9,
+        beta              = 1.25,
+        rf                = 4.25,
+        precio_actual     = 650.0,
+        erp               = 5.25,
+        cagr_revenue_hist = 0.12,
+    )
+    assert res["valor_intrinseco"] > 0
+    assert 7.5 <= res["wacc"] <= 12.0
+    assert res["kd"] > 0
+    assert res["we"] > 0.90
+    assert res["wd"] < 0.10
+    assert res["tax_rate_real"] > 0.10
+
+
+def test_fcff_perfil_aapl_empirico():
+    """
+    Verifica valuación con estructura de capital cash-rich / megacap (AAPL):
+    Caja superior a deuda, márgenes altos, beta de mercado equilibrado.
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist          = [118e9, 110e9, 104e9],
+        capex_hist        = [10e9, 9.5e9, 9.0e9],
+        interest_hist     = [3.9e9, 3.8e9, 3.5e9],
+        pretax_hist       = [120e9, 115e9, 105e9],
+        taxprov_hist      = [20e9, 19e9, 17e9],
+        total_debt        = 105e9,
+        total_cash        = 160e9,
+        shares_diluted    = 15.4e9,
+        mcap              = 3400e9,
+        beta              = 1.10,
+        rf                = 4.25,
+        precio_actual     = 220.0,
+        erp               = 5.00,
+        cagr_revenue_hist = 0.08,
+    )
+    assert res["valor_intrinseco"] > 0
+    assert res["deuda_neta"] < 0  # Caja neta positiva (-55B)
+    assert res["equity_value"] > res["enterprise_value"]
+
+
+def test_fcff_perfil_ko_empirico():
+    """
+    Verifica valuación con estructura de consumo defensivo / dividend aristocrat (KO):
+    Beta bajo (0.60), apalancamiento estable, flujos altamente predecibles.
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist          = [11.5e9, 11.0e9, 10.5e9],
+        capex_hist        = [1.9e9, 1.8e9, 1.5e9],
+        interest_hist     = [1.5e9, 1.4e9, 1.3e9],
+        pretax_hist       = [13.0e9, 12.5e9, 11.8e9],
+        taxprov_hist      = [2.6e9, 2.5e9, 2.3e9],
+        total_debt        = 40.0e9,
+        total_cash        = 12.0e9,
+        shares_diluted    = 4.3e9,
+        mcap              = 270.0e9,
+        beta              = 0.60,
+        rf                = 4.25,
+        precio_actual     = 62.0,
+        erp               = 4.80,
+        cagr_revenue_hist = 0.05,
+    )
+    assert res["valor_intrinseco"] > 0
+    assert res["ke"] < 8.0  # Ke defensivo: 4.25 + 0.60 * 4.80 = 7.13%
+    assert 6.0 <= res["wacc"] <= 9.0
+
+
+def test_fcff_perfil_jnj_empirico():
+    """
+    Verifica valuación con perfil de salud / AAA balance sheet (JNJ):
+    Bajo beta (0.55), alta solvencia, bajo costo de deuda empírico.
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist          = [22.0e9, 21.0e9, 20.0e9],
+        capex_hist        = [4.5e9, 4.2e9, 4.0e9],
+        interest_hist     = [0.8e9, 0.75e9, 0.70e9],
+        pretax_hist       = [22.0e9, 21.0e9, 19.5e9],
+        taxprov_hist      = [3.5e9, 3.3e9, 3.0e9],
+        total_debt        = 30.0e9,
+        total_cash        = 25.0e9,
+        shares_diluted    = 2.4e9,
+        mcap              = 380.0e9,
+        beta              = 0.55,
+        rf                = 4.25,
+        precio_actual     = 160.0,
+        erp               = 4.80,
+        cagr_revenue_hist = 0.05,
+    )
+    assert res["valor_intrinseco"] > 0
+    assert res["wacc"] <= 8.5
+    assert res["tax_rate_real"] < 0.20
+
+
 class TestValuationUnittest(unittest.TestCase):
     def test_fcff_normalizado(self):
         test_calcular_fcff_normalizado_no_circular()
@@ -453,6 +560,18 @@ class TestValuationUnittest(unittest.TestCase):
 
     def test_fcff_googl(self):
         test_fcff_googl_calibracion()
+
+    def test_fcff_nflx(self):
+        test_fcff_perfil_nflx_empirico()
+
+    def test_fcff_aapl(self):
+        test_fcff_perfil_aapl_empirico()
+
+    def test_fcff_ko(self):
+        test_fcff_perfil_ko_empirico()
+
+    def test_fcff_jnj(self):
+        test_fcff_perfil_jnj_empirico()
 
     def test_fcff_grande(self):
         test_fcff_empresa_grande()
@@ -496,3 +615,4 @@ class TestValuationUnittest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
