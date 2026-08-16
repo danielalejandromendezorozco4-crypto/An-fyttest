@@ -373,13 +373,25 @@ else:
             else: col_fcfc, msg_fcfc = "🔴", "Baja conversión contable a flujo de caja."
             
             alerta_fcf_calidad = f"⚠️ Alerta de Calidad de Flujo: Convierte solo el {fcf_conv*100:.1f}% de utilidades en FCF." if (fcf_conv < 0.8 and net_income > 0) else ""
-            eps_growth = m_ttm["earnings_growth"] * 100.0 if m_ttm["earnings_growth"] < 1.0 else m_ttm["earnings_growth"]
-            ni_growth = safe_get(info, ["netIncomeGrowth"], eps_growth/100) * 100
-            msg_eps = ""
-            if eps_growth > 10 and ni_growth < 3: col_eps, msg_eps = "🟡", "Alerta: EPS impulsado por recompra de acciones."
-            elif eps_growth > 10: col_eps, msg_eps = "🟢", "Crecimiento robusto de beneficios."
-            elif eps_growth >= 6: col_eps, msg_eps = "🟡", "Crecimiento moderado."
-            else: col_eps, msg_eps = "🔴", "Crecimiento lento o estancado."
+            earnings_growth_val = m_ttm.get("earnings_growth", 0.0)
+            if earnings_growth_val is not None and not pd.isna(earnings_growth_val) and earnings_growth_val != 0.0:
+                eps_growth = earnings_growth_val * 100.0 if abs(earnings_growth_val) < 1.0 else earnings_growth_val
+                eps_growth_str = f"{eps_growth:.1f}%"
+                ni_growth = safe_get(info, ["netIncomeGrowth"], eps_growth / 100.0) * 100.0
+                if eps_growth > 10 and ni_growth < 3:
+                    col_eps, msg_eps = "🟡", "Alerta: EPS impulsado por recompra de acciones."
+                elif eps_growth > 10:
+                    col_eps, msg_eps = "🟢", "Crecimiento robusto de beneficios."
+                elif eps_growth >= 6:
+                    col_eps, msg_eps = "🟡", "Crecimiento moderado."
+                elif eps_growth >= 0:
+                    col_eps, msg_eps = "🔴", "Crecimiento lento o estancado."
+                else:
+                    col_eps, msg_eps = "🔴", "Contracción en beneficios por acción (YoY)."
+            else:
+                eps_growth = 0.0
+                eps_growth_str = "N/D"
+                col_eps, msg_eps = "⚪", "Crecimiento de EPS no disponible o no reportado."
             # BUYBACK YIELD
             sh_prev = bs.loc['Basic Average Shares'].iloc[1] if (not bs.empty and 'Basic Average Shares' in bs.index and len(bs.columns) > 1 and not pd.isna(bs.loc['Basic Average Shares'].iloc[1])) else shares_current
             buyback_yield = ((sh_prev - shares_current) / sh_prev * 100) if sh_prev > 0 else 0.0
@@ -642,7 +654,7 @@ else:
                 c8.metric(f"{col_fcfc} Conv. FCF", f"{fcf_conv:.1f}x", help=h_fcfc)
                 c8_fcfy, c9, c9_by, c9_div = st.columns(4)
                 c8_fcfy.metric(f"{col_fcfy} FCF Yield", f"{fcf_yield:.2f}%", help=h_fcfy)
-                c9.metric(f"{col_eps} EPS YoY", f"{eps_growth:.1f}%", help=h_eps)
+                c9.metric(f"{col_eps} EPS YoY", eps_growth_str, help=h_eps)
                 c9_by.metric(f"{col_by} Buyback Yield", f"{buyback_yield:.1f}%", help=h_by)
                 c9_div.metric("💵 Dividendos", val_div_metric, help=msg_div_tooltip)
                 

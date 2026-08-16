@@ -342,6 +342,55 @@ def test_tolerancia_activos_clave_finviz_yahoo():
         assert abs(res_rent["mg_op"] - mg_op_ref) / mg_op_ref <= 0.02, f"Fallo Margen Op en {ticker}"
 
 
+def test_extraer_metricas_ttm_nflx_defensivo():
+    """
+    Verifica que la extracción de métricas TTM para tickers como NFLX o empresas
+    sin datos de earningsGrowth no lance NameError ni KeyError y maneje valores nulos de forma segura.
+    """
+    info_nflx_incompleto = {
+        "symbol": "NFLX",
+        "longName": "Netflix Inc.",
+        "marketCap": 280_000_000_000.0,
+        "sharesOutstanding": 430_000_000.0,
+        "totalDebt": 14_000_000_000.0,
+        "totalCash": 7_000_000_000.0,
+        "totalRevenue": 36_000_000_000.0,
+        "operatingIncome": 8_000_000_000.0,
+        "netIncomeToCommon": 6_500_000_000.0,
+        "operatingCashflow": 7_500_000_000.0,
+        "freeCashflow": 6_500_000_000.0,
+        # earningsGrowth omitido intencionalmente para probar resiliencia
+        "beta": 1.25,
+    }
+
+    inc_nflx = pd.DataFrame({
+        "2023": [36e9, 8e9, 6.5e9],
+        "2022": [31e9, 5.6e9, 4.4e9],
+    }, index=["Total Revenue", "Operating Income", "Net Income"])
+
+    bs_nflx = pd.DataFrame({
+        "2023": [14e9, 7e9, 48e9],
+        "2022": [14.5e9, 5.1e9, 45e9],
+    }, index=["Total Debt", "Cash And Cash Equivalents", "Total Assets"])
+
+    cf_nflx = pd.DataFrame({
+        "2023": [7.5e9, -1.0e9, 6.5e9],
+        "2022": [2.0e9, -0.4e9, 1.6e9],
+    }, index=["Operating Cash Flow", "Capital Expenditure", "Free Cash Flow"])
+
+    # No debe lanzar NameError ni KeyError
+    m = extraer_metricas_ttm(info_nflx_incompleto, inc_nflx, bs_nflx, cf_nflx, precio_actual=650.0)
+
+    assert isinstance(m, dict)
+    assert "earnings_growth" in m
+    assert "revenue_growth" in m
+    assert "cagr_revenue_3_5y" in m
+    assert "op_margin_hist" in m
+    assert "shares_diluted" in m
+    assert m["mcap"] == 280_000_000_000.0
+    assert m["earnings_growth"] >= 0.0  # Ingerido de Net Income CAGR
+
+
 class TestMetricsUnittest(unittest.TestCase):
     def test_multiplos_estandar(self):
         test_multiplos_valuacion_estandar()
@@ -361,6 +410,10 @@ class TestMetricsUnittest(unittest.TestCase):
     def test_tolerancia_activos(self):
         test_tolerancia_activos_clave_finviz_yahoo()
 
+    def test_nflx_defensivo(self):
+        test_extraer_metricas_ttm_nflx_defensivo()
+
 
 if __name__ == "__main__":
     unittest.main()
+

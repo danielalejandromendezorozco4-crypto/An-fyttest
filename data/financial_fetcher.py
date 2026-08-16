@@ -805,6 +805,32 @@ def extraer_metricas_ttm(
     if op_margin_hist == 0.0 and revenue_ttm > 0 and operating_income_ttm > 0:
         op_margin_hist = operating_income_ttm / revenue_ttm
 
+    # ── 7. Crecimiento de Ganancias, Ingresos y Consenso ────────────────────
+    earnings_growth = safe_num(info.get("earningsGrowth", 0.0), 0.0)
+    if earnings_growth == 0.0 and isinstance(inc, pd.DataFrame) and not inc.empty:
+        for fila_ni in ["Net Income", "NetIncome", "Net Income Common Stockholders"]:
+            if fila_ni in inc.index:
+                try:
+                    s_ni = inc.loc[fila_ni].dropna()
+                    vals_ni = [safe_num(v, 0.0) for v in s_ni.values if safe_num(v, 0.0) > 0]
+                    if len(vals_ni) >= 2 and vals_ni[0] > 0 and vals_ni[-1] > 0:
+                        n_anios_ni = min(len(vals_ni) - 1, 3)
+                        ni_cagr = (vals_ni[0] / vals_ni[n_anios_ni]) ** (1.0 / n_anios_ni) - 1.0
+                        if -0.50 <= ni_cagr <= 1.0:
+                            earnings_growth = ni_cagr
+                    break
+                except Exception:
+                    pass
+
+    revenue_growth = safe_num(info.get("revenueGrowth", 0.0), 0.0)
+    if revenue_growth == 0.0 and cagr_revenue_3_5y != 0.0:
+        revenue_growth = cagr_revenue_3_5y
+
+    peg_ratio_info = safe_num(info.get("pegRatio", 0.0), 0.0)
+    beta = safe_num(info.get("beta", 1.0), 1.0)
+    short_percent_of_float = safe_num(info.get("shortPercentOfFloat", 0.0), 0.0)
+    target_mean_price = safe_num(info.get("targetMeanPrice", 0.0), 0.0)
+
     return {
         "shares_diluted": shares_diluted,
         "mcap": mcap,
