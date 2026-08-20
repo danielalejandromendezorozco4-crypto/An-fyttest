@@ -47,40 +47,38 @@ def inyectar_estilos():
         box-shadow: 0 0 8px rgba(212, 175, 55, 0.3) !important;
     }
     
-    /* PREVENCIÓN DE TRUNCAMIENTO DE TEXTO EN MÉTRICAS Y ALTO CONTRASTE */
+    /* PREVENCIÓN DE TRUNCAMIENTO Y ALTO CONTRASTE EN TÍTULOS DE MÉTRICAS */
     div[data-testid="stMetricLabel"],
-    div[data-testid="stMetricLabel"] > label,
-    div[data-testid="stMetricLabel"] > div {
-        font-size: 12.5px !important; 
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricLabel"] label,
+    [data-testid="stMetricLabel"] p,
+    [data-testid="stMetricLabel"] span,
+    [data-testid="stMetricLabel"] div,
+    [data-testid="stMetricLabel"] [data-testid="stMetricLabelText"] {
+        font-size: 13px !important; 
         white-space: normal !important; 
         overflow-wrap: break-word !important;
         line-height: 1.3 !important; 
         color: #0F172A !important;
+        -webkit-text-fill-color: #0F172A !important;
         font-weight: 800 !important;
+        opacity: 1 !important;
     }
     
-    div[data-testid="stMetricLabel"] p,
-    div[data-testid="stMetricLabel"] > label > div > p,
-    div[data-testid="stMetricLabel"] > div > p {
-        font-size: 12.5px !important; 
-        white-space: normal !important; 
-        overflow-wrap: break-word !important;
-        line-height: 1.3 !important; 
-        min-height: 2.6em !important; 
-        color: #0F172A !important;
-        font-weight: 800 !important;
-        display: -webkit-box !important;
-        -webkit-line-clamp: 2 !important; 
-        -webkit-box-orient: vertical !important;
-        overflow: hidden !important;
-        margin: 0 !important;
+    div[data-testid="stMetricLabel"] {
+        min-height: 2.6em !important;
+        display: flex !important;
+        align-items: center !important;
     }
     
     div[data-testid="stMetricValue"],
+    [data-testid="stMetricValue"] *,
     [data-testid="stMetricValue"] div {
         font-size: 20px !important;
         color: #0F172A !important;
+        -webkit-text-fill-color: #0F172A !important;
         font-weight: 800 !important;
+        opacity: 1 !important;
     }
     
     /* Tipografía e Identidad de Marca An-FyT */
@@ -154,20 +152,18 @@ def inyectar_estilos():
         pointer-events: none !important;
         display: inline-flex !important;
         align-items: center !important;
-        justify-content: center !important;
-        width: auto !important;
-        height: auto !important;
+        vertical-align: middle !important;
         min-height: 0 !important;
-        max-height: none !important;
-        margin: 0 0 0 4px !important;
         padding: 0 !important;
         border: none !important;
-        vertical-align: middle !important;
-        flex-shrink: 0 !important;
     }
 
     [data-testid="stTooltipHoverTarget"] > *:not([data-testid="stTooltipIcon"]) {
         pointer-events: none !important;
+        color: #0F172A !important;
+        -webkit-text-fill-color: #0F172A !important;
+        font-weight: 800 !important;
+        opacity: 1 !important;
     }
 
     /* 2. El ícono circular (?) es el ÚNICO nodo interactivo con hover activo */
