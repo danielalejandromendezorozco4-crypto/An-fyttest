@@ -8,6 +8,7 @@ import streamlit as st
 # Custom module imports
 from config.settings import (
     SECTOR_BENCHMARKS,
+    TOOLTIP_FADE_YEARS,
     cargar_secrets,
     obtener_ruta_logo,
     safe_get,
@@ -150,8 +151,7 @@ with st.sidebar.expander("⚙️ Supuestos Avanzados DCF", expanded=False):
     fade_years_ui = st.slider(
         "Años Fade Period",
         min_value=1, max_value=5, value=3, step=1,
-        help="Años de transición lineal desde la tasa de crecimiento inicial "
-             "hacia la tasa terminal (g_term). 1 = transición abrupta.",
+        help=TOOLTIP_FADE_YEARS,
     )
     g_term_ui = st.slider(
         "Tasa Terminal g (%)",

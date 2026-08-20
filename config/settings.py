@@ -27,6 +27,15 @@ WACC_CEILING: float = 25.0
 #: Tasa terminal de crecimiento perpetuo por defecto (fracción).
 G_TERM_DEFAULT: float = 0.025
 
+#: Tooltip explicativo para el control de Años Fade Period en la interfaz.
+TOOLTIP_FADE_YEARS: str = (
+    "Periodo de convergencia lineal desde el crecimiento inicial hacia la tasa terminal (g_term).\n\n"
+    "Guía de calibración según foso económico:\n"
+    "• 1 a 2 años: Empresas cíclicas, materias primas o ensambladoras de hardware.\n"
+    "• 3 a 4 años: Empresas maduras con ventajas competitivas sólidas (ej. Apple, Google).\n"
+    "• 5 años: Monopolios naturales, duopolios o efectos de red críticos (ej. Visa, Mastercard, ASML)."
+)
+
 SECTOR_BENCHMARKS = {
     "Technology": {"PE": 28.0, "PEG": 1.5, "PFCF": 25.0, "ROA": 10.0, "ROE": 20.0, "ROI": 15.0},
     "Healthcare": {"PE": 22.0, "PEG": 1.8, "PFCF": 20.0, "ROA": 8.0, "ROE": 15.0, "ROI": 10.0},
