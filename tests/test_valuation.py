@@ -50,7 +50,7 @@ def test_fcff_base_con_datos_reales():
         precio_actual  = 80.0,
     )
     assert abs(res["fcff_base"] - fcff_esperado) < 1.0
-    assert len(res["fcff_proyectado"]) == 5
+    assert len(res["fcff_proyectado"]) == res["n_total"]
     assert res["valor_intrinseco"] > 0
     assert res["enterprise_value"] > 0
     assert res["equity_value"] > 0
@@ -240,6 +240,242 @@ class TestValuationUnittest(unittest.TestCase):
 
     def test_factory(self):
         test_factory_calculador_dcf()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NUEVOS TESTS — Refactorización Metodológica v2
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _base_params(**overrides):
+    """Parámetros base compartidos para tests de valuación."""
+    params = {
+        "ocf_hist":      [80_000_000.0, 75_000_000.0, 70_000_000.0],
+        "capex_hist":    [15_000_000.0, 14_000_000.0, 13_000_000.0],
+        "interest_hist": [3_000_000.0,  2_800_000.0,  2_600_000.0],
+        "pretax_hist":   [60_000_000.0, 55_000_000.0, 50_000_000.0],
+        "taxprov_hist":  [12_600_000.0, 11_550_000.0, 10_500_000.0],
+        "total_debt":    50_000_000.0,
+        "total_cash":    20_000_000.0,
+        "shares_diluted": 10_000_000.0,
+        "mcap":          500_000_000.0,
+        "beta":          1.1,
+        "rf":            4.20,
+        "precio_actual": 50.0,
+    }
+    params.update(overrides)
+    return params
+
+
+def test_fcff_dual_path_ebit_primario():
+    """
+    Cuando ebit_hist, da_hist y delta_nwc_hist son provistos con EBIT > 0,
+    el path primario desapalancado debe producir un FCFF histórico válido
+    mayor que cero y el método debe reportarse como 'ebit'.
+    """
+    ebit = 60_000_000.0
+    da   = 12_000_000.0
+    capex = 15_000_000.0
+    dnwc  = 3_000_000.0
+    tax   = 0.21
+    # FCFF esperado vía EBIT: 60M*(1-0.21) + 12M - 15M - 3M = 47.4M + 12M - 18M = 41.4M
+    fcff_esperado = ebit * (1.0 - tax) + da - capex - dnwc
+
+    res = calcular_fcff_valuation(
+        **_base_params(),
+        ebit_hist      = [ebit],
+        da_hist        = [da],
+        delta_nwc_hist = [dnwc],
+    )
+    assert res["fcff_method"] == "ebit", f"Se esperaba path EBIT pero fue: {res['fcff_method']}"
+    assert res["fcff_historico"][0] == pytest.approx(fcff_esperado, rel=0.01), \
+        f"FCFF vía EBIT incorrecto: {res['fcff_historico'][0]:.0f} vs {fcff_esperado:.0f}"
+
+
+def test_fcff_dual_path_ocf_fallback_cuando_ebit_negativo():
+    """
+    Cuando EBIT es negativo, el motor debe caer al path OCF.
+    El método reportado debe ser 'ocf'.
+    """
+    ocf   = 80_000_000.0
+    capex = 15_000_000.0
+    interest = 3_000_000.0
+    tax = 0.21
+
+    res = calcular_fcff_valuation(
+        **_base_params(),
+        ebit_hist      = [-5_000_000.0],  # EBIT negativo → fallback
+        da_hist        = [10_000_000.0],
+        delta_nwc_hist = [2_000_000.0],
+    )
+    assert res["fcff_method"] == "ocf", f"Se esperaba fallback OCF pero fue: {res['fcff_method']}"
+    fcff_ocf = ocf + interest * (1.0 - tax) - capex
+    assert res["fcff_historico"][0] == pytest.approx(fcff_ocf, rel=0.02)
+
+
+def test_wacc_clamping_invariante_minimo():
+    """
+    El WACC resultante debe ser siempre >= g_term + 1.5%.
+    Se verifica con un caso donde beta muy bajo produciría WACC < g + 1.5%.
+    """
+    from config.settings import WACC_MIN_SPREAD_OVER_G
+    res = calcular_fcff_valuation(
+        **_base_params(beta=0.10, rf=2.0),  # beta muy bajo → WACC muy bajo
+    )
+    wacc_dec  = res["wacc"] / 100.0
+    g_term    = res["g_term"]
+    assert wacc_dec >= g_term + WACC_MIN_SPREAD_OVER_G - 1e-9, \
+        f"Invariante violada: WACC={wacc_dec:.4f}, g_term={g_term:.4f}, spread={wacc_dec-g_term:.4f}"
+
+
+def test_fade_period_tasas_decrecientes():
+    """
+    El fade period debe producir tasas de crecimiento estrictamente
+    decrecientes desde g_1_5 hacia g_term en los años del fade.
+    """
+    res = calcular_fcff_valuation(
+        **_base_params(),
+        fade_years         = 3,
+        g_term_override    = 0.025,
+        revenue_growth_api = 0.12,  # g_1_5 = 12%
+    )
+    detalle = res["fcff_pv_detalle"]
+    assert len(detalle) == 8, f"Esperado 5 + 3 = 8 años, obtenido: {len(detalle)}"
+    # Verificar que los años del fade tienen g decreciente
+    fade_rows = [r for r in detalle if r["Fase"] == "Fade"]
+    assert len(fade_rows) == 3
+    tasas_fade = [r["g Aplicada (%)"] for r in fade_rows]
+    for i in range(len(tasas_fade) - 1):
+        assert tasas_fade[i] >= tasas_fade[i + 1], \
+            f"g no es decreciente en fade: año {i} = {tasas_fade[i]}, año {i+1} = {tasas_fade[i+1]}"
+
+
+def test_mid_year_convention_pv_detalle():
+    """
+    Cada fila de fcff_pv_detalle debe cumplir:
+        VP = FCFF / (1+WACC)^(t-0.5)
+    La suma de los VP debe ser igual a pv_flujos reportado (tolerancia 1%).
+    """
+    import math
+    res = calcular_fcff_valuation(**_base_params(), fade_years=2)
+    detalle = res["fcff_pv_detalle"]
+    wacc_dec = res["wacc"] / 100.0
+
+    suma_pv_detalle = sum(r["VP (M USD)"] for r in detalle) * 1e6
+    assert abs(suma_pv_detalle - res["pv_flujos"]) / res["pv_flujos"] < 0.01, \
+        f"Discrepancia en suma VP: {suma_pv_detalle:.0f} vs pv_flujos={res['pv_flujos']:.0f}"
+
+    for row in detalle:
+        t = row["Ano"]
+        factor_esperado = (1.0 + wacc_dec) ** (t - 0.5)
+        factor_real     = row["Factor Desc (t-0.5)"]
+        assert abs(factor_real - factor_esperado) < 0.0001, \
+            f"Factor de descuento incorrecto en año {t}: {factor_real} vs {factor_esperado}"
+
+
+def test_buyback_reduce_acciones_efectivas():
+    """
+    Con buyback_rate = 2% anual y n_total = 8 años,
+    shares_efectivas = shares * (1 - 0.02)^8 < shares_diluted.
+    El valor intrínseco debe ser mayor que sin buyback.
+    """
+    params = _base_params()
+
+    res_sin = calcular_fcff_valuation(**params, buyback_rate=0.0, fade_years=3)
+    res_con = calcular_fcff_valuation(**params, buyback_rate=0.02, fade_years=3)
+
+    n_total = res_con["n_total"]
+    shares_orig = params["shares_diluted"]
+    shares_ef_esperado = shares_orig * (0.98 ** n_total)
+
+    assert res_con["shares_efectivas"] == pytest.approx(shares_ef_esperado, rel=0.01)
+    assert res_con["valor_intrinseco"] > res_sin["valor_intrinseco"], \
+        "Buyback positivo debe aumentar el valor intrínseco por acción"
+
+
+def test_wacc_igual_a_g_edge_case():
+    """
+    Cuando el WACC calculado se acercaría a g_term, el motor debe forzar
+    el spread mínimo evitando NaN o ZeroDivision en el Valor Terminal.
+    """
+    # Beta muy bajo + rf muy bajo → WACC podría ser ~2.5% ≈ g_term
+    res = calcular_fcff_valuation(
+        **_base_params(beta=0.05, rf=1.5, precio_actual=50.0),
+        g_term_override = 0.025,
+        fade_years = 2,
+    )
+    assert res["terminal_value"] > 0, "Terminal Value no debe ser cero o negativo"
+    assert not (res["valor_intrinseco"] != res["valor_intrinseco"]), "NaN detectado en valor intrínseco"
+    assert not (res["terminal_value"] != res["terminal_value"]), "NaN detectado en terminal_value"
+    wacc_dec = res["wacc"] / 100.0
+    g_term   = res["g_term"]
+    spread   = wacc_dec - g_term
+    assert spread > 0.010, f"Spread WACC-g demasiado pequeño: {spread:.4f}"
+
+
+def test_msft_megacap_sin_nan_ni_error():
+    """
+    Simula condiciones típicas de un megacap tipo MSFT.
+    Verifica que el motor no produce NaN, ZeroDivision ni valores negativos
+    en enterprise_value, pv_terminal, valor_intrinseco.
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist         = [87e9, 79e9, 70e9, 60e9],
+        capex_hist       = [20e9, 18e9, 16e9, 14e9],
+        interest_hist    = [2.5e9, 2.2e9, 2.0e9, 1.8e9],
+        pretax_hist      = [100e9, 90e9, 80e9, 70e9],
+        taxprov_hist     = [17e9,  15e9, 14e9, 12e9],
+        total_debt       = 80e9,
+        total_cash       = 60e9,
+        shares_diluted   = 7.4e9,
+        mcap             = 3_200e9,
+        beta             = 0.90,
+        rf               = 4.30,
+        precio_actual    = 450.0,
+        erp              = 4.5,
+        revenue_growth_api = 0.13,
+        ebit_hist        = [70e9, 65e9, 58e9, 50e9],
+        da_hist          = [14e9, 13e9, 12e9, 11e9],
+        delta_nwc_hist   = [3e9,  2e9,  2e9,  1e9],
+        buyback_rate     = 0.015,
+        fade_years       = 3,
+        g_term_override  = 0.028,
+    )
+
+    for campo in ["valor_intrinseco", "enterprise_value", "pv_flujos", "pv_terminal", "terminal_value"]:
+        val = res[campo]
+        assert val == val, f"NaN detectado en {campo}"  # NaN != NaN
+        assert val >= 0, f"Valor negativo en {campo}: {val}"
+
+    assert res["fcff_pv_detalle"], "fcff_pv_detalle no debe estar vacío para MSFT"
+    assert len(res["fcff_pv_detalle"]) == 8, "Esperado 5 años + 3 fade = 8 filas"
+
+
+class TestRefactorizacionV2(unittest.TestCase):
+    """Suite unittest que envuelve los tests de refactorización v2."""
+
+    def test_dual_path_ebit(self):
+        test_fcff_dual_path_ebit_primario()
+
+    def test_dual_path_ocf_fallback(self):
+        test_fcff_dual_path_ocf_fallback_cuando_ebit_negativo()
+
+    def test_wacc_invariante(self):
+        test_wacc_clamping_invariante_minimo()
+
+    def test_fade_decreciente(self):
+        test_fade_period_tasas_decrecientes()
+
+    def test_mid_year_pv(self):
+        test_mid_year_convention_pv_detalle()
+
+    def test_buyback(self):
+        test_buyback_reduce_acciones_efectivas()
+
+    def test_wacc_g_edge(self):
+        test_wacc_igual_a_g_edge_case()
+
+    def test_msft_megacap(self):
+        test_msft_megacap_sin_nan_ni_error()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,29 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTANTES GLOBALES DEL MOTOR DCF / FCFF
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Recompra neta anual por defecto (fracción; 0.0 = sin ajuste).
+DEFAULT_BUYBACK_RATE: float = 0.0
+
+#: Años de transición lineal desde g_inicial hasta g_terminal (fade period).
+DEFAULT_FADE_YEARS: int = 3
+
+#: Spread mínimo que debe mantener el WACC sobre la tasa terminal para
+#: evitar denominadores negativos o asíntotas en el Valor Terminal de Gordon.
+WACC_MIN_SPREAD_OVER_G: float = 0.015
+
+#: Piso absoluto del WACC expresado en porcentaje (%).
+WACC_FLOOR: float = 3.0
+
+#: Techo absoluto del WACC expresado en porcentaje (%).
+WACC_CEILING: float = 25.0
+
+#: Tasa terminal de crecimiento perpetuo por defecto (fracción).
+G_TERM_DEFAULT: float = 0.025
+
 SECTOR_BENCHMARKS = {
     "Technology": {"PE": 28.0, "PEG": 1.5, "PFCF": 25.0, "ROA": 10.0, "ROE": 20.0, "ROI": 15.0},
     "Healthcare": {"PE": 22.0, "PEG": 1.8, "PFCF": 20.0, "ROA": 8.0, "ROE": 15.0, "ROI": 10.0},

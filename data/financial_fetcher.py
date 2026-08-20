@@ -484,161 +484,11 @@ def extraer_componentes_fcff(
 ) -> dict:
     """
     Extrae y sanitiza todos los insumos necesarios para el cálculo de FCFF
-    histórico desde los DataFrames de estados financieros.
+    histórico desde los DataFrames de estados financieros con jerarquía dual-path.
 
-    Maneja defensivamente:
-    - CapEx reportado como negativo (yfinance) o positivo (FMP).
-    - Interest Expense reportado con/sin signo.
-    - Empresas sin deuda (total_debt = 0).
-    - DataFrames vacíos o con datos parciales.
-
-    Args:
-        cf:   DataFrame del estado de flujos de efectivo.
-        inc:  DataFrame del estado de resultados.
-        bs:   DataFrame del balance general.
-        info: Diccionario con metadatos y métricas del ticker.
-
-    Returns:
-        Diccionario con las siguientes claves:
-        - ``ocf_hist``        (list[float]): Operating Cash Flow por período (más reciente primero).
-        - ``capex_hist``      (list[float]): CapEx positivo por período.
-        - ``interest_hist``   (list[float]): Interest Expense (absoluto) por período.
-        - ``pretax_hist``     (list[float]): Pre-tax Income por período.
-        - ``taxprov_hist``    (list[float]): Tax Provision por período.
-        - ``total_debt``      (float):       Deuda total más reciente.
-        - ``total_cash``      (float):       Efectivo + equivalentes más reciente.
-        - ``shares_diluted``  (float):       Acciones diluidas en circulación.
-        - ``n_periodos``      (int):         Número de períodos históricos con datos completos.
+    Delega en ``extraer_fcff_desapalancado`` garantizando compatibilidad total.
     """
-    # ── 1. Operating Cash Flow histórico ────────────────────────────────────
-    ocf_hist: list[float] = []
-    for fila in ["Operating Cash Flow", "OperatingCashFlow",
-                 "Cash Flow From Continuing Operating Activities"]:
-        if isinstance(cf, pd.DataFrame) and not cf.empty and fila in cf.index:
-            try:
-                serie = cf.loc[fila].dropna()
-                if not serie.empty:
-                    ocf_hist = [safe_num(v, 0.0) for v in serie.values]
-                    break
-            except Exception:
-                pass
-    if not ocf_hist:
-        # Fallback escalar desde info
-        ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
-        if ocf_ttm != 0.0:
-            ocf_hist = [ocf_ttm]
-
-    # ── 2. CapEx histórico (normalizado como gasto positivo) ────────────────
-    capex_hist = obtener_capex_historico(cf)
-    if not capex_hist:
-        # Inferir desde FCF y OCF escalares
-        fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
-        ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
-        if ocf_ttm != 0.0 and fcf_ttm != 0.0:
-            capex_hist = [abs(ocf_ttm - fcf_ttm)]
-        else:
-            capex_hist = [0.0]
-
-    # ── 3. Interest Expense histórico (absoluto) ────────────────────────────
-    interest_hist: list[float] = []
-    for fila in ["Interest Expense", "InterestExpense",
-                 "Interest Expense Non Operating"]:
-        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
-            try:
-                serie = inc.loc[fila].dropna()
-                if not serie.empty:
-                    interest_hist = [abs(safe_num(v, 0.0)) for v in serie.values]
-                    break
-            except Exception:
-                pass
-    if not interest_hist:
-        int_scalar = abs(safe_num(info.get("interestExpense", 0.0), 0.0))
-        interest_hist = [int_scalar]
-
-    # ── 4. Pre-tax Income histórico ─────────────────────────────────────────
-    pretax_hist: list[float] = []
-    for fila in ["Pretax Income", "Income Before Tax",
-                 "IncomeBeforeTax", "Pretax Income"]:
-        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
-            try:
-                serie = inc.loc[fila].dropna()
-                if not serie.empty:
-                    pretax_hist = [safe_num(v, 0.0) for v in serie.values]
-                    break
-            except Exception:
-                pass
-    if not pretax_hist:
-        pretax_hist = [safe_num(info.get("pretaxIncome", 0.0), 0.0)]
-
-    # ── 5. Tax Provision histórica ──────────────────────────────────────────
-    taxprov_hist: list[float] = []
-    for fila in ["Tax Provision", "IncomeTaxExpense",
-                 "Income Tax Expense", "Tax Effect Of Unusual Items"]:
-        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
-            try:
-                serie = inc.loc[fila].dropna()
-                if not serie.empty:
-                    taxprov_hist = [safe_num(v, 0.0) for v in serie.values]
-                    break
-            except Exception:
-                pass
-    if not taxprov_hist:
-        taxprov_hist = [safe_num(info.get("taxProvision", 0.0), 0.0)]
-
-    # ── 6. Balance: Deuda Total, Efectivo, Acciones Diluidas ────────────────
-    total_debt = safe_num(info.get("totalDebt", 0.0), 0.0)
-    if total_debt == 0.0:
-        total_debt = _extraer_val_df(bs, [
-            "Total Debt", "TotalDebt", "Long Term Debt",
-            "Long Term Debt And Capital Lease Obligation"
-        ], default=0.0)
-
-    total_cash = safe_num(info.get("totalCash", 0.0), 0.0)
-    if total_cash == 0.0:
-        total_cash = _extraer_val_df(bs, [
-            "Cash And Cash Equivalents",
-            "CashCashEquivalentsAndShortTermInvestments",
-            "Cash Financial", "Cash And Short Term Investments"
-        ], default=0.0)
-
-    # Acciones diluidas: preferir diluted shares sobre basic
-    shares_diluted = safe_num(info.get("sharesOutstanding", 0.0), 0.0)
-    for fila in ["Diluted Average Shares", "Ordinary Shares Number",
-                 "Basic Average Shares"]:
-        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
-            try:
-                val = safe_num(inc.loc[fila].dropna().iloc[0], default=None)
-                if val is not None and val > 0:
-                    shares_diluted = val
-                    break
-            except Exception:
-                pass
-
-    # ── 7. Alinear longitudes de arrays al mínimo disponible ────────────────
-    n_max = max(len(ocf_hist), 1)
-    def _pad(lst: list[float], n: int, fill: float = 0.0) -> list[float]:
-        """Extiende o recorta una lista a `n` elementos con valor `fill`."""
-        if len(lst) >= n:
-            return lst[:n]
-        return lst + [fill] * (n - len(lst))
-
-    ocf_hist    = _pad(ocf_hist,      n_max)
-    capex_hist  = _pad(capex_hist,    n_max)
-    interest_hist = _pad(interest_hist, n_max)
-    pretax_hist = _pad(pretax_hist,   n_max)
-    taxprov_hist = _pad(taxprov_hist, n_max)
-
-    return {
-        "ocf_hist":      ocf_hist,
-        "capex_hist":    capex_hist,
-        "interest_hist": interest_hist,
-        "pretax_hist":   pretax_hist,
-        "taxprov_hist":  taxprov_hist,
-        "total_debt":    total_debt,
-        "total_cash":    total_cash,
-        "shares_diluted": shares_diluted,
-        "n_periodos":    n_max,
-    }
+    return extraer_fcff_desapalancado(cf, inc, bs, info)
 
 
 def extraer_metricas_ttm(
@@ -892,3 +742,238 @@ def extraer_metricas_ttm(
         "target_mean_price": target_mean_price,
     }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXTRACCIÓN FCFF DESAPALANCADO — DUAL-PATH (EBIT primario / OCF fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extraer_serie(
+    df: pd.DataFrame,
+    posibles_filas: list[str],
+    absval: bool = False,
+) -> list[float]:
+    """
+    Extrae una serie histórica de un DataFrame (índice = conceptos, columnas = fechas)
+    buscando secuencialmente los nombres de fila en ``posibles_filas``.
+
+    Args:
+        df:             DataFrame de estados financieros.
+        posibles_filas: Lista de nombres de fila candidatos (orden de prioridad).
+        absval:         Si True aplica ``abs()`` a cada valor extraído.
+
+    Returns:
+        Lista de floats ordenados del más reciente al más antiguo.
+        Lista vacía si ninguna fila fue encontrada o el DataFrame está vacío.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    for fila in posibles_filas:
+        if fila in df.index:
+            try:
+                serie = df.loc[fila].dropna()
+                if not serie.empty:
+                    vals = [abs(safe_num(v, 0.0)) if absval else safe_num(v, 0.0)
+                            for v in serie.values]
+                    return vals
+            except Exception:
+                pass
+    return []
+
+
+def extraer_fcff_desapalancado(
+    cf: pd.DataFrame,
+    inc: pd.DataFrame,
+    bs: pd.DataFrame,
+    info: dict,
+) -> dict:
+    """
+    Extrae y sanitiza los insumos para el cálculo de FCFF histórico siguiendo
+    una jerarquía dual-path estricta que elimina el doble conteo de la deuda:
+
+    **Path primario (vía EBIT)** — desapalancado puro:
+        ``FCFF = EBIT × (1 − Tax_Rate) + D&A − CapEx − ΔCapital_Trabajo``
+
+    **Path fallback (vía OCF)** — requiere ajuste de escudo fiscal:
+        ``FCFF = OCF + Interest_Expense × (1 − Tax_Rate) − CapEx``
+
+    El path primario se utiliza cuando EBIT y D&A están disponibles y producen
+    un FCFF positivo. En caso contrario se cae al path OCF. Si ambos fallan,
+    se activa la normalización mediante Revenue × Margen Operativo.
+
+    Manejo defensivo:
+    - D&A ausente → imputa 0 (conservador; no infla NOPAT).
+    - ΔCapital de Trabajo ausente → imputa 0.
+    - Arrays de distinta longitud → alineados al largo máximo de OCF.
+    - DataFrames vacíos o con datos parciales → escalares desde ``info``.
+
+    Args:
+        cf:   DataFrame del estado de flujos de efectivo.
+        inc:  DataFrame del estado de resultados.
+        bs:   DataFrame del balance general.
+        info: Diccionario con metadatos y métricas del ticker.
+
+    Returns:
+        Diccionario con las siguientes claves (compatible con
+        ``calcular_fcff_valuation``):
+
+        - ``ocf_hist``         (list[float]): Operating Cash Flow histórico.
+        - ``capex_hist``       (list[float]): CapEx positivo histórico.
+        - ``interest_hist``    (list[float]): Interest Expense (absoluto) histórico.
+        - ``pretax_hist``      (list[float]): Pre-tax Income histórico.
+        - ``taxprov_hist``     (list[float]): Tax Provision histórica.
+        - ``ebit_hist``        (list[float]): EBIT histórico (path primario).
+        - ``da_hist``          (list[float]): Depreciación & Amortización histórica.
+        - ``delta_nwc_hist``   (list[float]): Variación de Capital de Trabajo histórica.
+        - ``total_debt``       (float):       Deuda total más reciente.
+        - ``total_cash``       (float):       Efectivo + equivalentes más reciente.
+        - ``shares_diluted``   (float):       Acciones diluidas en circulación.
+        - ``n_periodos``       (int):         Períodos históricos con datos.
+    """
+    # ── OCF histórico ────────────────────────────────────────────────────────
+    ocf_hist = _extraer_serie(cf, [
+        "Operating Cash Flow", "OperatingCashFlow",
+        "Cash Flow From Continuing Operating Activities",
+    ])
+    if not ocf_hist:
+        ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
+        ocf_hist = [ocf_ttm] if ocf_ttm != 0.0 else [0.0]
+
+    # ── CapEx histórico ──────────────────────────────────────────────────────
+    capex_hist = obtener_capex_historico(cf)
+    if not capex_hist:
+        fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
+        ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
+        capex_hist = [abs(ocf_ttm - fcf_ttm)] if (ocf_ttm != 0.0 and fcf_ttm != 0.0) else [0.0]
+
+    # ── Interest Expense histórico (absoluto) ────────────────────────────────
+    interest_hist = _extraer_serie(inc, [
+        "Interest Expense", "InterestExpense",
+        "Interest Expense Non Operating",
+    ], absval=True)
+    if not interest_hist:
+        interest_hist = [abs(safe_num(info.get("interestExpense", 0.0), 0.0))]
+
+    # ── Pre-tax Income histórico ─────────────────────────────────────────────
+    pretax_hist = _extraer_serie(inc, [
+        "Pretax Income", "Income Before Tax", "IncomeBeforeTax",
+    ])
+    if not pretax_hist:
+        pretax_hist = [safe_num(info.get("pretaxIncome", 0.0), 0.0)]
+
+    # ── Tax Provision histórica ──────────────────────────────────────────────
+    taxprov_hist = _extraer_serie(inc, [
+        "Tax Provision", "IncomeTaxExpense", "Income Tax Expense",
+    ])
+    if not taxprov_hist:
+        taxprov_hist = [safe_num(info.get("taxProvision", 0.0), 0.0)]
+
+    # ── EBIT histórico (path primario desapalancado) ──────────────────────────
+    ebit_hist = _extraer_serie(inc, [
+        "Operating Income", "OperatingIncome", "EBIT",
+        "Normalized EBIT", "Normalized Operating Profit",
+    ])
+    if not ebit_hist:
+        ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
+        ebit_hist = [ebit_ttm] if ebit_ttm != 0.0 else []
+
+    # ── Depreciación y Amortización (D&A) histórica ──────────────────────────
+    da_hist = _extraer_serie(cf, [
+        "Depreciation Amortization Depletion",
+        "Depreciation And Amortization",
+        "Depreciation",
+        "DepreciationAmortization",
+        "Depreciation & Amortization",
+    ], absval=True)
+    if not da_hist:
+        da_hist = _extraer_serie(inc, [
+            "Reconciled Depreciation",
+            "Depreciation And Amortization In Income Statement",
+        ], absval=True)
+    # Si no se encuentra D&A, se imputa 0 al rellenar los arrays más adelante.
+
+    # ── Capital de Trabajo Neto (NWC) histórico ──────────────────────────────
+    # NWC = (Activos Corrientes − Efectivo) − (Pasivos Corrientes − Deuda CP)
+    # ΔNWC = NWC_t − NWC_{t+1}  (incremento de NWC = uso de efectivo → resta)
+    nwc_hist: list[float] = []
+    cur_assets_hist = _extraer_serie(bs, [
+        "Total Current Assets", "Current Assets", "CurrentAssets",
+    ])
+    cur_liab_hist = _extraer_serie(bs, [
+        "Total Current Liabilities", "Current Liabilities", "CurrentLiabilities",
+    ])
+    cash_hist_bs = _extraer_serie(bs, [
+        "Cash And Cash Equivalents", "CashCashEquivalentsAndShortTermInvestments",
+        "Cash Financial", "Cash And Short Term Investments",
+    ])
+    stdebt_hist = _extraer_serie(bs, [
+        "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt",
+    ])
+
+    n_nwc = min(
+        len(cur_assets_hist) if cur_assets_hist else 0,
+        len(cur_liab_hist) if cur_liab_hist else 0,
+    )
+    for i in range(n_nwc):
+        ca    = safe_num(cur_assets_hist[i], 0.0)
+        cl    = safe_num(cur_liab_hist[i],  0.0)
+        cash_i = safe_num(cash_hist_bs[i],  0.0) if i < len(cash_hist_bs) else 0.0
+        std_i  = safe_num(stdebt_hist[i],   0.0) if i < len(stdebt_hist)  else 0.0
+        nwc_hist.append((ca - cash_i) - (cl - std_i))
+
+    delta_nwc_hist: list[float] = []
+    for i in range(len(nwc_hist) - 1):
+        # Positivo → capital de trabajo creció → usa efectivo → resta en FCFF
+        delta_nwc_hist.append(nwc_hist[i] - nwc_hist[i + 1])
+    if nwc_hist and not delta_nwc_hist:
+        delta_nwc_hist = [0.0]
+
+    # ── Balance: Deuda Total, Efectivo, Acciones Diluidas ────────────────────
+    total_debt = safe_num(info.get("totalDebt", 0.0), 0.0)
+    if total_debt == 0.0:
+        total_debt = _extraer_val_df(bs, [
+            "Total Debt", "TotalDebt", "Long Term Debt",
+            "Long Term Debt And Capital Lease Obligation",
+        ], default=0.0)
+
+    total_cash = safe_num(info.get("totalCash", 0.0), 0.0)
+    if total_cash == 0.0:
+        total_cash = _extraer_val_df(bs, [
+            "Cash And Cash Equivalents",
+            "CashCashEquivalentsAndShortTermInvestments",
+            "Cash Financial", "Cash And Short Term Investments",
+        ], default=0.0)
+
+    shares_diluted = safe_num(info.get("sharesOutstanding", 0.0), 0.0)
+    for fila in ["Diluted Average Shares", "Ordinary Shares Number", "Basic Average Shares"]:
+        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
+            try:
+                val = safe_num(inc.loc[fila].dropna().iloc[0], default=None)
+                if val is not None and val > 0:
+                    shares_diluted = val
+                    break
+            except Exception:
+                pass
+
+    # ── Alineación de arrays al largo de OCF (n_max) ─────────────────────────
+    n_max = max(len(ocf_hist), 1)
+
+    def _pad(lst: list[float], n: int, fill: float = 0.0) -> list[float]:
+        """Extiende o recorta una lista a ``n`` elementos usando ``fill``."""
+        if len(lst) >= n:
+            return lst[:n]
+        return lst + [fill] * (n - len(lst))
+
+    return {
+        "ocf_hist":        _pad(ocf_hist,        n_max),
+        "capex_hist":      _pad(capex_hist,      n_max),
+        "interest_hist":   _pad(interest_hist,   n_max),
+        "pretax_hist":     _pad(pretax_hist,     n_max),
+        "taxprov_hist":    _pad(taxprov_hist,    n_max),
+        "ebit_hist":       _pad(ebit_hist,       n_max),
+        "da_hist":         _pad(da_hist,         n_max),
+        "delta_nwc_hist":  _pad(delta_nwc_hist,  n_max),
+        "total_debt":      total_debt,
+        "total_cash":      total_cash,
+        "shares_diluted":  shares_diluted,
+        "n_periodos":      n_max,
+    }

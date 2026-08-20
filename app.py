@@ -28,6 +28,7 @@ from data.financial_fetcher import (
     obtener_tasa_fred,
     obtener_erp_mercado,
     extraer_componentes_fcff,
+    extraer_fcff_desapalancado,
     extraer_metricas_ttm,
     obtener_rf_tnx,
 )
@@ -136,6 +137,29 @@ def render_directorio():
                     args=(row.Symbol,),
                     use_container_width=True
                 )
+
+# --- SUPUESTOS AVANZADOS DCF (Sidebar Expander) ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("⚙️ Supuestos Avanzados DCF", expanded=False):
+    buyback_rate_ui = st.slider(
+        "Recompra Neta Anual (%)",
+        min_value=0.0, max_value=10.0, value=0.0, step=0.5,
+        help="Porcentaje anual de reducción neta de acciones por recompras. "
+             "0% = sin ajuste. Aumenta el valor por acción si > 0.",
+    ) / 100.0
+    fade_years_ui = st.slider(
+        "Años Fade Period",
+        min_value=1, max_value=5, value=3, step=1,
+        help="Años de transición lineal desde la tasa de crecimiento inicial "
+             "hacia la tasa terminal (g_term). 1 = transición abrupta.",
+    )
+    g_term_ui = st.slider(
+        "Tasa Terminal g (%)",
+        min_value=1.0, max_value=4.0, value=2.5, step=0.25,
+        help="Tasa de crecimiento perpetuo del Valor Terminal (Gordon Shapiro). "
+             "Recomendado: 2.0–3.0% (alineado al PIB nominal global).",
+    ) / 100.0
+st.sidebar.markdown("---")
 
 tasa_libre_riesgo = obtener_tasa_fred(fred_key)
 
@@ -417,7 +441,9 @@ else:
             beta = m_ttm.get("beta", 1.0)
             rf_tnx = obtener_rf_tnx(fallback_fred=tasa_libre_riesgo)
             erp_mercado = obtener_erp_mercado(fred_key, rf_tnx)
-            comp_fcff = extraer_componentes_fcff(cf, inc, bs, info)
+
+            # Extraer partidas FCFF con dual-path (EBIT primario + OCF fallback)
+            comp_fcff = extraer_fcff_desapalancado(cf, inc, bs, info)
 
             # ── MOTOR FCFF INSTITUCIONAL (Fuente central de verdad) ──
             res_fcff = calcular_fcff_valuation(
@@ -441,6 +467,13 @@ else:
                 fmp_key               = fmp_key,
                 fred_key              = fred_key,
                 ticker                = ticker_input,
+                # ── Nuevos parámetros del modelo ──────────────────────────
+                buyback_rate          = buyback_rate_ui,
+                fade_years            = fade_years_ui,
+                g_term_override       = g_term_ui,
+                ebit_hist             = comp_fcff.get("ebit_hist", []),
+                da_hist               = comp_fcff.get("da_hist", []),
+                delta_nwc_hist        = comp_fcff.get("delta_nwc_hist", []),
             )
 
             # Extraer métricas unificadas del motor FCFF
@@ -454,6 +487,18 @@ else:
             v_intr_dcf  = v_intr_fcff
             v_intr      = v_intr_dcf
             margen_seguridad = res_fcff["margen_seguridad"]
+
+            # ── Tabla de flujos descontados año a año (fcff_pv_detalle) ──
+            pv_detalle = res_fcff.get("fcff_pv_detalle", [])
+            if pv_detalle:
+                metodo_fcff = res_fcff.get("fcff_method", "ocf")
+                metodo_label = {"ebit": "EBIT Primario (desapalancado)", "ocf": "OCF + Escudo Fiscal", "normalizado": "FCFF Normalizado", "sin_datos": "Sin datos"}.get(metodo_fcff, metodo_fcff)
+                st.info(f"**Método FCFF:** {metodo_label} | **Acciones post-recompras:** {res_fcff.get('shares_efectivas', 0):,.0f}")
+                with st.expander("📋 Detalle Flujos Descontados (Mid-Year Convention)", expanded=False):
+                    import pandas as _pd
+                    df_pv = _pd.DataFrame(pv_detalle)
+                    st.dataframe(df_pv, use_container_width=True, hide_index=True)
+                    st.caption(f"Horizonte: {res_fcff.get('n_total', 8)} años · WACC: {res_fcff.get('wacc', 0):.2f}% · g_term: {res_fcff.get('g_term', 0)*100:.2f}% · Buyback: {res_fcff.get('buyback_rate', 0)*100:.1f}%/año")
 
             # ── Factory de Sensibilidad DCF ──
             fcff_base = res_fcff.get("fcff_base", 0.0)
@@ -903,19 +948,19 @@ else:
                 "cf": cf,
                 "perfil_texto": perfil_texto,
                 # ── Campos FCFF / Valuación Adaptativa para PDF ──────────
-                "fcff_wacc":      res_adapt.get("wacc", wacc),
-                "fcff_ke":        res_adapt.get("ke", ke),
-                "fcff_kd":        res_adapt.get("kd", kd),
-                "fcff_rf":        res_adapt.get("rf", rf_tnx),
-                "fcff_erp":       res_adapt.get("erp", erp_mercado),
-                "fcff_we":        res_adapt.get("we", 0.90),
-                "fcff_wd":        res_adapt.get("wd", 0.10),
-                "fcff_tax_rate":  supuestos_clave.get("tax_rate", 0.21),
-                "fcff_ev":        res_adapt.get("enterprise_value", 0.0),
-                "fcff_equity":    res_adapt.get("equity_value", 0.0),
-                "fcff_margen":    res_adapt.get("margen_seguridad", 0.0),
-                "fcff_historico": res_adapt.get("fcff_historico", []),
-                "fcff_g_term":    res_adapt.get("g_term", 0.025),
+                "fcff_wacc":      res_fcff.get("wacc", wacc),
+                "fcff_ke":        res_fcff.get("ke", ke),
+                "fcff_kd":        res_fcff.get("kd", kd),
+                "fcff_rf":        res_fcff.get("rf", rf_tnx),
+                "fcff_erp":       res_fcff.get("erp", erp_mercado),
+                "fcff_we":        res_fcff.get("we", 0.90),
+                "fcff_wd":        res_fcff.get("wd", 0.10),
+                "fcff_tax_rate":  res_fcff.get("tax_rate_real", 0.21),
+                "fcff_ev":        res_fcff.get("enterprise_value", 0.0),
+                "fcff_equity":    res_fcff.get("equity_value", 0.0),
+                "fcff_margen":    res_fcff.get("margen_seguridad", 0.0),
+                "fcff_historico": res_fcff.get("fcff_historico", []),
+                "fcff_g_term":    res_fcff.get("g_term", 0.025),
             }
             pdf_bytes = generar_pdf_reporte(analysis_data)
             st.download_button(

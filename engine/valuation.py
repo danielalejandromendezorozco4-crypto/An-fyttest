@@ -1,19 +1,25 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import statistics
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from config.settings import (
+    DEFAULT_BUYBACK_RATE,
+    DEFAULT_FADE_YEARS,
+    G_TERM_DEFAULT,
+    WACC_CEILING,
+    WACC_FLOOR,
+    WACC_MIN_SPREAD_OVER_G,
+)
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+# -----------------------------------------------------------------------------
 # 0. UTILITARIOS DEFENSIVOS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def safe_num(val: Any, default: float = 0.0) -> float:
-    """
-    Convierte cualquier valor de forma segura a float o al valor por defecto especificado.
-    Maneja None, np.nan, float('nan'), inf, -inf, strings no numéricos y tipos corruptos.
-    """
+    """Convierte cualquier valor de forma segura a float o al valor por defecto."""
     if val is None:
         return float(default) if default is not None else 0.0
     try:
@@ -31,9 +37,9 @@ def safe_num(val: Any, default: float = 0.0) -> float:
         return float(default) if default is not None else 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. CÁLCULO DEL WACC CON DATOS REALES DE MERCADO
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 1. CALCULO DEL WACC CON DATOS REALES DE MERCADO
+# -----------------------------------------------------------------------------
 
 def calcular_wacc(
     tasa_libre_riesgo: float,
@@ -48,32 +54,26 @@ def calcular_wacc(
     erp: float = 5.0,
 ) -> Dict[str, float]:
     """
-    Cálculo del Costo Promedio Ponderado de Capital (WACC) con datos reales de mercado:
-    - Tasa Libre de Riesgo (Rf): Rendimiento del Bono del Tesoro a 10 años (FRED: DGS10 / ~4.20%).
-    - Beta: Beta empírico reportado para el ticker frente al S&P 500.
-    - Prima de Riesgo de Mercado (ERP): Rentabilidad esperada del mercado - Rf.
-    - Costo del Capital Propio (Ke): Ke = Rf + (Beta * ERP).
-    - Costo de la Deuda (Kd):
-        Kd_real = (Interest_Expense / Total_Debt) * 100 si Total_Debt > 0 e Interest_Expense > 0.
-        Si no hay deuda o no reporta intereses, Kd = Rf.
-    - Ponderaciones a Valor de Mercado:
-        Total_Capital = Market_Cap + Total_Debt
-        We = Market_Cap / Total_Capital (si Total_Capital > 0 sino 1.0)
-        Wd = Total_Debt / Total_Capital (si Total_Capital > 0 sino 0.0)
-    - WACC = (We * Ke) + (Wd * Kd * (1 - Tax_Rate)) (sin pisos ni techos arbitrarios).
+    Costo Promedio Ponderado de Capital (WACC) con datos reales de mercado.
+
+    Metodologia:
+    - Ke = Rf + beta * ERP  (CAPM).
+    - Kd = Interest_Expense / Total_Debt * 100  (empirico).
+    - We = MarketCap / (MarketCap + Debt),  Wd = 1 - We.
+    - WACC = We*Ke + Wd*Kd*(1-Tax_Rate).
+    - Bandas de control: WACC_FLOOR <= WACC% <= WACC_CEILING.
+      La invariante WACC > g + 1.5% se aplica en calcular_fcff_valuation.
 
     Returns:
-        Diccionario con wacc, ke, kd, we, wd, rf, erp, tax_rate.
+        Diccionario con: wacc, ke, kd, we, wd, rf, erp, tax_rate.
     """
-    rf = max(float(tasa_libre_riesgo) if tasa_libre_riesgo is not None else 4.20, 0.0)
+    rf       = max(float(tasa_libre_riesgo) if tasa_libre_riesgo is not None else 4.20, 0.0)
     beta_val = max(float(beta) if beta is not None else 1.0, 0.05)
-    erp_val = max(float(erp) if erp is not None else 5.0, 2.0)
-    t_ef = max(min(float(tax_rate) if tax_rate is not None else 0.21, 0.35), 0.0)
+    erp_val  = max(float(erp) if erp is not None else 5.0, 2.0)
+    t_ef     = max(min(float(tax_rate) if tax_rate is not None else 0.21, 0.35), 0.0)
 
-    # 1. Costo del Capital Propio (Ke por CAPM)
     ke = rf + (beta_val * erp_val)
 
-    # 2. Ponderaciones a valor de mercado
     total_capital = mcap + total_debt
     if total_capital > 0:
         we = mcap / total_capital
@@ -81,15 +81,13 @@ def calcular_wacc(
     else:
         we, wd = 1.0, 0.0
 
-    # 3. Costo de la Deuda (Kd)
     if total_debt > 0:
         if int_exp > 0:
             kd = (int_exp / total_debt) * 100.0
         elif ticker and (fmp_key or fred_key):
             try:
                 from data.financial_fetcher import obtener_kd_fmp_fred  # noqa: PLC0415
-                kd_fmp = obtener_kd_fmp_fred(ticker, fmp_key, fred_key, int_exp, total_debt)
-                kd = float(kd_fmp)
+                kd = float(obtener_kd_fmp_fred(ticker, fmp_key, fred_key, int_exp, total_debt))
             except Exception:
                 kd = rf
         else:
@@ -97,25 +95,24 @@ def calcular_wacc(
     else:
         kd = rf
 
-    # 4. WACC real sin pisos artificiales
     wacc_real = (we * ke) + (wd * kd * (1.0 - t_ef))
-    wacc = max(wacc_real, 1.0)
+    wacc = max(min(wacc_real, WACC_CEILING), WACC_FLOOR)
 
     return {
-        "wacc": round(wacc, 4),
-        "ke": round(ke, 4),
-        "kd": round(kd, 4),
-        "we": round(we, 4),
-        "wd": round(wd, 4),
-        "rf": round(rf, 4),
-        "erp": round(erp_val, 4),
+        "wacc":     round(wacc, 4),
+        "ke":       round(ke, 4),
+        "kd":       round(kd, 4),
+        "we":       round(we, 4),
+        "wd":       round(wd, 4),
+        "rf":       round(rf, 4),
+        "erp":      round(erp_val, 4),
         "tax_rate": round(t_ef, 4),
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. NORMALIZACIÓN Y AUXILIARES DE CRECIMIENTO
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 2. NORMALIZACION Y AUXILIARES DE CRECIMIENTO
+# -----------------------------------------------------------------------------
 
 def calcular_fcff_normalizado(
     revenue_ttm: float,
@@ -126,19 +123,22 @@ def calcular_fcff_normalizado(
     reinvestment_rate: float = 0.25,
 ) -> Tuple[float, float]:
     """
-    Calcula el FCFF Operativo Normalizado:
-    FCFF Normalizado = (Revenue_TTM * max(Margen_Operativo_Historico, 0.10) * (1 - Tax_Rate))
+    FCFF Operativo Normalizado:
+        FCFF_norm = Revenue_TTM x max(Margen_Op, 10%) x (1 - Tax_Rate)
+
+    Returns:
+        Tupla (fcff_total, fcff_por_accion).
     """
-    t_ef = max(min(float(tax_rate), 0.35), 0.0)
+    t_ef  = max(min(float(tax_rate), 0.35), 0.0)
     mg_op = max(float(operating_margin_hist), 0.10)
 
     if revenue_ttm > 0:
         fcff_total = revenue_ttm * mg_op * (1.0 - t_ef)
-        fcff_ps = fcff_total / shares_diluted if shares_diluted > 0 else 0.0
+        fcff_ps    = fcff_total / shares_diluted if shares_diluted > 0 else 0.0
         return fcff_total, fcff_ps
 
     if eps_ttm > 0:
-        fcff_ps = eps_ttm * (1.0 - max(min(reinvestment_rate, 0.50), 0.10))
+        fcff_ps    = eps_ttm * (1.0 - max(min(reinvestment_rate, 0.50), 0.10))
         fcff_total = fcff_ps * shares_diluted if shares_diluted > 0 else 0.0
         return fcff_total, fcff_ps
 
@@ -147,12 +147,18 @@ def calcular_fcff_normalizado(
 
 def calcular_g_term_restringido(wacc_decimal: float) -> float:
     """
-    Tasa terminal (g_term): 2.5% anual alineada al crecimiento sostenible del PIB global.
-    Asegura que g_term < WACC_decimal con spread mínimo de seguridad.
+    Tasa terminal alineada al crecimiento sostenible del PIB (~2.5%).
+    Garantiza spread minimo WACC - g >= WACC_MIN_SPREAD_OVER_G.
+
+    Args:
+        wacc_decimal: WACC en decimal (ej. 0.09 = 9%).
+
+    Returns:
+        g_term en decimal.
     """
-    g_term = 0.025
-    if wacc_decimal <= g_term:
-        g_term = max(wacc_decimal - 0.015, 0.010)
+    g_term = G_TERM_DEFAULT
+    if wacc_decimal <= g_term + WACC_MIN_SPREAD_OVER_G:
+        g_term = max(wacc_decimal - WACC_MIN_SPREAD_OVER_G, 0.010)
     return round(g_term, 4)
 
 
@@ -163,10 +169,9 @@ def calcular_curva_crecimiento_5y(
     n_years: int = 5,
 ) -> List[float]:
     """
-    Determina la tasa de crecimiento proyectada para los años 1 al 5:
-    - Prioridad 1: revenue_growth o earnings_growth positivos reportados por la API.
-    - Prioridad 2: CAGR histórico de 3 a 5 años de ingresos/EBITDA.
-    - Fallback: 6.0% - 8.0%.
+    Tasa de crecimiento proyectada para los anios explicitos.
+    Prioridad: revenue_growth_api > cagr_revenue_hist > 8.0% fallback.
+    Acotada en rango institucional [2%, 22%].
     """
     if revenue_growth_api > 0:
         g_1_5 = revenue_growth_api
@@ -175,14 +180,13 @@ def calcular_curva_crecimiento_5y(
     else:
         g_1_5 = 0.08
 
-    # Acotar en rango realista institucional [2.0%, 22.0%]
     g_1_5_clamped = min(max(g_1_5, 0.02), 0.22)
     return [round(g_1_5_clamped, 5)] * n_years
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. MOTOR PRINCIPAL DE VALUACIÓN FCFF / DCF INSTITUCIONAL
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 3. MOTOR PRINCIPAL DE VALUACION FCFF / DCF INSTITUCIONAL
+# -----------------------------------------------------------------------------
 
 def calcular_fcff_valuation(
     ocf_hist: List[float],
@@ -207,28 +211,53 @@ def calcular_fcff_valuation(
     fmp_key: str = "",
     fred_key: str = "",
     ticker: str = "",
+    buyback_rate: float = DEFAULT_BUYBACK_RATE,
+    fade_years: int = DEFAULT_FADE_YEARS,
+    g_term_override: Optional[float] = None,
+    ebit_hist: Optional[List[float]] = None,
+    da_hist: Optional[List[float]] = None,
+    delta_nwc_hist: Optional[List[float]] = None,
 ) -> Dict[str, Union[float, str, list]]:
     """
-    Motor de Valuación FCFF (Free Cash Flow to Firm) Institucional:
-    1. Flujo Base FCFF:
-       FCFF = CFO + [Interest_Expense * (1 - Tax_Rate)] - CapEx
-    2. Proyección de Flujos a 5 Años con tasa de crecimiento sostenible.
-    3. Descuento de flujos explícitos con Convención de Medio Año (Mid-Year):
-       VP_Flujo_t = FCFF_t / ((1 + WACC)^(t - 0.5))
-    4. Valor Terminal mediante Gordon Shapiro descontado a 5 años:
-       TV = (FCFF_5 * (1 + g_term)) / (WACC - g_term)
-       VP_Terminal = TV / ((1 + WACC)^5)
-    5. Puente Financiero:
-       Enterprise Value (EV) = VP_Flujos + VP_Terminal
-       Deuda Neta = Total_Debt - Total_Cash
-       Equity Value = EV - Deuda Neta = EV + Total_Cash - Total_Debt
-       Valor Intrínseco por Acción = Equity Value / Shares_Diluted
-    6. Margen de Seguridad y Precio Máximo de Compra.
+    Motor de Valuacion FCFF (Free Cash Flow to Firm) Institucional.
+
+    Jerarquia dual-path de FCFF base:
+    1. Path primario (EBIT): FCFF = EBIT*(1-t) + D&A - CapEx - DNWC
+       Elimina doble conteo de deuda al descontar con WACC.
+    2. Path fallback (OCF): FCFF = OCF + Interest*(1-t) - CapEx
+    3. Ultimo recurso: Normalizacion Revenue x Margen Operativo.
+
+    Modelo 2 etapas + Fade Period lineal:
+    - Fase 1 (anios 1..n_years): tasa g_1_5 constante.
+    - Fade (anios n_years+1..n_total): transicion lineal g_1_5 -> g_term.
+
+    Convencion de Medio Anio consistente:
+    - Flujos: VP_t = FCFF_t / (1+WACC)^(t-0.5)
+    - Terminal: VP_TV = TV / (1+WACC)^(n_total-0.5)
+
+    Ajuste por recompras: shares_efectivas = shares * (1-buyback_rate)^n_total
+    Invariante WACC > g + 1.5% forzado antes del TV.
+
+    Args:
+        ocf_hist, capex_hist, interest_hist, pretax_hist, taxprov_hist:
+            Listas historicas (mas reciente primero).
+        buyback_rate: Recompra neta anual (fraccion). Default: 0.0.
+        fade_years:   Anios del fade period. Default: 3.
+        g_term_override: Tasa terminal en decimal. Default: None (auto 2.5%).
+        ebit_hist, da_hist, delta_nwc_hist: Insumos para path primario.
+
+    Returns:
+        Diccionario con metricas de valuacion, fcff_pv_detalle (tabla
+        anio a anio) y metadatos del modelo.
     """
     if shares_diluted <= 0 or precio_actual <= 0:
         return _resultado_fcff_vacio(precio_actual, total_cash, total_debt, rf, beta, erp)
 
-    # ── 1. Tasa Impositiva Efectiva Real ─────────────────────────────────────
+    ebit_hist_      = list(ebit_hist or [])
+    da_hist_        = list(da_hist or [])
+    delta_nwc_hist_ = list(delta_nwc_hist or [])
+
+    # 1. Tasa Impositiva Efectiva Real
     tasas_impositivas: list[float] = []
     for pt, tp in zip(pretax_hist, taxprov_hist):
         if pt > 0 and tp >= 0:
@@ -241,7 +270,7 @@ def calcular_fcff_valuation(
     )
     tax_rate_real = max(min(tax_rate_real, 0.35), 0.0)
 
-    # ── 2. Cálculo del WACC de mercado ───────────────────────────────────────
+    # 2. WACC de mercado
     int_exp_ultimo = interest_hist[0] if interest_hist else 0.0
     res_wacc = calcular_wacc(
         tasa_libre_riesgo = rf,
@@ -255,24 +284,49 @@ def calcular_fcff_valuation(
         ticker            = ticker,
         erp               = erp,
     )
-    wacc = res_wacc["wacc"]
-    ke = res_wacc["ke"]
-    kd = res_wacc["kd"]
-    we = res_wacc["we"]
-    wd = res_wacc["wd"]
+    wacc         = res_wacc["wacc"]
+    ke           = res_wacc["ke"]
+    kd           = res_wacc["kd"]
+    we           = res_wacc["we"]
+    wd           = res_wacc["wd"]
     wacc_decimal = wacc / 100.0
 
-    # ── 3. FCFF Histórico Real ───────────────────────────────────────────────
-    fcff_historico: list[float] = []
-    for i in range(len(ocf_hist)):
-        cfo_i   = ocf_hist[i] if i < len(ocf_hist) else 0.0
-        capex_i = abs(capex_hist[i]) if i < len(capex_hist) else 0.0
-        int_i   = interest_hist[i] if i < len(interest_hist) else 0.0
-        escudo_fiscal_i = int_i * (1.0 - tax_rate_real)
-        fcff_i  = cfo_i + escudo_fiscal_i - capex_i
-        fcff_historico.append(fcff_i)
+    # 3. Tasa Terminal y WACC clamping con invariante financiero
+    if g_term_override is not None:
+        g_term = max(min(float(g_term_override), 0.04), 0.005)
+    else:
+        g_term = G_TERM_DEFAULT
 
-    # ── 4. Determinación de FCFF Base ────────────────────────────────────────
+    min_wacc_dec = g_term + WACC_MIN_SPREAD_OVER_G
+    if wacc_decimal < min_wacc_dec:
+        wacc_decimal = min_wacc_dec
+        wacc = wacc_decimal * 100.0
+    wacc_decimal = min(wacc_decimal, WACC_CEILING / 100.0)
+
+    # 4. FCFF Historico con Dual-Path
+    fcff_historico: list[float] = []
+    fcff_method_used = "ocf"
+
+    for i in range(len(ocf_hist)):
+        ebit_i  = ebit_hist_[i]      if i < len(ebit_hist_)      else 0.0
+        da_i    = da_hist_[i]        if i < len(da_hist_)         else 0.0
+        dnwc_i  = delta_nwc_hist_[i] if i < len(delta_nwc_hist_) else 0.0
+        capex_i = abs(capex_hist[i]) if i < len(capex_hist)       else 0.0
+        ocf_i   = ocf_hist[i]        if i < len(ocf_hist)         else 0.0
+        int_i   = interest_hist[i]   if i < len(interest_hist)    else 0.0
+
+        if ebit_i > 0 and da_i >= 0:
+            fcff_ebit = ebit_i * (1.0 - tax_rate_real) + da_i - capex_i - dnwc_i
+            if fcff_ebit > 0:
+                fcff_historico.append(fcff_ebit)
+                if i == 0:
+                    fcff_method_used = "ebit"
+                continue
+
+        escudo_fiscal = int_i * (1.0 - tax_rate_real)
+        fcff_historico.append(ocf_i + escudo_fiscal - capex_i)
+
+    # 5. FCFF Base
     if fcff_historico and fcff_historico[0] > 0:
         fcff_base = fcff_historico[0]
     else:
@@ -281,14 +335,19 @@ def calcular_fcff_valuation(
             operating_margin_hist = operating_margin_hist,
             tax_rate              = tax_rate_real,
             shares_diluted        = shares_diluted,
-            eps_ttm               = pretax_hist[0] * (1.0 - tax_rate_real) / shares_diluted if (pretax_hist and shares_diluted > 0) else 0.0,
+            eps_ttm               = (
+                pretax_hist[0] * (1.0 - tax_rate_real) / shares_diluted
+                if (pretax_hist and shares_diluted > 0) else 0.0
+            ),
         )
         if fcff_norm_tot > 0:
             fcff_base = fcff_norm_tot
+            if fcff_method_used == "ocf":
+                fcff_method_used = "normalizado"
         else:
             fcff_base = max(ocf_hist[0] * 0.50 if ocf_hist else 0.0, 1e6)
 
-    # ── 5. Tasa de Crecimiento a 5 Años (g_1_5) ──────────────────────────────
+    # 6. Tasa de Crecimiento Fase 1
     if growth_rate_exp is not None and growth_rate_exp > 0:
         g_1_5 = growth_rate_exp
     elif revenue_growth_api > 0:
@@ -299,78 +358,102 @@ def calcular_fcff_valuation(
         g_1_5 = 0.08
     g_1_5 = min(max(g_1_5, 0.02), 0.22)
 
-    # ── 6. Tasa Terminal (g_term = 2.5%) ─────────────────────────────────────
-    g_term = 0.025
-    if wacc_decimal <= g_term:
-        g_term = max(wacc_decimal - 0.015, 0.010)
-
-    # ── 7. Proyección y Descuento con Convención de Medio Año ───────────────
+    # 7. Proyeccion 2 etapas + Fade Period con Mid-Year Convention
     fcff_proyectado: list[float] = []
+    fcff_pv_detalle: list[dict]  = []
     pv_flujos: float = 0.0
-    f_t = fcff_base
+    f_t     = fcff_base
+    n_total = n_years + fade_years
 
-    for t in range(1, n_years + 1):
-        f_t = f_t * (1.0 + g_1_5)
+    for t in range(1, n_total + 1):
+        if t <= n_years:
+            g_t = g_1_5
+        else:
+            alpha = (t - n_years) / fade_years
+            g_t   = g_1_5 * (1.0 - alpha) + g_term * alpha
+
+        f_t = f_t * (1.0 + g_t)
         fcff_proyectado.append(round(f_t, 2))
-        factor_descuento_my = (1.0 + wacc_decimal) ** (t - 0.5)
-        pv_flujos += f_t / factor_descuento_my
 
-    # ── 8. Valor Terminal de Gordon Shapiro ──────────────────────────────────
-    f_terminal = fcff_proyectado[-1] * (1.0 + g_term)
-    denominador_tv = max(wacc_decimal - g_term, 0.010)
+        factor_descuento = (1.0 + wacc_decimal) ** (t - 0.5)
+        pv_t = f_t / factor_descuento
+        pv_flujos += pv_t
+
+        fase = "Fase 1" if t <= n_years else "Fade"
+        fcff_pv_detalle.append({
+            "Ano":               t,
+            "Fase":              fase,
+            "g Aplicada (%)":    round(g_t * 100, 2),
+            "FCFF (M USD)":      round(f_t / 1e6, 2),
+            "Factor Desc (t-0.5)": round(factor_descuento, 4),
+            "VP (M USD)":        round(pv_t / 1e6, 2),
+        })
+
+    # 8. Valor Terminal (Mid-Year en n_total - 0.5)
+    f_terminal     = fcff_proyectado[-1] * (1.0 + g_term)
+    denominador_tv = max(wacc_decimal - g_term, WACC_MIN_SPREAD_OVER_G)
     terminal_value = f_terminal / denominador_tv
-    pv_terminal = terminal_value / ((1.0 + wacc_decimal) ** n_years)
+    pv_terminal    = terminal_value / ((1.0 + wacc_decimal) ** (n_total - 0.5))
 
-    # ── 9. Puente Financiero: Enterprise Value → Equity Value → Por Acción ───
+    # 9. Puente Financiero EV -> Equity -> Por Accion
     enterprise_value = pv_flujos + pv_terminal
-    deuda_neta = total_debt - total_cash
-    equity_value = enterprise_value - deuda_neta
-    valor_intrinseco = max(equity_value / shares_diluted, 0.0) if shares_diluted > 0 else 0.0
+    deuda_neta       = total_debt - total_cash
+    equity_value     = enterprise_value - deuda_neta
 
-    # ── 10. Margen de Seguridad y Precios Objetivo ───────────────────────────
-    margen_seguridad = (
+    buyback_rate_    = max(min(float(buyback_rate), 0.20), -0.10)
+    shares_efectivas = max(shares_diluted * ((1.0 - buyback_rate_) ** n_total), 1.0)
+    valor_intrinseco = max(equity_value / shares_efectivas, 0.0)
+
+    # 10. Margen de Seguridad y Precios Objetivo
+    margen_seguridad  = (
         (valor_intrinseco - precio_actual) / precio_actual
         if precio_actual > 0 else 0.0
     )
-    desc_req = 0.20 if (mcap > 0 and mcap < 2e9) else 0.10
+    desc_req          = 0.20 if (mcap > 0 and mcap < 2e9) else 0.10
     precio_max_compra = round(valor_intrinseco * (1.0 - desc_req), 2)
 
     es_atractivo = valor_intrinseco >= precio_actual
-    semaforo = "verde" if es_atractivo else "rojo"
-    status = "🟢" if es_atractivo else "🔴"
-    upside = margen_seguridad * 100.0
+    semaforo     = "verde" if es_atractivo else "rojo"
+    status       = "\U0001f7e2" if es_atractivo else "\U0001f534"
+    upside       = margen_seguridad * 100.0
 
     return {
-        "valor_intrinseco": round(valor_intrinseco, 2),
-        "enterprise_value": round(enterprise_value, 2),
-        "equity_value": round(equity_value, 2),
-        "pv_flujos": round(pv_flujos, 2),
-        "pv_terminal": round(pv_terminal, 2),
-        "terminal_value": round(terminal_value, 2),
-        "deuda_neta": round(deuda_neta, 2),
-        "fcff_base": round(fcff_base, 2),
-        "fcff_historico": fcff_historico,
-        "fcff_proyectado": fcff_proyectado,
-        "wacc": round(wacc, 2),
-        "ke": round(ke, 2),
-        "kd": round(kd, 2),
-        "we": round(we, 4),
-        "wd": round(wd, 4),
-        "rf": round(rf, 2),
-        "erp": round(erp, 2),
-        "tax_rate_real": round(tax_rate_real, 4),
-        "g_term": round(g_term, 4),
-        "g_fase1": round(g_1_5, 4),
-        "total_cash": total_cash,
-        "total_debt": total_debt,
-        "shares_diluted": shares_diluted,
-        "margen_seguridad": round(margen_seguridad, 4),
+        "valor_intrinseco":  round(valor_intrinseco, 2),
+        "enterprise_value":  round(enterprise_value, 2),
+        "equity_value":      round(equity_value, 2),
+        "pv_flujos":         round(pv_flujos, 2),
+        "pv_terminal":       round(pv_terminal, 2),
+        "terminal_value":    round(terminal_value, 2),
+        "deuda_neta":        round(deuda_neta, 2),
+        "fcff_base":         round(fcff_base, 2),
+        "fcff_historico":    fcff_historico,
+        "fcff_proyectado":   fcff_proyectado,
+        "fcff_pv_detalle":   fcff_pv_detalle,
+        "fcff_method":       fcff_method_used,
+        "wacc":              round(wacc, 2),
+        "ke":                round(ke, 2),
+        "kd":                round(kd, 2),
+        "we":                round(we, 4),
+        "wd":                round(wd, 4),
+        "rf":                round(rf, 2),
+        "erp":               round(erp, 2),
+        "tax_rate_real":     round(tax_rate_real, 4),
+        "g_term":            round(g_term, 4),
+        "g_fase1":           round(g_1_5, 4),
+        "total_cash":        total_cash,
+        "total_debt":        total_debt,
+        "shares_diluted":    shares_diluted,
+        "shares_efectivas":  round(shares_efectivas, 0),
+        "buyback_rate":      round(buyback_rate_, 4),
+        "fade_years":        fade_years,
+        "n_total":           n_total,
+        "margen_seguridad":  round(margen_seguridad, 4),
         "precio_max_compra": precio_max_compra,
-        "desc_req": desc_req,
-        "precio_actual": precio_actual,
-        "status": status,
-        "semaforo": semaforo,
-        "upside": round(upside, 2),
+        "desc_req":          desc_req,
+        "precio_actual":     precio_actual,
+        "status":            status,
+        "semaforo":          semaforo,
+        "upside":            round(upside, 2),
     }
 
 
@@ -382,44 +465,51 @@ def _resultado_fcff_vacio(
     beta: float,
     erp: float,
 ) -> Dict[str, Union[float, str, list]]:
+    """Resultado neutro cuando faltan datos minimos de valuacion."""
     ke = rf + (beta * erp)
     return {
-        "valor_intrinseco": 0.0,
-        "enterprise_value": 0.0,
-        "equity_value": 0.0,
-        "pv_flujos": 0.0,
-        "pv_terminal": 0.0,
-        "terminal_value": 0.0,
-        "deuda_neta": total_debt - total_cash,
-        "fcff_base": 0.0,
-        "fcff_historico": [],
-        "fcff_proyectado": [],
-        "wacc": ke,
-        "ke": ke,
-        "kd": rf,
-        "we": 1.0,
-        "wd": 0.0,
-        "rf": rf,
-        "erp": erp,
-        "tax_rate_real": 0.21,
-        "g_term": 0.025,
-        "g_fase1": 0.08,
-        "total_cash": total_cash,
-        "total_debt": total_debt,
-        "shares_diluted": 0.0,
-        "margen_seguridad": -1.0,
+        "valor_intrinseco":  0.0,
+        "enterprise_value":  0.0,
+        "equity_value":      0.0,
+        "pv_flujos":         0.0,
+        "pv_terminal":       0.0,
+        "terminal_value":    0.0,
+        "deuda_neta":        total_debt - total_cash,
+        "fcff_base":         0.0,
+        "fcff_historico":    [],
+        "fcff_proyectado":   [],
+        "fcff_pv_detalle":   [],
+        "fcff_method":       "sin_datos",
+        "wacc":              ke,
+        "ke":                ke,
+        "kd":                rf,
+        "we":                1.0,
+        "wd":                0.0,
+        "rf":                rf,
+        "erp":               erp,
+        "tax_rate_real":     0.21,
+        "g_term":            G_TERM_DEFAULT,
+        "g_fase1":           0.08,
+        "total_cash":        total_cash,
+        "total_debt":        total_debt,
+        "shares_diluted":    0.0,
+        "shares_efectivas":  0.0,
+        "buyback_rate":      0.0,
+        "fade_years":        DEFAULT_FADE_YEARS,
+        "n_total":           5 + DEFAULT_FADE_YEARS,
+        "margen_seguridad":  -1.0,
         "precio_max_compra": 0.0,
-        "desc_req": 0.10,
-        "precio_actual": precio_actual,
-        "status": "🔴",
-        "semaforo": "rojo",
-        "upside": -100.0,
+        "desc_req":          0.10,
+        "precio_actual":     precio_actual,
+        "status":            "\U0001f534",
+        "semaforo":          "rojo",
+        "upside":            -100.0,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. MODELO DE DESCUENTO DE DIVIDENDOS (DDM / GORDON GROWTH)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def calcular_ddm(
     div_rate: float,
@@ -429,9 +519,9 @@ def calcular_ddm(
 ) -> Dict[str, Union[float, str, bool]]:
     """
     Modelo Gordon Growth para Dividendos (DDM):
-    v_intr_ddm = (Dividend_Rate * (1 + g_div)) / (Ke_dec - g_div)
+        v_intr_ddm = (Dividend_Rate * (1 + g_div)) / (Ke_dec - g_div)
     """
-    ke_dec = (ke / 100.0) if ke > 1.0 else ke
+    ke_dec    = (ke / 100.0) if ke > 1.0 else ke
     g_div_eff = min(max(g_div, 0.015), 0.04)
 
     if div_rate > 0 and ke_dec > g_div_eff:
@@ -439,29 +529,29 @@ def calcular_ddm(
         viable = True
     else:
         v_intr_ddm = 0.0
-        viable = False
+        viable     = False
 
     val_ddm_str = f"${v_intr_ddm:,.2f}" if v_intr_ddm > 0 else "N/A"
 
     if v_intr_ddm == 0:
-        semaforo, status = "gris", "⚪"
+        semaforo, status = "gris", "\u26aa"
     elif v_intr_ddm >= precio_actual:
-        semaforo, status = "verde", "🟢"
+        semaforo, status = "verde", "\U0001f7e2"
     else:
-        semaforo, status = "rojo", "🔴"
+        semaforo, status = "rojo", "\U0001f534"
 
     return {
         "valor_intrinseco_ddm": round(v_intr_ddm, 2),
-        "val_ddm_str": val_ddm_str,
-        "status": status,
-        "semaforo": semaforo,
-        "viable": viable,
+        "val_ddm_str":          val_ddm_str,
+        "status":               status,
+        "semaforo":             semaforo,
+        "viable":               viable,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 5. FACTORY DE SENSIBILIDAD DCF
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def calcular_dcf_intr_ps(
     wacc_var: float,
@@ -475,46 +565,43 @@ def calcular_dcf_intr_ps(
     shares_current: float,
 ) -> Dict[str, Union[float, str]]:
     """
-    Función de valuación DCF por acción para matrices de sensibilidad:
-    1. Proyección y Descuento de Flujos con Convención de Medio Año (Años 1 a 5).
-    2. Valor Terminal Gordon Shapiro.
-    3. Ajuste por Caja Neta por Acción: (Total_Cash - Total_Debt) / Shares.
-    4. Enterprise Value -> Equity Value por acción.
+    Valuacion DCF por accion para matrices de sensibilidad.
+    Aplica Mid-Year Convention y puente EV -> Equity por accion.
     """
-    wacc_dec = (wacc_var / 100.0) if wacc_var > 1.0 else wacc_var
-    g_term_eff = g_term_var if g_term_var < wacc_dec else max(wacc_dec - 0.015, 0.010)
+    wacc_dec   = (wacc_var / 100.0) if wacc_var > 1.0 else wacc_var
+    g_term_eff = g_term_var if g_term_var < wacc_dec else max(wacc_dec - WACC_MIN_SPREAD_OVER_G, 0.010)
 
-    # 1. Proyección y Descuento de Flujos (Mid-Year)
     pv_flujos = 0.0
-    f_ps = float(flujo_por_accion)
+    f_ps      = float(flujo_por_accion)
     for t in range(1, 6):
-        f_ps = f_ps * (1.0 + g_1_5)
+        f_ps      = f_ps * (1.0 + g_1_5)
         factor_my = (1.0 + wacc_dec) ** (t - 0.5)
         pv_flujos += f_ps / factor_my
 
-    # 2. Valor Terminal Gordon Shapiro
-    f_term = f_ps * (1.0 + g_term_eff)
-    denominador_tv = max(wacc_dec - g_term_eff, 0.010)
-    tv = f_term / denominador_tv
-    pv_terminal = tv / ((1.0 + wacc_dec) ** 5)
+    f_term         = f_ps * (1.0 + g_term_eff)
+    denominador_tv = max(wacc_dec - g_term_eff, WACC_MIN_SPREAD_OVER_G)
+    tv             = f_term / denominador_tv
+    pv_terminal    = tv / ((1.0 + wacc_dec) ** (5 - 0.5))
 
-    # 3. Puente Enterprise Value a Equity Value por acción
-    caja_neta_ps = ((total_cash - total_debt) / shares_current) if shares_current > 0 else 0.0
+    caja_neta_ps     = ((total_cash - total_debt) / shares_current) if shares_current > 0 else 0.0
     valor_intrinseco = max(pv_flujos + pv_terminal + caja_neta_ps, 0.0)
 
     es_atractivo = valor_intrinseco >= precio_actual
-    semaforo = "verde" if es_atractivo else "rojo"
-    status = "🟢" if es_atractivo else "🔴"
-    upside = (((valor_intrinseco - precio_actual) / precio_actual) * 100.0) if precio_actual > 0 else 0.0
+    semaforo     = "verde" if es_atractivo else "rojo"
+    status       = "\U0001f7e2" if es_atractivo else "\U0001f534"
+    upside       = (
+        ((valor_intrinseco - precio_actual) / precio_actual) * 100.0
+        if precio_actual > 0 else 0.0
+    )
 
     return {
-        "valor_intrinseco": round(valor_intrinseco, 2),
-        "pv_flujos": round(pv_flujos, 2),
-        "pv_terminal": round(pv_terminal, 2),
+        "valor_intrinseco":     round(valor_intrinseco, 2),
+        "pv_flujos":            round(pv_flujos, 2),
+        "pv_terminal":          round(pv_terminal, 2),
         "caja_neta_por_accion": round(caja_neta_ps, 2),
-        "status": status,
-        "semaforo": semaforo,
-        "upside": round(upside, 2),
+        "status":               status,
+        "semaforo":             semaforo,
+        "upside":               round(upside, 2),
     }
 
 
@@ -528,7 +615,8 @@ def crear_calculador_dcf(
     shares_current: float,
 ) -> Callable[[float, float], float]:
     """
-    Factory que retorna una función calculador(wacc_var, g_term_var) para matrices de sensibilidad.
+    Factory que retorna calculador(wacc_var, g_term_var) -> valor_intrinseco
+    para matrices de sensibilidad bidimensionales.
     """
     def calculador(wacc_var: float, g_term_var: float) -> float:
         res = calcular_dcf_intr_ps(
