@@ -419,6 +419,90 @@ def test_extraer_metricas_ttm_ma_defensivo():
     assert m["shares_diluted"] == 930_000_000.0
 
 
+def test_mastercard_negative_equity_ratios():
+    """
+    Verifica que empresas con patrimonio contable negativo debido a recompras
+    masivas (como Mastercard o Home Depot) muestren ROE 'Patr. Negativo',
+    alertas amarillas informativas y ROIC operativo estrictamente positivo.
+    """
+    res_rent = calcular_ratios_rentabilidad(
+        revenue_ttm=25_000_000_000.0,
+        gross_profit_ttm=25_000_000_000.0,  # Fintech sin COGS
+        operating_income_ttm=14_000_000_000.0,
+        net_income_ttm=11_500_000_000.0,
+        total_assets=42_000_000_000.0,
+        total_equity=-5_000_000_000.0,  # Patrimonio negativo
+        total_debt=16_000_000_000.0,
+        total_cash=8_500_000_000.0,
+        current_liabilities=15_000_000_000.0,
+        short_term_debt=2_000_000_000.0,
+        tax_rate=0.18,
+        is_asset_light=True,
+    )
+
+    assert res_rent["val_roe"] == "Patr. Negativo"
+    assert res_rent["col_roe"] == "🟡"
+    assert res_rent["roic"] > 20.0
+    assert res_rent["col_roic"] == "🟢"
+    assert res_rent["gross_margin"] == 100.0
+
+    res_mult = calcular_multiplos_valuacion(
+        precio_actual=480.0,
+        mcap=450_000_000_000.0,
+        eps_ttm=12.50,
+        forward_eps=15.0,
+        fcf_ttm=11_800_000_000.0,
+        ebitda_ttm=15_000_000_000.0,
+        total_debt=16_000_000_000.0,
+        total_cash=8_500_000_000.0,
+        revenue_ttm=25_000_000_000.0,
+        total_equity=-5_000_000_000.0,
+        peg_info=1.8,
+        earnings_growth=0.14,
+    )
+
+    assert res_mult["p_b_str"] == "Patr. Negativo"
+    assert res_mult["pe"] > 0
+    assert res_mult["ev_ebitda"] > 0
+
+
+def test_feed_multiples_fallbacks():
+    """
+    Verifica que si no hay EPS directo disponible, se adopte el fallback
+    del feed institucional (pe_info, ev_ebitda_info, p_s_info, p_b_info).
+    """
+    res = calcular_multiplos_valuacion(
+        precio_actual=100.0,
+        mcap=1_000_000_000.0,
+        eps_ttm=0.0,
+        forward_eps=0.0,
+        fcf_ttm=0.0,
+        ebitda_ttm=0.0,
+        total_debt=0.0,
+        total_cash=0.0,
+        revenue_ttm=0.0,
+        total_equity=500_000_000.0,
+        peg_info=1.4,
+        earnings_growth=0.10,
+        pe_info=25.0,
+        forward_pe_info=20.0,
+        ev_ebitda_info=14.5,
+        p_b_info=2.0,
+        p_s_info=3.5,
+    )
+
+    assert res["pe"] == 25.0
+    assert res["pe_str"] == "25.0x"
+    assert res["pe_forward"] == 20.0
+    assert res["pe_forward_str"] == "20.0x"
+    assert res["ev_ebitda"] == 14.5
+    assert res["ev_ebitda_str"] == "14.5x"
+    assert res["p_s"] == 3.5
+    assert res["p_s_str"] == "3.50x"
+    assert res["p_b"] == 2.0
+    assert res["p_b_str"] == "2.00x"
+
+
 def test_safe_num_blindaje():
     """
     Verifica que safe_num maneje de forma robusta e infalible todos los tipos
@@ -470,6 +554,12 @@ class TestMetricsUnittest(unittest.TestCase):
 
     def test_ma_defensivo(self):
         test_extraer_metricas_ttm_ma_defensivo()
+
+    def test_mastercard_negative_equity(self):
+        test_mastercard_negative_equity_ratios()
+
+    def test_feed_fallbacks(self):
+        test_feed_multiples_fallbacks()
 
     def test_safe_num(self):
         test_safe_num_blindaje()
