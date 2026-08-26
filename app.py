@@ -1,4 +1,5 @@
 import datetime
+import os
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -48,8 +49,15 @@ from services.ai_service import (
 )
 from reports.pdf_generator import generar_pdf_reporte
 
+# --- BÚSQUEDA DE LOGO DE MARCA ---
+ruta_logo_detectada = obtener_ruta_logo()
+
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="An-FyT - Análisis Fundamental Top-Down", layout="wide", page_icon="📈")
+st.set_page_config(
+    page_title="An-FyT - Análisis Fundamental Top-Down",
+    layout="wide",
+    page_icon=ruta_logo_detectada if (ruta_logo_detectada and os.path.exists(ruta_logo_detectada)) else "📈",
+)
 
 # --- MANEJO DE ESTADO GLOBAL PARA DIRECTORIO SECTORIAL ---
 if "ticker_search" not in st.session_state:
@@ -64,13 +72,15 @@ inyectar_estilos()
 # --- AUTENTICACIÓN SECRETS ---
 gemini_key, fred_key, fmp_key = cargar_secrets()
 
-# --- BÚSQUEDA DE LOGO Y RENDERIZADO SIDEBAR ---
-ruta_logo_detectada = obtener_ruta_logo()
-if ruta_logo_detectada:
-    st.sidebar.image(ruta_logo_detectada, use_container_width=True)
+# --- IDENTIDAD DE MARCA Y LOGO EN SIDEBAR ---
+if ruta_logo_detectada and os.path.exists(ruta_logo_detectada):
+    if hasattr(st, "logo"):
+        st.logo(ruta_logo_detectada, icon_image=ruta_logo_detectada)
+    else:
+        st.sidebar.image(ruta_logo_detectada, use_container_width=True)
 else:
     st.sidebar.markdown('<div class="brand-title">An-FyT</div>', unsafe_allow_html=True)
-st.sidebar.markdown('<div class="brand-subtitle">ANÁLISIS FUNDAMENTAL BURSÁTIL</div>', unsafe_allow_html=True)
+    st.sidebar.markdown('<div class="brand-subtitle">ANÁLISIS FUNDAMENTAL BURSÁTIL</div>', unsafe_allow_html=True)
 st.sidebar.markdown("---")
 
 # Tooltip Implementado en el Text Input
@@ -168,13 +178,14 @@ if not ticker_input:
     # 1. PANTALLA DE BIENVENIDA
     col_h1, col_h2 = st.columns([1.5, 4])
     with col_h1:
-        if ruta_logo_detectada:
+        if ruta_logo_detectada and os.path.exists(ruta_logo_detectada):
             st.image(ruta_logo_detectada, width=220)
         else:
             st.markdown('<div class="brand-title">An-FyT</div>', unsafe_allow_html=True)
+            st.markdown('<div class="brand-subtitle">ANÁLISIS FUNDAMENTAL BURSÁTIL</div>', unsafe_allow_html=True)
             
     with col_h2:
-        st.markdown('<h1 style="color: #0A192F; margin-bottom: 5px; font-size: 32px;">An-FyT - Sistema de Análisis Fundamental Top-Down</h1>', unsafe_allow_html=True)
+        st.markdown('<h1 style="color: #0A192F; margin-bottom: 5px; font-size: 32px;">Sistema de Análisis Fundamental Top-Down</h1>', unsafe_allow_html=True)
         st.markdown('<p style="color: #475569; font-size: 15px; margin-bottom: 20px;">Evaluación cuantitativa e institucional de empresas cotizadas en bolsa mediante 100 Puntos de Scoring.</p>', unsafe_allow_html=True)
     
     st.markdown("---")
