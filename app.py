@@ -62,7 +62,7 @@ def seleccionar_ticker(t):
 inyectar_estilos()
 
 # --- AUTENTICACIÓN SECRETS ---
-gemini_key, fred_key, fmp_key = cargar_secrets()
+gemini_key, fred_key, finnhub_key = cargar_secrets()
 
 # --- BÚSQUEDA DE LOGO Y RENDERIZADO SIDEBAR ---
 ruta_logo_detectada = obtener_ruta_logo()
@@ -210,7 +210,7 @@ else:
     with st.spinner(f"📡 Compilando métricas y evaluando macroeconomía para {ticker_input}..."):
         try:
             # Extracción concurrente optimizada
-            datos_mercado = fetch_datos_concurrente(ticker_input, fmp_key, fred_key)
+            datos_mercado = fetch_datos_concurrente(ticker_input, finnhub_key, fred_key)
             precio_actual = datos_mercado["precio_actual"]
             prev_close = datos_mercado["prev_close"]
             hist = datos_mercado["hist"]
@@ -226,7 +226,7 @@ else:
             info["previousClose"] = prev_close
             
             if not info or (hist.empty and inc.empty) or precio_actual == 0:
-                st.error("❌ Ticker no encontrado o problemas de conexión con el proveedor financiero. Verifica el símbolo ingresado.")
+                st.error("❌ Ticker no encontrado, cuota de Finnhub excedida o problemas de conexión. Verifica el símbolo o tu FINNHUB_API_KEY.")
                 st.stop()
 
             # --- EXTRACCIÓN Y NORMALIZACIÓN INSTITUCIONAL TTM ---
@@ -465,7 +465,7 @@ else:
             if buyback_yield >= 1.5: col_by, msg_by = "🟢", f"Fuerte Recompra: Reduce flotante en {buyback_yield:.1f}% anual."
             elif buyback_yield >= 0.0: col_by, msg_by = "🟡", f"Recompra Neutra: Variación de {buyback_yield:.1f}%."
             else: col_by, msg_by = "🔴", f"Dilución de Accionistas: Incrementa flotante en {abs(buyback_yield):.1f}%."
-            div_rate, div_yield, next_div_date = obtener_datos_dividendos(ticker_input, info, fmp_key, precio_actual)
+            div_rate, div_yield, next_div_date = obtener_datos_dividendos(ticker_input, info, finnhub_key, precio_actual)
             val_div_metric = f"${div_rate:.2f} ({div_yield:.2f}%)" if div_rate > 0 else "N/A"
             msg_div_tooltip = f"Rendimiento anualizado por dividendo: {div_yield:.2f}%\nPróxima fecha ex-dividendo estimada: {next_div_date}"
             fcf_yield = (fcf_ttm / mcap * 100) if mcap > 0 else 0.0
@@ -500,7 +500,7 @@ else:
                 revenue_growth_api    = m_ttm.get("revenue_growth", 0.0),
                 revenue_ttm           = m_ttm.get("revenue_ttm", rev_ttm),
                 operating_margin_hist = m_ttm.get("op_margin_hist", mg_op / 100.0 if mg_op > 0 else 0.12),
-                fmp_key               = fmp_key,
+                finnhub_key           = finnhub_key,
                 fred_key              = fred_key,
                 ticker                = ticker_input,
                 # ── Nuevos parámetros del modelo ──────────────────────────
@@ -918,11 +918,11 @@ else:
             # --- CONTENIDO DE LA PESTAÑA: NOTICIAS Y CATALIZADORES ---
             with tab_noticias:
                 st.markdown(f"<h2 style='color: #0A192F; font-weight: 700;'>📰 Noticias y Catalizadores Recientes ({ticker_input})</h2>", unsafe_allow_html=True)
-                news_data = news_data_cache if news_data_cache else obtener_noticias_financieras(ticker_input)
+                news_data = news_data_cache if news_data_cache else obtener_noticias_financieras(ticker_input, finnhub_key)
                 
                 if news_data:
                     for n in news_data:
-                        link_href = n['link'] if n['link'] and n['link'].startswith('http') else f"https://finance.yahoo.com/quote/{ticker_input}/news"
+                        link_href = n['link'] if n['link'] and n['link'].startswith('http') else f"https://finnhub.io/"
                         st.markdown(f"""
                         <div style='border: 1px solid #C5A059; border-radius: 8px; padding: 15px; margin-bottom: 15px; background-color: #FFFFFF; box-shadow: 0 2px 4px rgba(0,0,0,0.05);'>
                             <p style='color: #64748B; font-size: 12px; margin-bottom: 5px; font-weight: 700;'>🏢 {n['publisher']} &nbsp;|&nbsp; 🕒 {n['date']}</p>

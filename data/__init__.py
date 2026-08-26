@@ -1,6 +1,6 @@
 # Data package
 from data.financial_fetcher import (
-    obtener_session_yfinance,
+    obtener_session_finnhub,
     safe_num,
     obtener_tasa_fred,
     obtener_erp_mercado,
@@ -12,13 +12,14 @@ from data.financial_fetcher import (
     extraer_fcff_desapalancado,
     extraer_metricas_ttm,
     obtener_capex_historico,
+    obtener_kd_finnhub_fred,
     obtener_kd_fmp_fred,
     obtener_datos_dividendos,
     obtener_noticias_financieras,
 )
 
 __all__ = [
-    "obtener_session_yfinance",
+    "obtener_session_finnhub",
     "safe_num",
     "obtener_tasa_fred",
     "obtener_erp_mercado",
@@ -30,6 +31,7 @@ __all__ = [
     "extraer_fcff_desapalancado",
     "extraer_metricas_ttm",
     "obtener_capex_historico",
+    "obtener_kd_finnhub_fred",
     "obtener_kd_fmp_fred",
     "obtener_datos_dividendos",
     "obtener_noticias_financieras",

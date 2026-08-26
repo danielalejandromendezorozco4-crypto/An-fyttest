@@ -124,6 +124,26 @@ def safe_num(val, default=0.0):
     except (ValueError, TypeError, Exception):
         return default if default is None else float(default)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTANTES DE INTEGRACIÓN FINNHUB API
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: URL base de la API oficial de Finnhub (v1)
+FINNHUB_BASE_URL: str = "https://finnhub.io/api/v1"
+
+#: TTL de caché para cotizaciones intradía y velas (segundos)
+FINNHUB_CACHE_TTL_QUOTE: int = 60
+
+#: TTL de caché para métricas fundamentales, estados financieros y perfiles (segundos)
+FINNHUB_CACHE_TTL_METRICS: int = 43200
+
+#: TTL de caché para noticias corporativas recientes (segundos)
+FINNHUB_CACHE_TTL_NEWS: int = 900
+
+#: TTL de caché para series macroeconómicas de FRED (segundos)
+FRED_CACHE_TTL: int = 3600
+
+
 def obtener_ruta_logo():
     posibles_rutas = ["logo.png", "logo.jpg", "logo.jpeg", "assets/logo.png", "images/logo.png"]
     for r in posibles_rutas:
@@ -132,11 +152,34 @@ def obtener_ruta_logo():
     return None
 
 def cargar_secrets():
-    try:
-        gemini_key = st.secrets["GEMINI_KEY"]
-        fred_key = st.secrets["FRED_KEY"]
-        fmp_key = st.secrets.get("FMP_KEY", None)
-        return gemini_key, fred_key, fmp_key
-    except KeyError:
-        st.error("⚠️ Faltan claves en st.secrets. Asegúrate de tener 'GEMINI_KEY' y 'FRED_KEY' guardadas en el menú de Streamlit.")
-        st.stop()
+    """
+    Carga las claves de API necesarias desde st.secrets o variables de entorno (os.environ).
+    Retorna: (gemini_key, fred_key, finnhub_key).
+    """
+    def _obtener_clave(nombres: list[str]) -> str:
+        for nom in nombres:
+            try:
+                if hasattr(st, "secrets") and nom in st.secrets and st.secrets[nom]:
+                    return str(st.secrets[nom]).strip()
+            except Exception:
+                pass
+            env_val = os.getenv(nom)
+            if env_val and env_val.strip():
+                return env_val.strip()
+        return ""
+
+    gemini_key = _obtener_clave(["GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
+    fred_key = _obtener_clave(["FRED_KEY", "FRED_API_KEY"])
+    finnhub_key = _obtener_clave(["FINNHUB_API_KEY", "FINNHUB_KEY", "FMP_KEY"])
+
+    if not gemini_key and not fred_key and not finnhub_key:
+        try:
+            st.error(
+                "⚠️ Faltan claves en la configuración. Asegúrate de configurar 'FINNHUB_API_KEY', 'GEMINI_KEY' y 'FRED_KEY' "
+                "en st.secrets o en tu archivo .env."
+            )
+            st.stop()
+        except Exception:
+            pass
+
+    return gemini_key, fred_key, finnhub_key

@@ -48,10 +48,11 @@ def calcular_wacc(
     total_debt: float,
     int_exp: float,
     tax_rate: float,
-    fmp_key: str = "",
+    finnhub_key: str = "",
     fred_key: str = "",
     ticker: str = "",
     erp: float = 5.0,
+    fmp_key: str = "",
 ) -> Dict[str, float]:
     """
     Costo Promedio Ponderado de Capital (WACC) con datos reales de mercado.
@@ -67,6 +68,7 @@ def calcular_wacc(
     Returns:
         Diccionario con: wacc, ke, kd, we, wd, rf, erp, tax_rate.
     """
+    api_k = finnhub_key or fmp_key
     rf       = max(float(tasa_libre_riesgo) if tasa_libre_riesgo is not None else 4.20, 0.0)
     beta_val = max(float(beta) if beta is not None else 1.0, 0.05)
     erp_val  = max(float(erp) if erp is not None else 5.0, 2.0)
@@ -84,10 +86,10 @@ def calcular_wacc(
     if total_debt > 0:
         if int_exp > 0:
             kd = (int_exp / total_debt) * 100.0
-        elif ticker and (fmp_key or fred_key):
+        elif ticker and (api_k or fred_key):
             try:
-                from data.financial_fetcher import obtener_kd_fmp_fred  # noqa: PLC0415
-                kd = float(obtener_kd_fmp_fred(ticker, fmp_key, fred_key, int_exp, total_debt))
+                from data.financial_fetcher import obtener_kd_finnhub_fred  # noqa: PLC0415
+                kd = float(obtener_kd_finnhub_fred(ticker, api_k, fred_key, int_exp, total_debt))
             except Exception:
                 kd = rf
         else:
@@ -208,7 +210,7 @@ def calcular_fcff_valuation(
     operating_margin_hist: float = 0.0,
     cagr_revenue_hist: float = 0.0,
     revenue_growth_api: float = 0.0,
-    fmp_key: str = "",
+    finnhub_key: str = "",
     fred_key: str = "",
     ticker: str = "",
     buyback_rate: float = DEFAULT_BUYBACK_RATE,
@@ -217,6 +219,7 @@ def calcular_fcff_valuation(
     ebit_hist: Optional[List[float]] = None,
     da_hist: Optional[List[float]] = None,
     delta_nwc_hist: Optional[List[float]] = None,
+    fmp_key: str = "",
 ) -> Dict[str, Union[float, str, list]]:
     """
     Motor de Valuacion FCFF (Free Cash Flow to Firm) Institucional.
@@ -279,7 +282,7 @@ def calcular_fcff_valuation(
         total_debt        = total_debt,
         int_exp           = int_exp_ultimo,
         tax_rate          = tax_rate_real,
-        fmp_key           = fmp_key,
+        finnhub_key       = finnhub_key or fmp_key,
         fred_key          = fred_key,
         ticker            = ticker,
         erp               = erp,
