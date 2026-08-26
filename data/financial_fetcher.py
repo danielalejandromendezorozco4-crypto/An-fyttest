@@ -22,21 +22,64 @@ def obtener_session_yfinance():
     return session
 
 def safe_num(val, default=0.0):
+    """
+    Convierte cualquier valor de forma segura a float o al valor por defecto especificado.
+    Maneja None, np.nan, float('nan'), inf, -inf, strings formateados ('$1,250.50', '15.5%') y tipos corruptos.
+    """
     if val is None:
-        return float(default)
+        return default if default is None else float(default)
     try:
-        if pd.isna(val) or np.isinf(val):
-            return float(default)
+        if isinstance(val, (int, float)):
+            if np.isnan(val) or np.isinf(val):
+                return default if default is None else float(default)
+            return float(val)
+        if isinstance(val, str):
+            clean_str = val.replace(',', '').replace('$', '').replace('%', '').strip()
+            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf'):
+                return default if default is None else float(default)
+            return float(clean_str)
+        if pd.isna(val):
+            return default if default is None else float(default)
         return float(val)
-    except (ValueError, TypeError):
-        return float(default)
+    except (ValueError, TypeError, Exception):
+        return default if default is None else float(default)
+
+def _normalizar_nombre_fila(nombre: str) -> str:
+    """Normaliza un nombre de fila eliminando espacios, guiones y mayúsculas para matching flexible."""
+    if not isinstance(nombre, str):
+        return str(nombre).lower().strip()
+    return nombre.lower().replace(" ", "").replace("_", "").replace("-", "").strip()
 
 def _extraer_val_df(df, posibles_filas, default=0.0):
+    """
+    Extrae el valor más reciente de un DataFrame buscando en las filas candidatas
+    usando primero búsqueda exacta y luego búsqueda normalizada insensible a mayúsculas/espacios.
+    """
     if isinstance(df, pd.DataFrame) and not df.empty:
+        # 1. Búsqueda exacta
         for f in posibles_filas:
             if f in df.index:
                 try:
-                    serie = df.loc[f].dropna()
+                    elem = df.loc[f]
+                    if isinstance(elem, pd.DataFrame):
+                        elem = elem.iloc[0]
+                    serie = elem.dropna()
+                    if not serie.empty:
+                        val = safe_num(serie.iloc[0], default=None)
+                        if val is not None:
+                            return val
+                except Exception:
+                    pass
+        # 2. Búsqueda normalizada
+        index_map = {_normalizar_nombre_fila(idx): idx for idx in df.index}
+        for f in posibles_filas:
+            norm_f = _normalizar_nombre_fila(f)
+            if norm_f in index_map:
+                try:
+                    elem = df.loc[index_map[norm_f]]
+                    if isinstance(elem, pd.DataFrame):
+                        elem = elem.iloc[0]
+                    serie = elem.dropna()
                     if not serie.empty:
                         val = safe_num(serie.iloc[0], default=None)
                         if val is not None:
@@ -222,11 +265,12 @@ def fetch_datos_fundamentales(ticker, fmp_api_key):
                 bs = df_bs_t.rename(index={
                     "totalAssets": "Total Assets", "totalCurrentLiabilities": "Current Liabilities", 
                     "totalCurrentAssets": "Current Assets", "longTermDebt": "Long Term Debt",
-                    "shortTermDebt": "Current Debt"
+                    "shortTermDebt": "Current Debt", "totalStockholdersEquity": "Total Stockholder Equity"
                 })
                 df_cf_t = pd.DataFrame(res_cf).set_index("date").T
                 cf = df_cf_t.rename(index={
-                    "operatingCashFlow": "Operating Cash Flow", "freeCashFlow": "Free Cash Flow"
+                    "operatingCashFlow": "Operating Cash Flow", "freeCashFlow": "Free Cash Flow",
+                    "capitalExpenditure": "Capital Expenditure"
                 })
                 fmp_exitoso = True
         except Exception:
@@ -241,45 +285,154 @@ def fetch_datos_fundamentales(ticker, fmp_api_key):
                 if k not in info or info[k] is None or info[k] == 0:
                     info[k] = v
 
-        if inc.empty and hasattr(accion, "financials") and accion.financials is not None:
-            inc = accion.financials
-        if bs.empty and hasattr(accion, "balance_sheet") and accion.balance_sheet is not None:
-            bs = accion.balance_sheet
-        if cf.empty and hasattr(accion, "cashflow") and accion.cashflow is not None:
-            cf = accion.cashflow
+        # Respaldo de fast_info para shares y marketCap
+        try:
+            if not info.get("sharesOutstanding") or info.get("sharesOutstanding") == 0:
+                fast_sh = safe_num(getattr(accion.fast_info, "shares", 0.0), 0.0)
+                if fast_sh > 0:
+                    info["sharesOutstanding"] = fast_sh
+            if not info.get("marketCap") or info.get("marketCap") == 0:
+                fast_mc = safe_num(getattr(accion.fast_info, "market_cap", 0.0), 0.0)
+                if fast_mc > 0:
+                    info["marketCap"] = fast_mc
+        except Exception:
+            pass
+
+        if inc.empty:
+            if hasattr(accion, "income_stmt") and accion.income_stmt is not None and not accion.income_stmt.empty:
+                inc = accion.income_stmt
+            elif hasattr(accion, "financials") and accion.financials is not None and not accion.financials.empty:
+                inc = accion.financials
+                
+        if bs.empty:
+            if hasattr(accion, "balance_sheet") and accion.balance_sheet is not None and not accion.balance_sheet.empty:
+                bs = accion.balance_sheet
+            elif hasattr(accion, "balancesheet") and accion.balancesheet is not None and not accion.balancesheet.empty:
+                bs = accion.balancesheet
+                
+        if cf.empty:
+            if hasattr(accion, "cash_flow") and accion.cash_flow is not None and not accion.cash_flow.empty:
+                cf = accion.cash_flow
+            elif hasattr(accion, "cashflow") and accion.cashflow is not None and not accion.cashflow.empty:
+                cf = accion.cashflow
     except Exception:
         pass
 
+    # ── Inyección sintética defensiva en DataFrames ──────────────────────────
+    # A) Inyección de 'Free Cash Flow' en cf si no existe directamente
+    if isinstance(cf, pd.DataFrame) and not cf.empty:
+        fcf_exists = any(_normalizar_nombre_fila(r) in ["freecashflow", "freecashflowreported"] for r in cf.index)
+        if not fcf_exists:
+            posibles_ocf = [
+                "Operating Cash Flow", "OperatingCashFlow",
+                "Cash Flow From Continuing Operating Activities",
+                "Total Cash From Operating Activities",
+                "Net Cash Provided By Operating Activities"
+            ]
+            posibles_capex = [
+                "Capital Expenditure", "CapitalExpenditure", "Capital Expenditures",
+                "Purchase Of Property Plant And Equipment",
+                "Purchases Of Property, Plant And Equipment",
+                "Capital Expenditure Reported", "Purchase Of PPE"
+            ]
+            
+            ocf_row_name = next((r for r in posibles_ocf if r in cf.index), None)
+            if not ocf_row_name:
+                norm_map = {_normalizar_nombre_fila(idx): idx for idx in cf.index}
+                ocf_row_name = next((norm_map[k] for k in [_normalizar_nombre_fila(x) for x in posibles_ocf] if k in norm_map), None)
+                
+            capex_row_name = next((r for r in posibles_capex if r in cf.index), None)
+            if not capex_row_name:
+                norm_map = {_normalizar_nombre_fila(idx): idx for idx in cf.index}
+                capex_row_name = next((norm_map[k] for k in [_normalizar_nombre_fila(x) for x in posibles_capex] if k in norm_map), None)
+                
+            if ocf_row_name:
+                s_ocf = cf.loc[ocf_row_name]
+                if isinstance(s_ocf, pd.DataFrame): s_ocf = s_ocf.iloc[0]
+                s_capex = cf.loc[capex_row_name] if capex_row_name else pd.Series(0.0, index=cf.columns)
+                if isinstance(s_capex, pd.DataFrame): s_capex = s_capex.iloc[0]
+                
+                fcf_synth = s_ocf.fillna(0.0) - s_capex.abs().fillna(0.0)
+                cf.loc['Free Cash Flow'] = fcf_synth
+
+    # B) Inyección de 'Gross Profit' en inc si no existe (ej. MA, Visa, bancos)
+    if isinstance(inc, pd.DataFrame) and not inc.empty:
+        gp_exists = any(_normalizar_nombre_fila(r) in ["grossprofit"] for r in inc.index)
+        if not gp_exists:
+            posibles_rev = ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"]
+            rev_row_name = next((r for r in posibles_rev if r in inc.index), None)
+            if not rev_row_name:
+                norm_map = {_normalizar_nombre_fila(idx): idx for idx in inc.index}
+                rev_row_name = next((norm_map[k] for k in [_normalizar_nombre_fila(x) for x in posibles_rev] if k in norm_map), None)
+            if rev_row_name:
+                s_rev = inc.loc[rev_row_name]
+                if isinstance(s_rev, pd.DataFrame): s_rev = s_rev.iloc[0]
+                inc.loc['Gross Profit'] = s_rev
+
     # 3. Mapeo y saneamiento de campos numéricos esenciales desde DataFrames si no están en info
     if not info.get("totalAssets") or info.get("totalAssets") == 0:
-        info["totalAssets"] = _extraer_val_df(bs, ['Total Assets', 'TotalAssets', 'Total Assets Net'])
+        info["totalAssets"] = _extraer_val_df(bs, [
+            'Total Assets', 'TotalAssets', 'Total Assets Net', 'totalAssets'
+        ])
         
     if not info.get("totalStockholderEquity") or info.get("totalStockholderEquity") == 0:
-        info["totalStockholderEquity"] = _extraer_val_df(bs, ['Total Stockholder Equity', 'Stockholders Equity', 'TotalStockholderEquity', 'Common Stock Equity'])
+        info["totalStockholderEquity"] = _extraer_val_df(bs, [
+            'Total Stockholder Equity', 'Stockholders Equity', 'StockholdersEquity',
+            'TotalStockholderEquity', 'Common Stock Equity', 'CommonStockEquity',
+            'Total Equity', 'Total Equity Gross Minority Interest', 'totalStockholdersEquity'
+        ])
         
     if not info.get("totalDebt") or info.get("totalDebt") == 0:
-        info["totalDebt"] = _extraer_val_df(bs, ['Total Debt', 'TotalDebt', 'Long Term Debt'])
+        info["totalDebt"] = _extraer_val_df(bs, [
+            'Total Debt', 'TotalDebt', 'Long Term Debt And Capital Lease Obligation',
+            'Long Term Debt', 'LongTermDebt', 'Total Non Current Liabilities Net Minority Interest'
+        ])
         
     if not info.get("totalCash") or info.get("totalCash") == 0:
-        info["totalCash"] = _extraer_val_df(bs, ['Cash And Cash Equivalents', 'CashCashEquivalentsAndShortTermInvestments', 'Cash Financial'])
+        info["totalCash"] = _extraer_val_df(bs, [
+            'Cash And Cash Equivalents', 'CashCashEquivalentsAndShortTermInvestments',
+            'Cash Financial', 'Cash And Short Term Investments',
+            'Cash, Cash Equivalents & Short Term Investments',
+            'Cash and Cash Equivalents', 'Cash & Cash Equivalents', 'Cash'
+        ])
         
     if not info.get("operatingIncome") or info.get("operatingIncome") == 0:
-        info["operatingIncome"] = _extraer_val_df(inc, ['Operating Income', 'OperatingIncome', 'EBIT'])
+        info["operatingIncome"] = _extraer_val_df(inc, [
+            'Operating Income', 'OperatingIncome', 'Operating Profit', 'EBIT',
+            'Normalized EBIT', 'Normalized Operating Profit'
+        ])
         
     if not info.get("netIncomeToCommon") or info.get("netIncomeToCommon") == 0:
-        info["netIncomeToCommon"] = _extraer_val_df(inc, ['Net Income', 'NetIncome', 'Net Income Common Stockholders'])
+        info["netIncomeToCommon"] = _extraer_val_df(inc, [
+            'Net Income', 'NetIncome', 'Net Income Common Stockholders',
+            'Net Income To Common', 'Net Income Continuous Operations'
+        ])
 
     if not info.get("freeCashflow") or info.get("freeCashflow") == 0:
-        info["freeCashflow"] = _extraer_val_df(cf, ['Free Cash Flow', 'FreeCashFlow'])
+        info["freeCashflow"] = _extraer_val_df(cf, ['Free Cash Flow', 'FreeCashFlow', 'freeCashFlow'])
         
     if not info.get("operatingCashflow") or info.get("operatingCashflow") == 0:
-        info["operatingCashflow"] = _extraer_val_df(cf, ['Operating Cash Flow', 'OperatingCashFlow', 'Cash Flow From Continuing Operating Activities'])
+        info["operatingCashflow"] = _extraer_val_df(cf, [
+            'Operating Cash Flow', 'OperatingCashFlow',
+            'Cash Flow From Continuing Operating Activities',
+            'Total Cash From Operating Activities',
+            'Net Cash Provided By Operating Activities'
+        ])
         
     if not info.get("interestExpense") or info.get("interestExpense") == 0:
-        info["interestExpense"] = abs(_extraer_val_df(inc, ['Interest Expense', 'InterestExpense', 'Interest Expense Non Operating']))
+        info["interestExpense"] = abs(_extraer_val_df(inc, [
+            'Interest Expense', 'InterestExpense', 'Interest Expense Non Operating',
+            'Net Non Operating Interest Income Expense'
+        ]))
         
     if not info.get("ebitda") or info.get("ebitda") == 0:
-        info["ebitda"] = _extraer_val_df(inc, ['EBITDA', 'Ebitda']) or (info.get("operatingIncome", 0.0) * 1.15)
+        info["ebitda"] = _extraer_val_df(inc, ['EBITDA', 'Normalized EBITDA', 'ebitda']) or (info.get("operatingIncome", 0.0) * 1.15)
+
+    if not info.get("sharesOutstanding") or info.get("sharesOutstanding") == 0:
+        info["sharesOutstanding"] = _extraer_val_df(inc, [
+            'Diluted Average Shares', 'Basic Average Shares', 'Ordinary Shares Number',
+            'Weighted Average Shares Diluted', 'Weighted Average Diluted Shares Out'
+        ]) or _extraer_val_df(bs, ['Ordinary Shares Number', 'Share Issued', 'Common Stock'])
 
     # 4. Asegurar que NINGUNA clave crítica en info sea None o NaN
     claves_criticas = [
@@ -291,6 +444,15 @@ def fetch_datos_fundamentales(ticker, fmp_api_key):
     ]
     for k in claves_criticas:
         info[k] = safe_num(info.get(k), default=0.0)
+
+    # Reconciliación de coherencia entre marketCap y sharesOutstanding
+    mcap_val = info.get("marketCap", 0.0)
+    current_p = safe_num(info.get("currentPrice", info.get("regularMarketPrice", 0.0)), 0.0)
+    if mcap_val > 10_000_000 and current_p > 0:
+        implied_sh = mcap_val / current_p
+        sh_val = info.get("sharesOutstanding", 0.0)
+        if sh_val <= 1000 or sh_val < implied_sh * 0.01 or sh_val > implied_sh * 100:
+            info["sharesOutstanding"] = implied_sh
 
     if not info.get("longName"): info["longName"] = ticker
     if not info.get("sector"): info["sector"] = "General"
@@ -410,25 +572,13 @@ def fetch_datos_concurrente(ticker, fmp_key, fred_key):
         "news_data": news_data
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# NUEVAS FUNCIONES PARA EL MOTOR FCFF
-# ─────────────────────────────────────────────────────────────────────────────
-
 def obtener_capex_historico(cf: pd.DataFrame) -> list[float]:
     """
     Extrae el Gasto de Capital (CapEx) del estado de flujos de efectivo y lo
     retorna como lista de valores **positivos** (gasto real), ordenados del más
     reciente al más antiguo.
 
-    yfinance reporta CapEx con signo negativo; FMP lo reporta positivo.
-    Esta función normaliza ambas convenciones con `abs()`.
-
-    Args:
-        cf: DataFrame del estado de flujos de efectivo (índice = conceptos, columnas = fechas).
-
-    Returns:
-        Lista de floats con CapEx positivo por período. Lista vacía si no se encuentra.
+    Normaliza convenciones negativas (yfinance) y positivas (FMP) con `abs()`.
     """
     posibles_filas = [
         "Capital Expenditure",
@@ -437,33 +587,20 @@ def obtener_capex_historico(cf: pd.DataFrame) -> list[float]:
         "Purchase Of Property Plant And Equipment",
         "Purchases Of Property, Plant And Equipment",
         "Capital Expenditure Reported",
+        "Purchase Of PPE",
+        "Net PPE Purchase And Sale",
+        "capitalExpenditures",
     ]
-    if isinstance(cf, pd.DataFrame) and not cf.empty:
-        for fila in posibles_filas:
-            if fila in cf.index:
-                try:
-                    serie = cf.loc[fila].dropna()
-                    if not serie.empty:
-                        return [abs(safe_num(v, 0.0)) for v in serie.values]
-                except Exception:
-                    pass
+    vals = _extraer_serie(cf, posibles_filas, absval=True)
+    if vals:
+        return vals
     return []
-
 
 @st.cache_data(ttl=300)
 def obtener_rf_tnx(fallback_fred: float = 4.20) -> float:
     """
     Obtiene la tasa libre de riesgo (R_f) del bono del Tesoro a 10 años vía
     yfinance (`^TNX`) con fallback automático al valor FRED proporcionado.
-
-    El ticker `^TNX` cotiza en puntos porcentuales (e.g., 4.35 = 4.35%),
-    por lo que se retorna directamente como porcentaje.
-
-    Args:
-        fallback_fred: Tasa FRED de respaldo a usar si falla la consulta (%).
-
-    Returns:
-        Tasa libre de riesgo en porcentaje (e.g., 4.35 representa 4.35%).
     """
     try:
         session = obtener_session_yfinance()
@@ -475,11 +612,6 @@ def obtener_rf_tnx(fallback_fred: float = 4.20) -> float:
         pass
     return float(fallback_fred)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# EXTRACCIÓN FCFF DESAPALANCADO — DUAL-PATH (EBIT primario / OCF fallback)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _extraer_serie(
     df: pd.DataFrame,
     posibles_filas: list[str],
@@ -487,23 +619,34 @@ def _extraer_serie(
 ) -> list[float]:
     """
     Extrae una serie histórica de un DataFrame (índice = conceptos, columnas = fechas)
-    buscando secuencialmente los nombres de fila en ``posibles_filas``.
-
-    Args:
-        df:             DataFrame de estados financieros.
-        posibles_filas: Lista de nombres de fila candidatos (orden de prioridad).
-        absval:         Si True aplica ``abs()`` a cada valor extraído.
-
-    Returns:
-        Lista de floats ordenados del más reciente al más antiguo.
-        Lista vacía si ninguna fila fue encontrada o el DataFrame está vacío.
+    buscando secuencialmente los nombres de fila en ``posibles_filas`` mediante matching exacto y normalizado.
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return []
+    # 1. Búsqueda exacta
     for fila in posibles_filas:
         if fila in df.index:
             try:
-                serie = df.loc[fila].dropna()
+                elem = df.loc[fila]
+                if isinstance(elem, pd.DataFrame):
+                    elem = elem.iloc[0]
+                serie = elem.dropna()
+                if not serie.empty:
+                    vals = [abs(safe_num(v, 0.0)) if absval else safe_num(v, 0.0)
+                            for v in serie.values]
+                    return vals
+            except Exception:
+                pass
+    # 2. Búsqueda normalizada
+    index_map = {_normalizar_nombre_fila(idx): idx for idx in df.index}
+    for fila in posibles_filas:
+        norm_f = _normalizar_nombre_fila(fila)
+        if norm_f in index_map:
+            try:
+                elem = df.loc[index_map[norm_f]]
+                if isinstance(elem, pd.DataFrame):
+                    elem = elem.iloc[0]
+                serie = elem.dropna()
                 if not serie.empty:
                     vals = [abs(safe_num(v, 0.0)) if absval else safe_num(v, 0.0)
                             for v in serie.values]
@@ -511,7 +654,6 @@ def _extraer_serie(
             except Exception:
                 pass
     return []
-
 
 def extraer_fcff_desapalancado(
     cf: pd.DataFrame,
@@ -521,51 +663,14 @@ def extraer_fcff_desapalancado(
 ) -> dict:
     """
     Extrae y sanitiza los insumos para el cálculo de FCFF histórico siguiendo
-    una jerarquía dual-path estricta que elimina el doble conteo de la deuda:
-
-    **Path primario (vía EBIT)** — desapalancado puro:
-        ``FCFF = EBIT × (1 − Tax_Rate) + D&A − CapEx − ΔCapital_Trabajo``
-
-    **Path fallback (vía OCF)** — requiere ajuste de escudo fiscal:
-        ``FCFF = OCF + Interest_Expense × (1 − Tax_Rate) − CapEx``
-
-    El path primario se utiliza cuando EBIT y D&A están disponibles y producen
-    un FCFF positivo. En caso contrario se cae al path OCF. Si ambos fallan,
-    se activa la normalización mediante Revenue × Margen Operativo.
-
-    Manejo defensivo:
-    - D&A ausente → imputa 0 (conservador; no infla NOPAT).
-    - ΔCapital de Trabajo ausente → imputa 0.
-    - Arrays de distinta longitud → alineados al largo máximo de OCF.
-    - DataFrames vacíos o con datos parciales → escalares desde ``info``.
-
-    Args:
-        cf:   DataFrame del estado de flujos de efectivo.
-        inc:  DataFrame del estado de resultados.
-        bs:   DataFrame del balance general.
-        info: Diccionario con metadatos y métricas del ticker.
-
-    Returns:
-        Diccionario con las siguientes claves (compatible con
-        ``calcular_fcff_valuation``):
-
-        - ``ocf_hist``         (list[float]): Operating Cash Flow histórico.
-        - ``capex_hist``       (list[float]): CapEx positivo histórico.
-        - ``interest_hist``    (list[float]): Interest Expense (absoluto) histórico.
-        - ``pretax_hist``      (list[float]): Pre-tax Income histórico.
-        - ``taxprov_hist``     (list[float]): Tax Provision histórica.
-        - ``ebit_hist``        (list[float]): EBIT histórico (path primario).
-        - ``da_hist``          (list[float]): Depreciación & Amortización histórica.
-        - ``delta_nwc_hist``   (list[float]): Variación de Capital de Trabajo histórica.
-        - ``total_debt``       (float):       Deuda total más reciente.
-        - ``total_cash``       (float):       Efectivo + equivalentes más reciente.
-        - ``shares_diluted``   (float):       Acciones diluidas en circulación.
-        - ``n_periodos``       (int):         Períodos históricos con datos.
+    una jerarquía dual-path estricta que elimina el doble conteo de la deuda.
     """
     # ── OCF histórico ────────────────────────────────────────────────────────
     ocf_hist = _extraer_serie(cf, [
         "Operating Cash Flow", "OperatingCashFlow",
         "Cash Flow From Continuing Operating Activities",
+        "Total Cash From Operating Activities",
+        "Net Cash Provided By Operating Activities"
     ])
     if not ocf_hist:
         ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
@@ -581,21 +686,21 @@ def extraer_fcff_desapalancado(
     # ── Interest Expense histórico (absoluto) ────────────────────────────────
     interest_hist = _extraer_serie(inc, [
         "Interest Expense", "InterestExpense",
-        "Interest Expense Non Operating",
+        "Interest Expense Non Operating", "Net Non Operating Interest Income Expense"
     ], absval=True)
     if not interest_hist:
         interest_hist = [abs(safe_num(info.get("interestExpense", 0.0), 0.0))]
 
     # ── Pre-tax Income histórico ─────────────────────────────────────────────
     pretax_hist = _extraer_serie(inc, [
-        "Pretax Income", "Income Before Tax", "IncomeBeforeTax",
+        "Pretax Income", "Income Before Tax", "IncomeBeforeTax", "PretaxIncome"
     ])
     if not pretax_hist:
         pretax_hist = [safe_num(info.get("pretaxIncome", 0.0), 0.0)]
 
     # ── Tax Provision histórica ──────────────────────────────────────────────
     taxprov_hist = _extraer_serie(inc, [
-        "Tax Provision", "IncomeTaxExpense", "Income Tax Expense",
+        "Tax Provision", "IncomeTaxExpense", "Income Tax Expense", "TaxProvision"
     ])
     if not taxprov_hist:
         taxprov_hist = [safe_num(info.get("taxProvision", 0.0), 0.0)]
@@ -603,7 +708,7 @@ def extraer_fcff_desapalancado(
     # ── EBIT histórico (path primario desapalancado) ──────────────────────────
     ebit_hist = _extraer_serie(inc, [
         "Operating Income", "OperatingIncome", "EBIT",
-        "Normalized EBIT", "Normalized Operating Profit",
+        "Normalized EBIT", "Normalized Operating Profit", "Operating Profit"
     ])
     if not ebit_hist:
         ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
@@ -622,11 +727,8 @@ def extraer_fcff_desapalancado(
             "Reconciled Depreciation",
             "Depreciation And Amortization In Income Statement",
         ], absval=True)
-    # Si no se encuentra D&A, se imputa 0 al rellenar los arrays más adelante.
 
     # ── Capital de Trabajo Neto (NWC) histórico ──────────────────────────────
-    # NWC = (Activos Corrientes − Efectivo) − (Pasivos Corrientes − Deuda CP)
-    # ΔNWC = NWC_t − NWC_{t+1}  (incremento de NWC = uso de efectivo → resta)
     nwc_hist: list[float] = []
     cur_assets_hist = _extraer_serie(bs, [
         "Total Current Assets", "Current Assets", "CurrentAssets",
@@ -637,9 +739,10 @@ def extraer_fcff_desapalancado(
     cash_hist_bs = _extraer_serie(bs, [
         "Cash And Cash Equivalents", "CashCashEquivalentsAndShortTermInvestments",
         "Cash Financial", "Cash And Short Term Investments",
+        "Cash, Cash Equivalents & Short Term Investments", "Cash"
     ])
     stdebt_hist = _extraer_serie(bs, [
-        "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt",
+        "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt", "CurrentDebt"
     ])
 
     n_nwc = min(
@@ -647,15 +750,14 @@ def extraer_fcff_desapalancado(
         len(cur_liab_hist) if cur_liab_hist else 0,
     )
     for i in range(n_nwc):
-        ca    = safe_num(cur_assets_hist[i], 0.0)
-        cl    = safe_num(cur_liab_hist[i],  0.0)
+        ca     = safe_num(cur_assets_hist[i], 0.0)
+        cl     = safe_num(cur_liab_hist[i],  0.0)
         cash_i = safe_num(cash_hist_bs[i],  0.0) if i < len(cash_hist_bs) else 0.0
         std_i  = safe_num(stdebt_hist[i],   0.0) if i < len(stdebt_hist)  else 0.0
         nwc_hist.append((ca - cash_i) - (cl - std_i))
 
     delta_nwc_hist: list[float] = []
     for i in range(len(nwc_hist) - 1):
-        # Positivo → capital de trabajo creció → usa efectivo → resta en FCFF
         delta_nwc_hist.append(nwc_hist[i] - nwc_hist[i + 1])
     if nwc_hist and not delta_nwc_hist:
         delta_nwc_hist = [0.0]
@@ -664,8 +766,8 @@ def extraer_fcff_desapalancado(
     total_debt = safe_num(info.get("totalDebt", 0.0), 0.0)
     if total_debt == 0.0:
         total_debt = _extraer_val_df(bs, [
-            "Total Debt", "TotalDebt", "Long Term Debt",
-            "Long Term Debt And Capital Lease Obligation",
+            "Total Debt", "TotalDebt", "Long Term Debt And Capital Lease Obligation",
+            "Long Term Debt", "LongTermDebt"
         ], default=0.0)
 
     total_cash = safe_num(info.get("totalCash", 0.0), 0.0)
@@ -674,18 +776,27 @@ def extraer_fcff_desapalancado(
             "Cash And Cash Equivalents",
             "CashCashEquivalentsAndShortTermInvestments",
             "Cash Financial", "Cash And Short Term Investments",
+            "Cash, Cash Equivalents & Short Term Investments", "Cash"
         ], default=0.0)
 
-    shares_diluted = safe_num(info.get("sharesOutstanding", 0.0), 0.0)
-    for fila in ["Diluted Average Shares", "Ordinary Shares Number", "Basic Average Shares"]:
-        if isinstance(inc, pd.DataFrame) and not inc.empty and fila in inc.index:
-            try:
-                val = safe_num(inc.loc[fila].dropna().iloc[0], default=None)
-                if val is not None and val > 0:
-                    shares_diluted = val
-                    break
-            except Exception:
-                pass
+    shares_diluted = safe_num(info.get("impliedSharesOutstanding", 0.0), 0.0)
+    if shares_diluted <= 0:
+        shares_diluted = _extraer_val_df(inc, [
+            "Diluted Average Shares", "Basic Average Shares", "Ordinary Shares Number",
+            "Weighted Average Shares Diluted"
+        ], default=0.0)
+    if shares_diluted <= 0:
+        shares_diluted = _extraer_val_df(bs, ["Ordinary Shares Number", "Share Issued", "Common Stock"], default=0.0)
+    if shares_diluted <= 0:
+        shares_diluted = safe_num(info.get("sharesOutstanding", 0.0), 0.0)
+
+    # Reconciliación de escala de acciones
+    mcap_val = safe_num(info.get("marketCap", 0.0), 0.0)
+    cur_p = safe_num(info.get("currentPrice", 0.0), 0.0)
+    if mcap_val > 10_000_000 and cur_p > 0:
+        implied_sh = mcap_val / cur_p
+        if shares_diluted <= 1000 or shares_diluted < implied_sh * 0.01 or shares_diluted > implied_sh * 100:
+            shares_diluted = implied_sh
 
     # ── Alineación de arrays al largo de OCF (n_max) ─────────────────────────
     n_max = max(len(ocf_hist), 1)
@@ -711,22 +822,13 @@ def extraer_fcff_desapalancado(
         "n_periodos":      n_max,
     }
 
-
 def extraer_componentes_fcff(
     cf: pd.DataFrame,
     inc: pd.DataFrame,
     bs: pd.DataFrame,
     info: dict,
 ) -> dict:
-    """
-    Extrae y sanitiza todos los insumos necesarios para el cálculo de FCFF
-    histórico desde los DataFrames de estados financieros con jerarquía dual-path.
-
-    Delega en ``extraer_fcff_desapalancado`` garantizando compatibilidad total.
-    """
     return extraer_fcff_desapalancado(cf, inc, bs, info)
-
-
 
 def extraer_metricas_ttm(
     info: dict,
@@ -737,19 +839,18 @@ def extraer_metricas_ttm(
 ) -> dict:
     """
     Extrae, normaliza y consolida todas las métricas y cifras de los estados financieros
-    en base a los últimos 12 meses (TTM) y balance consolidado más reciente, alineado
-    a la metodología institucional (Finviz, Yahoo Finance, Investing.com).
-
-    Garantiza:
-    - FCF TTM = OCF TTM - |CapEx TTM| (sin descalces de signos).
-    - Acciones diluidas consolidadas para evitar distorsiones con tickers multiclase.
-    - Manejo seguro de campos nulos o no disponibles.
+    en base a los últimos 12 meses (TTM) y balance consolidado más reciente.
     """
-    # ── 1. Acciones y Market Cap ─────────────────────────────────────────────
+    # ── 1. Acciones y Market Cap con reconciliación de escala ─────────────────
     shares_diluted = safe_num(info.get("impliedSharesOutstanding", 0.0), 0.0)
     if shares_diluted <= 0:
         shares_diluted = _extraer_val_df(inc, [
-            "Diluted Average Shares", "Ordinary Shares Number", "Basic Average Shares"
+            "Diluted Average Shares", "Basic Average Shares", "Ordinary Shares Number",
+            "Weighted Average Shares Diluted", "Weighted Average Diluted Shares Out"
+        ], default=0.0)
+    if shares_diluted <= 0:
+        shares_diluted = _extraer_val_df(bs, [
+            "Ordinary Shares Number", "Share Issued", "Common Stock"
         ], default=0.0)
     if shares_diluted <= 0:
         shares_diluted = safe_num(info.get("sharesOutstanding", 0.0), 0.0)
@@ -762,22 +863,33 @@ def extraer_metricas_ttm(
     if shares_diluted <= 0 and mcap > 0 and precio_actual > 0:
         shares_diluted = mcap / precio_actual
 
+    # Detección y corrección de anomalías de escala (ej. si shares está en miles/unidades distorsionadas)
+    if mcap > 10_000_000 and precio_actual > 0:
+        implied_sh = mcap / precio_actual
+        if shares_diluted <= 1000 or shares_diluted < implied_sh * 0.01 or shares_diluted > implied_sh * 100:
+            shares_diluted = implied_sh
+
     # ── 2. Estado de Resultados TTM ──────────────────────────────────────────
     revenue_ttm = safe_num(info.get("totalRevenue", 0.0), 0.0)
     if revenue_ttm <= 0:
-        revenue_ttm = _extraer_val_df(inc, ["Total Revenue", "TotalRevenue", "Revenue"], default=0.0)
+        revenue_ttm = _extraer_val_df(inc, ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"], default=0.0)
 
-    gross_profit_ttm = safe_num(info.get("grossProfits", 0.0), 0.0)
+    gross_profit_ttm = safe_num(info.get("grossProfits", info.get("grossProfit", 0.0)), 0.0)
     if gross_profit_ttm <= 0:
         gross_profit_ttm = _extraer_val_df(inc, ["Gross Profit", "GrossProfit"], default=0.0)
+    if gross_profit_ttm <= 0 and revenue_ttm > 0:
+        gross_profit_ttm = revenue_ttm
 
     operating_income_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
     if operating_income_ttm == 0.0:
-        operating_income_ttm = _extraer_val_df(inc, ["Operating Income", "OperatingIncome", "EBIT"], default=0.0)
+        operating_income_ttm = _extraer_val_df(inc, [
+            "Operating Income", "OperatingIncome", "Operating Profit", "EBIT",
+            "Normalized EBIT", "Normalized Operating Profit"
+        ], default=0.0)
 
     ebitda_ttm = safe_num(info.get("ebitda", 0.0), 0.0)
     if ebitda_ttm <= 0:
-        ebitda_ttm = _extraer_val_df(inc, ["EBITDA", "Normalized EBITDA"], default=0.0)
+        ebitda_ttm = _extraer_val_df(inc, ["EBITDA", "Normalized EBITDA", "ebitda"], default=0.0)
     if ebitda_ttm <= 0 and operating_income_ttm > 0:
         ebitda_ttm = operating_income_ttm * 1.15
 
@@ -786,19 +898,20 @@ def extraer_metricas_ttm(
         net_income_ttm = safe_num(info.get("netIncome", 0.0), 0.0)
     if net_income_ttm == 0.0:
         net_income_ttm = _extraer_val_df(inc, [
-            "Net Income Common Stockholders", "Net Income", "NetIncome"
+            "Net Income Common Stockholders", "Net Income", "NetIncome",
+            "Net Income To Common", "Net Income Continuous Operations"
         ], default=0.0)
 
     eps_diluted_ttm = safe_num(info.get("trailingEps", 0.0), 0.0)
     if eps_diluted_ttm == 0.0:
         eps_diluted_ttm = safe_num(info.get("epsTrailingTwelveMonths", 0.0), 0.0)
-    if eps_diluted_ttm == 0.0 and shares_diluted > 0 and net_income_ttm != 0.0:
-        eps_diluted_ttm = net_income_ttm / shares_diluted
     if eps_diluted_ttm == 0.0:
         eps_diluted_ttm = _extraer_val_df(inc, [
             "Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
             "Diluted EPS from Continuing Operations", "EPS"
         ], default=0.0)
+    if eps_diluted_ttm == 0.0 and shares_diluted > 0 and net_income_ttm != 0.0:
+        eps_diluted_ttm = net_income_ttm / shares_diluted
 
     forward_eps = safe_num(info.get("forwardEps", 0.0), 0.0)
     if forward_eps == 0.0:
@@ -806,22 +919,27 @@ def extraer_metricas_ttm(
 
     pretax_income_ttm = safe_num(info.get("pretaxIncome", 0.0), 0.0)
     if pretax_income_ttm == 0.0:
-        pretax_income_ttm = _extraer_val_df(inc, ["Pretax Income", "Income Before Tax", "IncomeBeforeTax"], default=0.0)
+        pretax_income_ttm = _extraer_val_df(inc, ["Pretax Income", "Income Before Tax", "IncomeBeforeTax", "PretaxIncome"], default=0.0)
 
     tax_provision_ttm = safe_num(info.get("taxProvision", 0.0), 0.0)
     if tax_provision_ttm == 0.0:
-        tax_provision_ttm = _extraer_val_df(inc, ["Tax Provision", "IncomeTaxExpense", "Income Tax Expense"], default=0.0)
+        tax_provision_ttm = _extraer_val_df(inc, ["Tax Provision", "IncomeTaxExpense", "Income Tax Expense", "TaxProvision"], default=0.0)
 
     interest_expense_ttm = abs(safe_num(info.get("interestExpense", 0.0), 0.0))
     if interest_expense_ttm == 0.0:
-        interest_expense_ttm = abs(_extraer_val_df(inc, ["Interest Expense", "InterestExpense"], default=0.0))
+        interest_expense_ttm = abs(_extraer_val_df(inc, [
+            "Interest Expense", "InterestExpense", "Interest Expense Non Operating",
+            "Net Non Operating Interest Income Expense"
+        ], default=0.0))
 
     # ── 3. Flujo de Caja TTM ─────────────────────────────────────────────────
     ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
     if ocf_ttm == 0.0:
         ocf_ttm = _extraer_val_df(cf, [
             "Operating Cash Flow", "OperatingCashFlow",
-            "Cash Flow From Continuing Operating Activities"
+            "Cash Flow From Continuing Operating Activities",
+            "Total Cash From Operating Activities",
+            "Net Cash Provided By Operating Activities"
         ], default=0.0)
 
     capex_list = obtener_capex_historico(cf)
@@ -829,7 +947,7 @@ def extraer_metricas_ttm(
     if capex_ttm == 0.0:
         capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0), 0.0))
 
-    # FCF TTM = OCF - CapEx (estrictamente normalizado)
+    # FCF TTM = OCF - CapEx (normalizado)
     fcf_ttm = ocf_ttm - capex_ttm
     if fcf_ttm == 0.0 and ocf_ttm == 0.0:
         fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
@@ -838,8 +956,8 @@ def extraer_metricas_ttm(
     total_debt = safe_num(info.get("totalDebt", 0.0), 0.0)
     if total_debt == 0.0:
         total_debt = _extraer_val_df(bs, [
-            "Total Debt", "TotalDebt", "Long Term Debt",
-            "Long Term Debt And Capital Lease Obligation"
+            "Total Debt", "TotalDebt", "Long Term Debt And Capital Lease Obligation",
+            "Long Term Debt", "LongTermDebt", "Total Non Current Liabilities Net Minority Interest"
         ], default=0.0)
 
     total_cash = safe_num(info.get("totalCash", 0.0), 0.0)
@@ -847,19 +965,22 @@ def extraer_metricas_ttm(
         total_cash = _extraer_val_df(bs, [
             "Cash And Cash Equivalents",
             "CashCashEquivalentsAndShortTermInvestments",
-            "Cash Financial", "Cash And Short Term Investments"
+            "Cash Financial", "Cash And Short Term Investments",
+            "Cash, Cash Equivalents & Short Term Investments", "Cash"
         ], default=0.0)
 
     total_equity = safe_num(info.get("totalStockholderEquity", 0.0), 0.0)
     if total_equity == 0.0:
         total_equity = _extraer_val_df(bs, [
             "Total Stockholder Equity", "Stockholders Equity",
-            "TotalStockholderEquity", "Common Stock Equity"
+            "StockholdersEquity", "TotalStockholderEquity",
+            "Common Stock Equity", "CommonStockEquity",
+            "Total Equity", "Total Equity Gross Minority Interest"
         ], default=0.0)
 
     total_assets = safe_num(info.get("totalAssets", 0.0), 0.0)
     if total_assets == 0.0:
-        total_assets = _extraer_val_df(bs, ["Total Assets", "TotalAssets", "Total Assets Net"], default=0.0)
+        total_assets = _extraer_val_df(bs, ["Total Assets", "TotalAssets", "Total Assets Net", "totalAssets"], default=0.0)
 
     current_assets = safe_num(info.get("totalCurrentAssets", 0.0), 0.0)
     if current_assets == 0.0:
@@ -870,17 +991,18 @@ def extraer_metricas_ttm(
         current_liabilities = _extraer_val_df(bs, ["Total Current Liabilities", "Current Liabilities", "CurrentLiabilities"], default=0.0)
 
     short_term_debt = _extraer_val_df(bs, [
-        "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt"
+        "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt", "CurrentDebt"
     ], default=0.0)
 
     # ── 6. CAGR Histórico de Ingresos (3-5 años) y Margen Operativo Medio ───
     cagr_revenue_3_5y = 0.0
     op_margin_hist = 0.0
     if isinstance(inc, pd.DataFrame) and not inc.empty:
-        for fila_rev in ["Total Revenue", "TotalRevenue", "Revenue"]:
+        for fila_rev in ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"]:
             if fila_rev in inc.index:
                 try:
                     s_rev = inc.loc[fila_rev].dropna()
+                    if isinstance(s_rev, pd.DataFrame): s_rev = s_rev.iloc[0]
                     vals_rev = [safe_num(v, 0.0) for v in s_rev.values if safe_num(v, 0.0) > 0]
                     if len(vals_rev) >= 2:
                         n_anios = min(len(vals_rev) - 1, 4)
@@ -894,13 +1016,15 @@ def extraer_metricas_ttm(
                 except Exception:
                     pass
 
-        for fila_op in ["Operating Income", "OperatingIncome", "EBIT"]:
+        for fila_op in ["Operating Income", "OperatingIncome", "EBIT", "Operating Profit"]:
             if fila_op in inc.index:
                 try:
                     s_op = inc.loc[fila_op].dropna()
-                    for fila_rev in ["Total Revenue", "TotalRevenue", "Revenue"]:
+                    if isinstance(s_op, pd.DataFrame): s_op = s_op.iloc[0]
+                    for fila_rev in ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"]:
                         if fila_rev in inc.index:
                             s_rev = inc.loc[fila_rev].dropna()
+                            if isinstance(s_rev, pd.DataFrame): s_rev = s_rev.iloc[0]
                             common_cols = [c for c in s_rev.index if c in s_op.index]
                             mgs = []
                             for col_c in common_cols:
@@ -926,6 +1050,7 @@ def extraer_metricas_ttm(
             if fila_ni in inc.index:
                 try:
                     s_ni = inc.loc[fila_ni].dropna()
+                    if isinstance(s_ni, pd.DataFrame): s_ni = s_ni.iloc[0]
                     vals_ni = [safe_num(v, 0.0) for v in s_ni.values if safe_num(v, 0.0) > 0]
                     if len(vals_ni) >= 2 and vals_ni[0] > 0 and vals_ni[-1] > 0:
                         n_anios_ni = min(len(vals_ni) - 1, 3)
@@ -978,3 +1103,4 @@ def extraer_metricas_ttm(
         "short_percent_of_float": short_percent_of_float,
         "target_mean_price": target_mean_price,
     }
+

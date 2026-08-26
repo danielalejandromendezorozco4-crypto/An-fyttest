@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
 import statistics
@@ -284,11 +284,11 @@ def calcular_fcff_valuation(
         ticker            = ticker,
         erp               = erp,
     )
-    wacc         = res_wacc["wacc"]
-    ke           = res_wacc["ke"]
-    kd           = res_wacc["kd"]
-    we           = res_wacc["we"]
-    wd           = res_wacc["wd"]
+    wacc         = round(res_wacc["wacc"], 2)
+    ke           = round(res_wacc["ke"], 2)
+    kd           = round(res_wacc["kd"], 2)
+    we           = round(res_wacc["we"], 4)
+    wd           = round(res_wacc["wd"], 4)
     wacc_decimal = wacc / 100.0
 
     # 3. Tasa Terminal y WACC clamping con invariante financiero
@@ -300,7 +300,7 @@ def calcular_fcff_valuation(
     min_wacc_dec = g_term + WACC_MIN_SPREAD_OVER_G
     if wacc_decimal < min_wacc_dec:
         wacc_decimal = min_wacc_dec
-        wacc = wacc_decimal * 100.0
+        wacc = round(wacc_decimal * 100.0, 2)
     wacc_decimal = min(wacc_decimal, WACC_CEILING / 100.0)
 
     # 4. FCFF Historico con Dual-Path
@@ -316,15 +316,18 @@ def calcular_fcff_valuation(
         int_i   = interest_hist[i]   if i < len(interest_hist)    else 0.0
 
         if ebit_i > 0 and da_i >= 0:
-            fcff_ebit = ebit_i * (1.0 - tax_rate_real) + da_i - capex_i - dnwc_i
-            if fcff_ebit > 0:
+            nopat_i = ebit_i * (1.0 - tax_rate_real)
+            dnwc_clamped = max(min(dnwc_i, nopat_i * 0.5), -nopat_i * 0.5)
+            fcff_ebit = nopat_i + da_i - capex_i - dnwc_clamped
+            fcf_cash = ocf_i - capex_i
+            if fcff_ebit > 0 and (fcf_cash <= 0 or fcff_ebit >= fcf_cash * 0.4):
                 fcff_historico.append(fcff_ebit)
                 if i == 0:
                     fcff_method_used = "ebit"
                 continue
 
         escudo_fiscal = int_i * (1.0 - tax_rate_real)
-        fcff_historico.append(ocf_i + escudo_fiscal - capex_i)
+        fcff_historico.append(max(ocf_i + escudo_fiscal - capex_i, 0.0))
 
     # 5. FCFF Base
     if fcff_historico and fcff_historico[0] > 0:
@@ -401,7 +404,12 @@ def calcular_fcff_valuation(
     equity_value     = enterprise_value - deuda_neta
 
     buyback_rate_    = max(min(float(buyback_rate), 0.20), -0.10)
-    shares_efectivas = max(shares_diluted * ((1.0 - buyback_rate_) ** n_total), 1.0)
+    shares_count     = float(shares_diluted)
+    if mcap > 10_000_000 and precio_actual > 0:
+        implied_sh = mcap / precio_actual
+        if shares_count <= 1000 or shares_count < implied_sh * 0.01 or shares_count > implied_sh * 100:
+            shares_count = implied_sh
+    shares_efectivas = max(shares_count * ((1.0 - buyback_rate_) ** n_total), 1.0)
     valor_intrinseco = max(equity_value / shares_efectivas, 0.0)
 
     # 10. Margen de Seguridad y Precios Objetivo

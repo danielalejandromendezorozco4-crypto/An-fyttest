@@ -423,9 +423,45 @@ else:
                 eps_growth = 0.0
                 eps_growth_str = "N/D"
                 col_eps, msg_eps = "⚪", "Crecimiento de EPS no disponible o no reportado."
-            # BUYBACK YIELD
-            sh_prev = bs.loc['Basic Average Shares'].iloc[1] if (not bs.empty and 'Basic Average Shares' in bs.index and len(bs.columns) > 1 and not pd.isna(bs.loc['Basic Average Shares'].iloc[1])) else shares_current
-            buyback_yield = ((sh_prev - shares_current) / sh_prev * 100) if sh_prev > 0 else 0.0
+            # BUYBACK YIELD (Variación interanual de acciones en circulación o recompras netas)
+            sh_prev = 0.0
+            for df_sh in [inc, bs]:
+                if not df_sh.empty:
+                    for fila_sh in ['Basic Average Shares', 'Diluted Average Shares', 'Ordinary Shares Number', 'Common Stock']:
+                        if fila_sh in df_sh.index and len(df_sh.columns) > 1:
+                            try:
+                                s_sh = df_sh.loc[fila_sh].dropna()
+                                if isinstance(s_sh, pd.DataFrame): s_sh = s_sh.iloc[0]
+                                if len(s_sh) > 1:
+                                    sh_curr_rep = safe_num(s_sh.iloc[0], 0.0)
+                                    sh_prev_rep = safe_num(s_sh.iloc[1], 0.0)
+                                    if sh_prev_rep > 0:
+                                        sh_prev = sh_prev_rep
+                                        sh_for_by = sh_curr_rep if sh_curr_rep > 0 else shares_current
+                                        buyback_yield = ((sh_prev - sh_for_by) / sh_prev * 100)
+                                        break
+                            except Exception:
+                                pass
+                if sh_prev > 0:
+                    break
+
+            if sh_prev <= 0:
+                repurchase_val = 0.0
+                if not cf.empty:
+                    for fila_rep in ['Repurchase Of Capital Stock', 'Payments For Repurchase Of Common Stock', 'Repurchase Of Stock']:
+                        if fila_rep in cf.index:
+                            try:
+                                s_rep = cf.loc[fila_rep].dropna()
+                                if isinstance(s_rep, pd.DataFrame): s_rep = s_rep.iloc[0]
+                                if not s_rep.empty:
+                                    repurchase_val = abs(safe_num(s_rep.iloc[0], 0.0))
+                                    break
+                            except Exception:
+                                pass
+                if repurchase_val > 0 and mcap > 0:
+                    buyback_yield = (repurchase_val / mcap) * 100.0
+                else:
+                    buyback_yield = 0.0
             if buyback_yield >= 1.5: col_by, msg_by = "🟢", f"Fuerte Recompra: Reduce flotante en {buyback_yield:.1f}% anual."
             elif buyback_yield >= 0.0: col_by, msg_by = "🟡", f"Recompra Neutra: Variación de {buyback_yield:.1f}%."
             else: col_by, msg_by = "🔴", f"Dilución de Accionistas: Incrementa flotante en {abs(buyback_yield):.1f}%."
@@ -532,23 +568,29 @@ else:
             )
 
             pe = res_mult["pe"]
+            pe_str = res_mult["pe_str"]
             col_pe = res_mult["col_pe"]
             msg_pe = res_mult["msg_pe"]
 
             p_fcf = res_mult["p_fcf"]
+            p_fcf_str = res_mult["p_fcf_str"]
             col_pfcf = res_mult["col_pfcf"]
             msg_pfcf = res_mult["msg_pfcf"]
 
             ev_ebitda = res_mult["ev_ebitda"]
+            ev_ebitda_str = res_mult["ev_ebitda_str"]
             col_ev = res_mult["col_ev"]
             msg_ev = res_mult["msg_ev"]
 
             peg = res_mult["peg"]
+            peg_str = res_mult["peg_str"]
             col_peg = res_mult["col_peg"]
             msg_peg = res_mult["msg_peg"]
 
             p_s = res_mult["p_s"]
+            p_s_str = res_mult["p_s_str"]
             p_b = res_mult["p_b"]
+            p_b_str = res_mult["p_b_str"]
 
             target = m_ttm["target_mean_price"]
             upside = (((target - precio_actual) / precio_actual) * 100) if precio_actual != 0 else 0.0
@@ -706,12 +748,27 @@ else:
                 
                 with g_col1:
                     st.write("**Comparativa de Márgenes (5 Años)**")
-                    if 'Gross Profit' in inc.index and 'Operating Income' in inc.index and 'Total Revenue' in inc.index:
+                    posibles_rev = ['Total Revenue', 'Operating Revenue', 'Revenue', 'TotalRevenue']
+                    posibles_op = ['Operating Income', 'OperatingIncome', 'Operating Profit', 'EBIT']
+                    posibles_ni = ['Net Income', 'NetIncome', 'Net Income Common Stockholders']
+
+                    row_rev = next((r for r in posibles_rev if r in inc.index), None)
+                    row_op = next((r for r in posibles_op if r in inc.index), None)
+                    row_ni = next((r for r in posibles_ni if r in inc.index), None)
+
+                    if not inc.empty and row_rev and row_op and row_ni:
                         try:
-                            rev_seguro = inc.loc['Total Revenue'].replace(0, np.nan)
+                            s_rev = inc.loc[row_rev]
+                            if isinstance(s_rev, pd.DataFrame): s_rev = s_rev.iloc[0]
+                            s_op = inc.loc[row_op]
+                            if isinstance(s_op, pd.DataFrame): s_op = s_op.iloc[0]
+                            s_ni = inc.loc[row_ni]
+                            if isinstance(s_ni, pd.DataFrame): s_ni = s_ni.iloc[0]
+
+                            rev_seguro = s_rev.replace(0, np.nan)
                             df_margins = pd.DataFrame({
-                                "Margen Operativo (%)": (inc.loc['Operating Income'] / rev_seguro) * 100,
-                                "Margen Neto (%)": (inc.loc['Net Income'] / rev_seguro) * 100
+                                "Margen Operativo (%)": (s_op / rev_seguro) * 100,
+                                "Margen Neto (%)": (s_ni / rev_seguro) * 100
                             }).dropna()
                             
                             df_margins.index = pd.to_datetime(df_margins.index).year.astype(str)
@@ -729,13 +786,36 @@ else:
                             st.plotly_chart(fig_m, use_container_width=True)
                         except Exception:
                             st.write("Gráfico de márgenes no disponible para este ticker.")
+                    else:
+                        st.write("Gráfico de márgenes no disponible para este ticker.")
                 with g_col2:
                     st.write("**Comparativa de Flujos de Efectivo (5 Años - Millones USD)**")
-                    if not cf.empty and 'Operating Cash Flow' in cf.index and 'Free Cash Flow' in cf.index:
+                    posibles_ocf = ['Operating Cash Flow', 'OperatingCashFlow', 'Cash Flow From Continuing Operating Activities', 'Total Cash From Operating Activities']
+                    posibles_fcf = ['Free Cash Flow', 'FreeCashFlow', 'freeCashFlow']
+                    posibles_capex = ['Capital Expenditure', 'CapitalExpenditure', 'Capital Expenditures', 'Purchase Of Property Plant And Equipment']
+
+                    row_ocf = next((r for r in posibles_ocf if r in cf.index), None)
+                    row_fcf = next((r for r in posibles_fcf if r in cf.index), None)
+                    row_capex = next((r for r in posibles_capex if r in cf.index), None)
+
+                    if not cf.empty and (row_ocf or row_fcf):
                         try:
+                            s_ocf = cf.loc[row_ocf] if row_ocf else pd.Series(0.0, index=cf.columns)
+                            if isinstance(s_ocf, pd.DataFrame): s_ocf = s_ocf.iloc[0]
+
+                            if row_fcf:
+                                s_fcf = cf.loc[row_fcf]
+                                if isinstance(s_fcf, pd.DataFrame): s_fcf = s_fcf.iloc[0]
+                            elif row_capex and row_ocf:
+                                s_capex = cf.loc[row_capex]
+                                if isinstance(s_capex, pd.DataFrame): s_capex = s_capex.iloc[0]
+                                s_fcf = s_ocf.fillna(0.0) - s_capex.abs().fillna(0.0)
+                            else:
+                                s_fcf = s_ocf
+
                             df_cf = pd.DataFrame({
-                                "Flujo Operativo": cf.loc['Operating Cash Flow'] / 1e6,
-                                "Flujo Libre (FCF)": cf.loc['Free Cash Flow'] / 1e6
+                                "Flujo Operativo": s_ocf / 1e6,
+                                "Flujo Libre (FCF)": s_fcf / 1e6
                             }).dropna()
                             
                             df_cf.index = pd.to_datetime(df_cf.index).year.astype(str)
@@ -753,6 +833,8 @@ else:
                             st.plotly_chart(fig_cf, use_container_width=True)
                         except Exception:
                             st.write("Gráfico de flujos no disponible para este ticker.")
+                    else:
+                        st.write("Gráfico de flujos no disponible para este ticker.")
                 st.markdown("### 🏷️ Módulo 3: Valuación y Valor Intrínseco (40%)")
 
                 upside_vs_precio = ((v_intr_dcf - precio_actual) / precio_actual * 100.0) if precio_actual > 0 else 0.0
@@ -776,10 +858,10 @@ else:
 
                 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
                 row2_c1, row2_c2, row2_c3, row2_c4 = st.columns(4)
-                row2_c1.metric(f"{col_pe} PER (P/E)", f"{pe:.1f}x", help=h_pe)
-                row2_c2.metric(f"{col_pfcf} P/FCF", f"{p_fcf:.1f}x", help=h_pfcf)
-                row2_c3.metric(f"{col_peg} PEG Forward", f"{peg:.2f}x", help=h_peg)
-                row2_c4.metric(f"{col_ev} EV / EBITDA", f"{ev_ebitda:.1f}x", help=h_ev)
+                row2_c1.metric(f"{col_pe} PER (P/E)", pe_str, help=h_pe)
+                row2_c2.metric(f"{col_pfcf} P/FCF", p_fcf_str, help=h_pfcf)
+                row2_c3.metric(f"{col_peg} PEG Forward", peg_str, help=h_peg)
+                row2_c4.metric(f"{col_ev} EV / EBITDA", ev_ebitda_str, help=h_ev)
 
                 if mostrar_ddm:
                     explicacion_modelo = (
@@ -880,7 +962,10 @@ else:
                 
             def format_val_multiplo(name, val, target, is_peg=False):
                 semaforo = eval_val(val, target)
-                val_str = f"{val:.2f}x" if is_peg else f"{val:.1f}x"
+                if val <= 0:
+                    val_str = "N/D"
+                else:
+                    val_str = f"{val:.2f}x" if is_peg else f"{val:.1f}x"
                 tgt_str = f"{target:.2f}x" if is_peg else f"{target:.1f}x"
                 if target > 0 and val > 0:
                     diff = ((val / target) - 1) * 100

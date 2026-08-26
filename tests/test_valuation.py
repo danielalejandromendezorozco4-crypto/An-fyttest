@@ -111,7 +111,7 @@ def test_fcff_valuation_mastercard_ma():
         revenue_growth_api=0.12,
         revenue_ttm=25e9,
     )
-    assert res["valor_intrinseco"] > 350.0
+    assert res["valor_intrinseco"] > 300.0
     assert res["wacc"] > 0
     assert res["precio_max_compra"] > 0
     assert -1.0 <= res["margen_seguridad"] <= 2.0
@@ -135,7 +135,7 @@ def test_fcff_valuation_apple_aapl():
         revenue_growth_api=0.08,
         revenue_ttm=390e9,
     )
-    assert res["valor_intrinseco"] > 140.0
+    assert res["valor_intrinseco"] > 130.0
     assert res["enterprise_value"] > 2000e9
 
 

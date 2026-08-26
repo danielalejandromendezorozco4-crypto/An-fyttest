@@ -222,13 +222,15 @@ def calcular_ratios_rentabilidad(
     t_rate_clamped = min(max(tax_rate, 0.0), 0.40)
     nopat = operating_income_ttm * (1.0 - t_rate_clamped)
 
-    # Capital Invertido = Activos Totales - Pasivos Operativos Circulantes (Liabilities - Short Debt)
+    # Capital Invertido Operativo = Activos Totales - Pasivos Circulantes Operativos (Current Liabilities - Short Debt)
     op_cl = max(current_liabilities - short_term_debt, 0.0)
     invested_capital = total_assets - op_cl
+    if invested_capital <= 0 or (total_equity > 0 and invested_capital > total_assets):
+        invested_capital = max(total_equity + total_debt - total_cash, total_assets * 0.5, 1.0)
     if invested_capital <= 0:
-        invested_capital = max(total_equity + total_debt - total_cash, total_assets * 0.6, 1.0)
+        invested_capital = max(total_assets * 0.5, 1.0)
 
-    roic = (nopat / invested_capital * 100.0) if invested_capital > 0 else (roe * 0.85)
+    roic = (nopat / invested_capital * 100.0) if (invested_capital > 0 and nopat != 0) else 0.0
     roic = min(max(roic, -50.0), 95.0)  # Acotar a límites realistas
 
     if roic > 20.0:
