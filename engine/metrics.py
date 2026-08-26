@@ -54,14 +54,9 @@ def calcular_multiplos_valuacion(
     total_equity: float = 0.0,
     peg_info: float = 0.0,
     earnings_growth: float = 0.0,
-    pe_info: float = 0.0,
-    forward_pe_info: float = 0.0,
-    ev_ebitda_info: float = 0.0,
-    p_b_info: float = 0.0,
-    p_s_info: float = 0.0,
 ) -> dict:
     """
-    Calcula los múltiplos de valuación de mercado normalizados a base TTM con fallbacks de feed de mercado.
+    Calcula los múltiplos de valuación de mercado normalizados a base TTM.
 
     Múltiplos calculados:
     - PER Trailing (P/E): Precio Actual / EPS Diluido TTM.
@@ -76,34 +71,21 @@ def calcular_multiplos_valuacion(
         Diccionario con valores flotantes, strings formateadas y alertas de semáforo.
     """
     # 1. PER Trailing
-    if eps_ttm > 0 and precio_actual > 0:
-        pe = precio_actual / eps_ttm
-    elif pe_info > 0:
-        pe = pe_info
-    else:
-        pe = 0.0
+    pe = (precio_actual / eps_ttm) if eps_ttm > 0 else 0.0
     pe_str = f"{pe:.1f}x" if pe > 0 else "N/A"
-
     if 0 < pe < 20.0:
         col_pe, msg_pe = "🟢", "Descuento histórico / sectorial."
     elif 20.0 <= pe <= 30.0:
         col_pe, msg_pe = "🟡", "Valuación razonable."
-    elif pe > 30.0:
-        col_pe, msg_pe = "🔴", "Sobrevalorada por PER o múltiplo exigente."
     else:
-        col_pe, msg_pe = "🔴", "Utilidades negativas o PER no disponible."
+        col_pe, msg_pe = "🔴", "Sobrevalorada por PER o utilidades negativas."
 
     # 2. PER Forward
-    if forward_eps > 0 and precio_actual > 0:
-        pe_forward = precio_actual / forward_eps
-    elif forward_pe_info > 0:
-        pe_forward = forward_pe_info
-    else:
-        pe_forward = 0.0
+    pe_forward = (precio_actual / forward_eps) if forward_eps > 0 else 0.0
     pe_forward_str = f"{pe_forward:.1f}x" if pe_forward > 0 else "N/A"
 
     # 3. P/FCF
-    p_fcf = (mcap / fcf_ttm) if (mcap > 0 and fcf_ttm > 0) else 0.0
+    p_fcf = (mcap / fcf_ttm) if fcf_ttm > 0 else 0.0
     p_fcf_str = f"{p_fcf:.1f}x" if p_fcf > 0 else "N/A"
     if 0 < p_fcf < 18.0:
         col_pfcf, msg_pfcf = "🟢", "Gran Rendimiento de Caja."
@@ -113,15 +95,9 @@ def calcular_multiplos_valuacion(
         col_pfcf, msg_pfcf = "🔴", "Valuación exigente o FCF negativo."
 
     # 4. EV / EBITDA
-    enterprise_value = mcap + total_debt - total_cash if mcap > 0 else 0.0
-    if ebitda_ttm > 0 and enterprise_value > 0:
-        ev_ebitda = enterprise_value / ebitda_ttm
-    elif ev_ebitda_info > 0:
-        ev_ebitda = ev_ebitda_info
-    else:
-        ev_ebitda = 0.0
+    enterprise_value = mcap + total_debt - total_cash
+    ev_ebitda = (enterprise_value / ebitda_ttm) if ebitda_ttm > 0 else 0.0
     ev_ebitda_str = f"{ev_ebitda:.1f}x" if ev_ebitda > 0 else "N/A"
-
     if 0 < ev_ebitda < 12.0:
         col_ev, msg_ev = "🟢", "Valuación Atractiva."
     elif 12.0 <= ev_ebitda <= 18.0:
@@ -133,8 +109,7 @@ def calcular_multiplos_valuacion(
     if peg_info > 0:
         peg = peg_info
     elif pe > 0 and earnings_growth > 0:
-        eg_pct = earnings_growth * 100.0 if abs(earnings_growth) < 1.0 else earnings_growth
-        peg = (pe / eg_pct) if eg_pct > 0 else 0.0
+        peg = pe / (earnings_growth * 100.0 if earnings_growth < 1.0 else earnings_growth)
     else:
         peg = 0.0
     peg_str = f"{peg:.2f}x" if peg > 0 else "N/A"
@@ -147,26 +122,11 @@ def calcular_multiplos_valuacion(
         col_peg, msg_peg = "🔴", "Exceso de prima por crecimiento."
 
     # 6. P/S y P/B
-    if revenue_ttm > 0 and mcap > 0:
-        p_s = mcap / revenue_ttm
-    elif p_s_info > 0:
-        p_s = p_s_info
-    else:
-        p_s = 0.0
+    p_s = (mcap / revenue_ttm) if revenue_ttm > 0 else 0.0
     p_s_str = f"{p_s:.2f}x" if p_s > 0 else "N/A"
 
-    if total_equity > 0 and mcap > 0:
-        p_b = mcap / total_equity
-        p_b_str = f"{p_b:.2f}x"
-    elif p_b_info > 0 and total_equity > 0:
-        p_b = p_b_info
-        p_b_str = f"{p_b:.2f}x"
-    elif total_equity <= 0:
-        p_b = 0.0
-        p_b_str = "Patr. Negativo"
-    else:
-        p_b = 0.0
-        p_b_str = "N/A"
+    p_b = (mcap / total_equity) if total_equity > 0 else 0.0
+    p_b_str = f"{p_b:.2f}x" if p_b > 0 else "N/A"
 
     return {
         "pe": pe,
@@ -220,7 +180,7 @@ def calcular_ratios_rentabilidad(
     - Margen Bruto: (Gross Profit TTM / Revenue TTM) * 100
     - Margen Operativo: (Operating Income TTM / Revenue TTM) * 100
     - Margen Neto: (Net Income TTM / Revenue TTM) * 100
-    - ROE: (Net Income TTM / Total Stockholders Equity) * 100 (o Patr. Negativo informativo)
+    - ROE: (Net Income TTM / Total Stockholders Equity) * 100
     - ROA: (Net Income TTM / Total Assets) * 100
     - ROIC: (NOPAT / Capital Invertido Operativo) * 100
 
@@ -232,17 +192,11 @@ def calcular_ratios_rentabilidad(
     mg_op = (operating_income_ttm / revenue_ttm * 100.0) if revenue_ttm > 0 else 0.0
     net_margin = (net_income_ttm / revenue_ttm * 100.0) if revenue_ttm > 0 else 0.0
 
-    if gross_margin == 0.0 and mg_op > 0:
-        gross_margin = max(mg_op, 100.0 if gross_profit_ttm == revenue_ttm else 0.0)
-
     # 2. ROE
     if total_equity <= 0:
         roe = 0.0
-        val_roe = "Patr. Negativo"
-        if net_income_ttm > 0:
-            col_roe, msg_roe = "🟡", "Patrimonio contable negativo por recompra masiva de acciones (utilidades saludables)."
-        else:
-            col_roe, msg_roe = "🔴", "Patrimonio contable negativo por acumulación histórica de pérdidas."
+        val_roe = "N/A"
+        col_roe, msg_roe = "⚪", "ROE No Aplicable (Patrimonio Negativo)."
     else:
         roe = (net_income_ttm / total_equity) * 100.0
         val_roe = f"{roe:.1f}%"
@@ -271,26 +225,18 @@ def calcular_ratios_rentabilidad(
     # Capital Invertido = Activos Totales - Pasivos Operativos Circulantes (Liabilities - Short Debt)
     op_cl = max(current_liabilities - short_term_debt, 0.0)
     invested_capital = total_assets - op_cl
-    if invested_capital <= 0 or (total_assets > 0 and invested_capital < total_assets * 0.10):
-        invested_capital = max(total_assets * 0.50, total_debt + max(total_equity, 0.0) + total_cash * 0.2, 1.0)
+    if invested_capital <= 0:
+        invested_capital = max(total_equity + total_debt - total_cash, total_assets * 0.6, 1.0)
 
-    if invested_capital > 0 and nopat > 0:
-        roic = (nopat / invested_capital) * 100.0
-    elif roe > 0:
-        roic = roe * 0.85
-    else:
-        roic = 0.0
-
+    roic = (nopat / invested_capital * 100.0) if invested_capital > 0 else (roe * 0.85)
     roic = min(max(roic, -50.0), 95.0)  # Acotar a límites realistas
 
     if roic > 20.0:
         col_roic, msg_roic = "🟢", "Alta Calidad: Ventaja competitiva clara."
     elif roic >= 12.0:
         col_roic, msg_roic = "🟡", "Retorno sobre el capital aceptable."
-    elif roic > 0:
-        col_roic, msg_roic = "🔴", "Retorno sobre capital modesto."
     else:
-        col_roic, msg_roic = "🔴", "Posible destrucción de valor operativo o datos insuficientes."
+        col_roic, msg_roic = "🔴", "Posible destrucción de valor operativo."
 
     return {
         "gross_margin": gross_margin,
@@ -310,7 +256,7 @@ def calcular_ratios_rentabilidad(
         "nopat": nopat,
         "invested_capital": invested_capital,
         "roic": roic,
-        "roic_str": f"{roic:.1f}%" if roic > 0 else ("0.0%" if nopat == 0 else f"{roic:.1f}%"),
+        "roic_str": f"{roic:.1f}%",
         "col_roic": col_roic,
         "msg_roic": msg_roic,
     }

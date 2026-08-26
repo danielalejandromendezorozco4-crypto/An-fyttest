@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import statistics
@@ -399,12 +399,6 @@ def calcular_fcff_valuation(
     enterprise_value = pv_flujos + pv_terminal
     deuda_neta       = total_debt - total_cash
     equity_value     = enterprise_value - deuda_neta
-
-    # Saneamiento de escala de acciones
-    if mcap > 1e6 and precio_actual > 0:
-        expected_shares = mcap / precio_actual
-        if shares_diluted <= 1000 or abs(shares_diluted - expected_shares) / expected_shares > 0.60:
-            shares_diluted = expected_shares
 
     buyback_rate_    = max(min(float(buyback_rate), 0.20), -0.10)
     shares_efectivas = max(shares_diluted * ((1.0 - buyback_rate_) ** n_total), 1.0)

@@ -125,20 +125,9 @@ def safe_num(val, default=0.0):
         return default if default is None else float(default)
 
 def obtener_ruta_logo():
-    posibles_rutas = [
-        "assets/logo.png",
-        "logo.png",
-        "logo.jpg",
-        "logo.jpeg",
-        "images/logo.png",
-    ]
+    posibles_rutas = ["logo.png", "logo.jpg", "logo.jpeg", "assets/logo.png", "images/logo.png"]
     for r in posibles_rutas:
         if os.path.exists(r):
-            return r
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for r in posibles_rutas:
-        full_path = os.path.join(base_dir, r)
-        if os.path.exists(full_path):
             return r
     return None
 

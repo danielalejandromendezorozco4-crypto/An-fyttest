@@ -1,5 +1,4 @@
 import datetime
-import os
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -49,15 +48,8 @@ from services.ai_service import (
 )
 from reports.pdf_generator import generar_pdf_reporte
 
-# --- BÚSQUEDA DE LOGO DE MARCA ---
-ruta_logo_detectada = obtener_ruta_logo()
-
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(
-    page_title="An-FyT - Análisis Fundamental Top-Down",
-    layout="wide",
-    page_icon=ruta_logo_detectada if (ruta_logo_detectada and os.path.exists(ruta_logo_detectada)) else "📈",
-)
+st.set_page_config(page_title="An-FyT - Análisis Fundamental Top-Down", layout="wide", page_icon="📈")
 
 # --- MANEJO DE ESTADO GLOBAL PARA DIRECTORIO SECTORIAL ---
 if "ticker_search" not in st.session_state:
@@ -72,15 +64,13 @@ inyectar_estilos()
 # --- AUTENTICACIÓN SECRETS ---
 gemini_key, fred_key, fmp_key = cargar_secrets()
 
-# --- IDENTIDAD DE MARCA Y LOGO EN SIDEBAR ---
-if ruta_logo_detectada and os.path.exists(ruta_logo_detectada):
-    if hasattr(st, "logo"):
-        st.logo(ruta_logo_detectada, icon_image=ruta_logo_detectada)
-    else:
-        st.sidebar.image(ruta_logo_detectada, use_container_width=True)
+# --- BÚSQUEDA DE LOGO Y RENDERIZADO SIDEBAR ---
+ruta_logo_detectada = obtener_ruta_logo()
+if ruta_logo_detectada:
+    st.sidebar.image(ruta_logo_detectada, use_container_width=True)
 else:
     st.sidebar.markdown('<div class="brand-title">An-FyT</div>', unsafe_allow_html=True)
-    st.sidebar.markdown('<div class="brand-subtitle">ANÁLISIS FUNDAMENTAL BURSÁTIL</div>', unsafe_allow_html=True)
+st.sidebar.markdown('<div class="brand-subtitle">ANÁLISIS FUNDAMENTAL BURSÁTIL</div>', unsafe_allow_html=True)
 st.sidebar.markdown("---")
 
 # Tooltip Implementado en el Text Input
@@ -178,14 +168,13 @@ if not ticker_input:
     # 1. PANTALLA DE BIENVENIDA
     col_h1, col_h2 = st.columns([1.5, 4])
     with col_h1:
-        if ruta_logo_detectada and os.path.exists(ruta_logo_detectada):
+        if ruta_logo_detectada:
             st.image(ruta_logo_detectada, width=220)
         else:
             st.markdown('<div class="brand-title">An-FyT</div>', unsafe_allow_html=True)
-            st.markdown('<div class="brand-subtitle">ANÁLISIS FUNDAMENTAL BURSÁTIL</div>', unsafe_allow_html=True)
             
     with col_h2:
-        st.markdown('<h1 style="color: #0A192F; margin-bottom: 5px; font-size: 32px;">Sistema de Análisis Fundamental Top-Down</h1>', unsafe_allow_html=True)
+        st.markdown('<h1 style="color: #0A192F; margin-bottom: 5px; font-size: 32px;">An-FyT - Sistema de Análisis Fundamental Top-Down</h1>', unsafe_allow_html=True)
         st.markdown('<p style="color: #475569; font-size: 15px; margin-bottom: 20px;">Evaluación cuantitativa e institucional de empresas cotizadas en bolsa mediante 100 Puntos de Scoring.</p>', unsafe_allow_html=True)
     
     st.markdown("---")
@@ -540,37 +529,26 @@ else:
                 total_equity=total_eq,
                 peg_info=m_ttm["peg_ratio_info"],
                 earnings_growth=m_ttm["earnings_growth"],
-                pe_info=m_ttm.get("trailing_pe_info", 0.0),
-                forward_pe_info=m_ttm.get("forward_pe_info", 0.0),
-                ev_ebitda_info=m_ttm.get("ev_ebitda_info", 0.0),
-                p_b_info=m_ttm.get("p_b_info", 0.0),
-                p_s_info=m_ttm.get("p_s_info", 0.0),
             )
 
             pe = res_mult["pe"]
-            pe_str = res_mult["pe_str"]
             col_pe = res_mult["col_pe"]
             msg_pe = res_mult["msg_pe"]
 
             p_fcf = res_mult["p_fcf"]
-            p_fcf_str = res_mult["p_fcf_str"]
             col_pfcf = res_mult["col_pfcf"]
             msg_pfcf = res_mult["msg_pfcf"]
 
             ev_ebitda = res_mult["ev_ebitda"]
-            ev_ebitda_str = res_mult["ev_ebitda_str"]
             col_ev = res_mult["col_ev"]
             msg_ev = res_mult["msg_ev"]
 
             peg = res_mult["peg"]
-            peg_str = res_mult["peg_str"]
             col_peg = res_mult["col_peg"]
             msg_peg = res_mult["msg_peg"]
 
             p_s = res_mult["p_s"]
-            p_s_str = res_mult["p_s_str"]
             p_b = res_mult["p_b"]
-            p_b_str = res_mult["p_b_str"]
 
             target = m_ttm["target_mean_price"]
             upside = (((target - precio_actual) / precio_actual) * 100) if precio_actual != 0 else 0.0
@@ -728,15 +706,12 @@ else:
                 
                 with g_col1:
                     st.write("**Comparativa de Márgenes (5 Años)**")
-                    op_row = 'Operating Income' if 'Operating Income' in inc.index else ('OperatingIncome' if 'OperatingIncome' in inc.index else None)
-                    rev_row = 'Total Revenue' if 'Total Revenue' in inc.index else ('Revenue' if 'Revenue' in inc.index else None)
-                    ni_row = 'Net Income' if 'Net Income' in inc.index else ('NetIncome' if 'NetIncome' in inc.index else None)
-                    if op_row and rev_row and ni_row:
+                    if 'Gross Profit' in inc.index and 'Operating Income' in inc.index and 'Total Revenue' in inc.index:
                         try:
-                            rev_seguro = inc.loc[rev_row].replace(0, np.nan)
+                            rev_seguro = inc.loc['Total Revenue'].replace(0, np.nan)
                             df_margins = pd.DataFrame({
-                                "Margen Operativo (%)": (inc.loc[op_row] / rev_seguro) * 100,
-                                "Margen Neto (%)": (inc.loc[ni_row] / rev_seguro) * 100
+                                "Margen Operativo (%)": (inc.loc['Operating Income'] / rev_seguro) * 100,
+                                "Margen Neto (%)": (inc.loc['Net Income'] / rev_seguro) * 100
                             }).dropna()
                             
                             df_margins.index = pd.to_datetime(df_margins.index).year.astype(str)
@@ -794,17 +769,17 @@ else:
                 else:
                     row1_c1, row1_c2, row1_c3, row1_c4, row1_c5 = st.columns(5)
                     row1_c1.metric(f"{col_vintr} V. Intrínseco (FCFF)", f"${v_intr_dcf:,.2f}", f"{upside_vs_precio:+.1f}% vs Mercado", help=h_vint)
-                    row1_c3.metric(f"{col_mseg} Margen Seguridad", f"{margen_seguridad*100:+.1f}%", help="Diferencial porcentual entre el valor intrínseco FCFF y la cotización actual.")
-                    row1_c4.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
-                    row1_c5.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}" if target > 0 else "N/D", f"{upside:+.1f}%" if target > 0 else None, help=h_ws)
-                    row1_c2.metric("💵 Cotización Mercado", f"${precio_actual:,.2f}", help="Último precio de cierre registrado en mercado.")
+                    row1_c2.metric(f"{col_mseg} Margen Seguridad", f"{margen_seguridad*100:+.1f}%", help="Diferencial porcentual entre el valor intrínseco FCFF y la cotización actual.")
+                    row1_c3.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
+                    row1_c4.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}" if target > 0 else "N/D", f"{upside:+.1f}%" if target > 0 else None, help=h_ws)
+                    row1_c5.metric("💵 Cotización Mercado", f"${precio_actual:,.2f}", help="Último precio de cierre registrado en mercado.")
 
                 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
                 row2_c1, row2_c2, row2_c3, row2_c4 = st.columns(4)
-                row2_c1.metric(f"{col_pe} PER (P/E)", pe_str, help=h_pe)
-                row2_c2.metric(f"{col_pfcf} P/FCF", p_fcf_str, help=h_pfcf)
-                row2_c3.metric(f"{col_peg} PEG Forward", peg_str, help=h_peg)
-                row2_c4.metric(f"{col_ev} EV / EBITDA", ev_ebitda_str, help=h_ev)
+                row2_c1.metric(f"{col_pe} PER (P/E)", f"{pe:.1f}x", help=h_pe)
+                row2_c2.metric(f"{col_pfcf} P/FCF", f"{p_fcf:.1f}x", help=h_pfcf)
+                row2_c3.metric(f"{col_peg} PEG Forward", f"{peg:.2f}x", help=h_peg)
+                row2_c4.metric(f"{col_ev} EV / EBITDA", f"{ev_ebitda:.1f}x", help=h_ev)
 
                 if mostrar_ddm:
                     explicacion_modelo = (
