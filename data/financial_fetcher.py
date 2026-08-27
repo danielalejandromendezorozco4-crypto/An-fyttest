@@ -271,6 +271,21 @@ def fetch_cotizacion_intradia(ticker: str, finnhub_api_key: str = "") -> Tuple[f
         except Exception as e:
             logger.debug("Error procesando velas Finnhub para %s: %s", ticker, e)
 
+    # CAPA 3 (Fallback yfinance): Si Finnhub no devolvió cotización o velas
+    if precio_actual == 0.0 or hist.empty:
+        try:
+            import yfinance as yf
+            ticker_yf = yf.Ticker(ticker)
+            df_yf = ticker_yf.history(period="5y")
+            if df_yf is not None and not df_yf.empty:
+                hist = df_yf[["Open", "High", "Low", "Close", "Volume"]].copy()
+                if precio_actual == 0.0:
+                    precio_actual = safe_num(hist["Close"].iloc[-1], 0.0)
+                if prev_close == 0.0:
+                    prev_close = safe_num(hist["Close"].iloc[-2], 0.0) if len(hist) > 1 else precio_actual
+        except Exception as e_yf:
+            logger.debug("yfinance history fallback error para %s: %s", ticker, e_yf)
+
     return precio_actual, prev_close, hist
 
 
@@ -822,6 +837,125 @@ def fetch_datos_fundamentales(
     pretax_val = ttm_inc_d.get("Pretax Income", 0.0) or _extraer_val_df(inc, ["Pretax Income"])
     tax_prov_val = ttm_inc_d.get("Tax Provision", 0.0) or _extraer_val_df(inc, ["Tax Provision"])
     ebitda_val = safe_num(metrics_dict.get("ebitdaTTM", metrics_dict.get("ebitdaAnnual", 0.0))) or (ebit_val * 1.15)
+
+    # ── CAPA 4 (Enriquecimiento y Fallback Institucional con yfinance) ──
+    if (mcap <= 0.0 or inc.empty or bs.empty or cf.empty or ebitda_val <= 0.0 or roe_val <= 0.0 or eps_ttm <= 0.0 or rev_val <= 0.0):
+        try:
+            import yfinance as yf
+            ticker_yf = yf.Ticker(ticker)
+            yf_info = getattr(ticker_yf, "info", None) or {}
+
+            if isinstance(yf_info, dict) and yf_info:
+                if mcap <= 0.0:
+                    mcap = safe_num(yf_info.get("marketCap"), 0.0)
+                if shares_outstanding <= 0.0:
+                    shares_outstanding = safe_num(yf_info.get("sharesOutstanding"), 0.0)
+                if not long_name or long_name == ticker:
+                    long_name = yf_info.get("longName") or yf_info.get("shortName") or ticker
+                if not sector_std or sector_std == "General":
+                    sector_std = _map_gics_sector(yf_info.get("sector") or yf_info.get("industry") or "")
+                    industry_raw = yf_info.get("industry") or industry_raw
+
+                if beta == 1.0 or beta <= 0.0:
+                    beta = safe_num(yf_info.get("beta"), 1.0)
+                if eps_ttm <= 0.0:
+                    eps_ttm = safe_num(yf_info.get("trailingEps"), 0.0)
+                if pe_ttm <= 0.0:
+                    pe_ttm = safe_num(yf_info.get("trailingPE"), 0.0)
+                if div_rate <= 0.0:
+                    div_rate = safe_num(yf_info.get("dividendRate"), 0.0)
+                if div_yield_ind <= 0.0:
+                    div_yield_ind = safe_num(yf_info.get("dividendYield"), 0.0)
+                if debt_to_equity <= 0.0:
+                    debt_to_equity = safe_num(yf_info.get("debtToEquity"), 0.0)
+
+                # Current Ratio Finviz/MRQ
+                yf_cr = safe_num(yf_info.get("currentRatio"), 0.0)
+                if yf_cr > 0.0:
+                    current_ratio = yf_cr
+
+                # ROE / ROA (yfinance viene en decimales, ej. 2.412 = 241.2%)
+                raw_roe = safe_num(yf_info.get("returnOnEquity"), 0.0)
+                if raw_roe > 0.0:
+                    raw_roe_pct = raw_roe * 100.0 if raw_roe <= 10.0 else raw_roe
+                    if roe_val <= 0.0 or roe_val > 300.0 or abs(roe_val - raw_roe_pct) > 50.0:
+                        roe_val = raw_roe_pct
+
+                raw_roa = safe_num(yf_info.get("returnOnAssets"), 0.0)
+                if raw_roa > 0.0:
+                    raw_roa_pct = raw_roa * 100.0 if raw_roa <= 10.0 else raw_roa
+                    if roa_val <= 0.0 or roa_val > 45.0 or abs(roa_val - raw_roa_pct) > 15.0:
+                        roa_val = raw_roa_pct
+
+                if total_assets_val <= 0.0:
+                    total_assets_val = safe_num(yf_info.get("totalAssets"), 0.0)
+                if total_debt_val <= 0.0:
+                    total_debt_val = safe_num(yf_info.get("totalDebt"), 0.0)
+                if total_cash_val <= 0.0:
+                    total_cash_val = safe_num(yf_info.get("totalCash"), 0.0)
+                if total_equity_val <= 0.0:
+                    bv = safe_num(yf_info.get("bookValue"), 0.0)
+                    total_equity_val = (bv * shares_outstanding) if (bv > 0 and shares_outstanding > 0) else safe_num(yf_info.get("totalStockholderEquity"), 0.0)
+
+                if ebitda_val <= 0.0:
+                    ebitda_val = safe_num(yf_info.get("ebitda"), 0.0)
+                if ocf_val <= 0.0:
+                    ocf_val = safe_num(yf_info.get("operatingCashflow"), 0.0)
+                if fcf_val <= 0.0:
+                    fcf_val = safe_num(yf_info.get("freeCashflow"), 0.0)
+                if rev_val <= 0.0:
+                    rev_val = safe_num(yf_info.get("totalRevenue"), 0.0)
+                if net_income_val == 0.0:
+                    net_income_val = safe_num(yf_info.get("netIncomeToCommon") or yf_info.get("netIncome"), 0.0)
+                if ebit_val <= 0.0:
+                    ebit_val = safe_num(yf_info.get("operatingIncome"), ebitda_val * 0.85 if ebitda_val > 0 else 0.0)
+
+                if eps_growth == 0.0:
+                    eps_growth = safe_num(yf_info.get("earningsGrowth"), 0.0)
+                if rev_growth == 0.0:
+                    rev_growth = safe_num(yf_info.get("revenueGrowth"), 0.0)
+
+                peg_val = safe_num(yf_info.get("pegRatio"), 0.0)
+                if peg_val > 0.0:
+                    info["pegRatio"] = peg_val
+
+                # Target Price
+                if target_mean_price <= 0.0:
+                    t_mean_yf, t_high_yf, t_low_yf = obtener_consenso_wall_street(ticker)
+                    if t_mean_yf > 0.0:
+                        target_mean_price = t_mean_yf
+                        target_high_price = t_high_yf
+                        target_low_price = t_low_yf
+
+            # Enriquecer DataFrames si están vacíos
+            if inc.empty:
+                yf_inc = getattr(ticker_yf, "financials", None)
+                if yf_inc is None or (isinstance(yf_inc, pd.DataFrame) and yf_inc.empty):
+                    yf_inc = getattr(ticker_yf, "income_stmt", None)
+                if isinstance(yf_inc, pd.DataFrame) and not yf_inc.empty:
+                    inc = yf_inc.copy()
+                    inc.columns = [str(c)[:4] for c in inc.columns]
+
+            if bs.empty:
+                yf_bs = getattr(ticker_yf, "balance_sheet", None)
+                if isinstance(yf_bs, pd.DataFrame) and not yf_bs.empty:
+                    bs = yf_bs.copy()
+                    bs.columns = [str(c)[:4] for c in bs.columns]
+                yf_q_bs = getattr(ticker_yf, "quarterly_balance_sheet", None)
+                if isinstance(yf_q_bs, pd.DataFrame) and not yf_q_bs.empty:
+                    bs["MRQ"] = yf_q_bs.iloc[:, 0]
+
+            if cf.empty:
+                yf_cf = getattr(ticker_yf, "cashflow", None)
+                if isinstance(yf_cf, pd.DataFrame) and not yf_cf.empty:
+                    cf = yf_cf.copy()
+                    cf.columns = [str(c)[:4] for c in cf.columns]
+                yf_q_cf = getattr(ticker_yf, "quarterly_cashflow", None)
+                if isinstance(yf_q_cf, pd.DataFrame) and not yf_q_cf.empty and len(yf_q_cf.columns) >= 4:
+                    cf["TTM"] = yf_q_cf.iloc[:, :4].sum(axis=1)
+
+        except Exception as e_enrich:
+            logger.debug("Error en enriquecimiento yfinance para %s: %s", ticker, e_enrich)
 
     # Calibración de métricas de mercado (Finviz Standards)
     if current_ratio <= 0.0 and cur_assets_val > 0 and cur_liab_val > 0:

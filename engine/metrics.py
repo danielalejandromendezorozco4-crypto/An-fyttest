@@ -83,19 +83,28 @@ def calcular_buyback_yield(
                         if isinstance(s_sh, pd.DataFrame):
                             s_sh = s_sh.iloc[0]
                         if len(s_sh) > 1:
-                            sh_curr_rep = safe_num(s_sh.iloc[0], 0.0)
-                            sh_prev_rep = safe_num(s_sh.iloc[1], 0.0)
+                            col_0 = str(s_sh.index[0])
+                            col_last = str(s_sh.index[-1])
+                            if col_0 > col_last:  # Orden descendente (ej. '2024', '2023', ...)
+                                sh_curr_rep = safe_num(s_sh.iloc[0], 0.0)
+                                sh_prev_rep = safe_num(s_sh.iloc[1], 0.0)
+                            else:  # Orden ascendente (ej. '2020', '2021', ..., '2024')
+                                sh_curr_rep = safe_num(s_sh.iloc[-1], 0.0)
+                                sh_prev_rep = safe_num(s_sh.iloc[-2], 0.0)
+
                             if sh_prev_rep > 0:
                                 sh_prev = sh_prev_rep
                                 sh_for_by = sh_curr_rep if sh_curr_rep > 0 else (shares_current if shares_current > 0 else sh_prev)
-                                buyback_yield = ((sh_prev - sh_for_by) / sh_prev) * 100.0
-                                break
+                                calc_by = ((sh_prev - sh_for_by) / sh_prev) * 100.0
+                                if abs(calc_by) >= 0.01:
+                                    buyback_yield = calc_by
+                                    break
                     except Exception:
                         pass
-        if sh_prev > 0:
+        if buyback_yield != 0.0:
             break
 
-    # Método 2 (Fallback): Flujo de caja de recompras sobre Market Cap
+    # Método 2 (Fallback o complemento si buyback_yield es ~0): Flujo de caja de recompras sobre Market Cap
     if isinstance(cf, pd.DataFrame) and not cf.empty:
         for fila_rep in [
             'Repurchase Of Capital Stock', 'Payments For Repurchase Of Common Stock',
@@ -107,12 +116,20 @@ def calcular_buyback_yield(
                     if isinstance(s_rep, pd.DataFrame):
                         s_rep = s_rep.iloc[0]
                     if not s_rep.empty:
-                        repurchase_val = abs(safe_num(s_rep.iloc[0], 0.0))
+                        if 'TTM' in s_rep.index:
+                            repurchase_val = abs(safe_num(s_rep['TTM'], 0.0))
+                        else:
+                            col_0 = str(s_rep.index[0])
+                            col_last = str(s_rep.index[-1])
+                            if col_0 > col_last:
+                                repurchase_val = abs(safe_num(s_rep.iloc[0], 0.0))
+                            else:
+                                repurchase_val = abs(safe_num(s_rep.iloc[-1], 0.0))
                         break
                 except Exception:
                     pass
 
-    if sh_prev <= 0 and repurchase_val > 0 and mcap > 0:
+    if abs(buyback_yield) < 0.05 and repurchase_val > 0 and mcap > 0:
         buyback_yield = (repurchase_val / mcap) * 100.0
 
     # Diagnóstico y semáforo
@@ -297,14 +314,19 @@ def calcular_ratios_rentabilidad(
     net_margin = (net_income_ttm / revenue_ttm * 100.0) if revenue_ttm > 0 else 0.0
 
     # 2. ROE (Finviz Standard)
-    if total_equity > 0 and net_income_ttm != 0.0:
+    if roe_fallback > 0.0:
+        if total_equity > 0 and net_income_ttm != 0.0:
+            raw_roe = (net_income_ttm / total_equity) * 100.0
+            if raw_roe > 300.0 or abs(raw_roe - roe_fallback) > 50.0:
+                roe = roe_fallback
+            else:
+                roe = raw_roe if raw_roe > 0 else roe_fallback
+        else:
+            roe = roe_fallback
+    elif total_equity > 0 and net_income_ttm != 0.0:
         roe = (net_income_ttm / total_equity) * 100.0
-    elif roe_fallback > 0.0:
-        roe = roe_fallback
-    elif total_equity <= 0 and roe_fallback <= 0.0:
-        roe = 0.0
     else:
-        roe = roe_fallback if roe_fallback != 0.0 else 0.0
+        roe = 0.0
 
     if roe != 0.0 or total_equity > 0:
         val_roe = f"{roe:.1f}%"
@@ -321,10 +343,17 @@ def calcular_ratios_rentabilidad(
         col_roe, msg_roe = "⚪", "ROE No Aplicable (Patrimonio Negativo o sin datos)."
 
     # 3. ROA (Finviz Standard)
-    if total_assets > 0 and net_income_ttm != 0.0:
+    if roa_fallback > 0.0:
+        if total_assets > 0 and net_income_ttm != 0.0:
+            raw_roa = (net_income_ttm / total_assets * 100.0)
+            if raw_roa > 45.0 or abs(raw_roa - roa_fallback) > 15.0:
+                roa = roa_fallback
+            else:
+                roa = raw_roa if raw_roa > 0 else roa_fallback
+        else:
+            roa = roa_fallback
+    elif total_assets > 0 and net_income_ttm != 0.0:
         roa = (net_income_ttm / total_assets * 100.0)
-    elif roa_fallback > 0.0:
-        roa = roa_fallback
     else:
         roa = 0.0
 
@@ -354,10 +383,17 @@ def calcular_ratios_rentabilidad(
     if invested_capital <= 0:
         invested_capital = max(total_equity + total_debt, total_assets * 0.5, 1.0)
 
-    if invested_capital > 0 and nopat != 0.0:
+    if roic_fallback > 0.0:
+        if invested_capital > 0 and nopat != 0.0:
+            raw_roic = (nopat / invested_capital * 100.0)
+            if raw_roic > 100.0 or raw_roic <= 0.0 or abs(raw_roic - roic_fallback) > 25.0:
+                roic = roic_fallback
+            else:
+                roic = raw_roic
+        else:
+            roic = roic_fallback
+    elif invested_capital > 0 and nopat != 0.0:
         roic = (nopat / invested_capital * 100.0)
-    elif roic_fallback > 0.0:
-        roic = roic_fallback
     else:
         roic = 0.0
 

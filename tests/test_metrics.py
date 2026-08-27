@@ -857,12 +857,97 @@ class TestMetricsUnittest(unittest.TestCase):
     def test_buyback_yield_sin_recompras(self):
         test_calcular_buyback_yield_sin_recompras_o_etf()
 
-    def test_multiplos_con_buyback(self):
-        test_calcular_multiplos_valuacion_con_buyback()
+def test_homologacion_metricas_finviz_mastercard_ma():
+    """
+    Verifica que los múltiplos de valuación y rentabilidad para Mastercard (MA)
+    se alineen con los estándares de mercado (Benchmark Finviz).
+    """
+    mcap = 524_000_000_000.0
+    precio = 598.47
+    eps = 18.16
+    fwd_eps = 23.00
+    ebitda = 22_200_000_000.0
+    fcf = 16_960_000_000.0
+    total_debt = 24_640_000_000.0
+    total_cash = 11_610_000_000.0
+    rev = 28_000_000_000.0
+    total_equity = 3_100_000_000.0
+    total_assets = 46_000_000_000.0
+    peg_info = 1.78
+    earnings_growth = 0.221
+    roe_finviz = 241.2
+    roa_finviz = 29.8
+    roic_finviz = 58.5
+
+    # Buyback Yield
+    cf_ma = pd.DataFrame({"2024": [11_727_000_000.0]}, index=["Repurchase Of Capital Stock"])
+    res_by = calcular_buyback_yield(pd.DataFrame(), pd.DataFrame(), cf_ma, mcap=mcap)
+    assert res_by["buyback_yield"] == pytest.approx(2.24, abs=0.1)
+
+    # Múltiplos
+    res_mult = calcular_multiplos_valuacion(
+        precio_actual=precio,
+        mcap=mcap,
+        eps_ttm=eps,
+        forward_eps=fwd_eps,
+        fcf_ttm=fcf,
+        ebitda_ttm=ebitda,
+        total_debt=total_debt,
+        total_cash=total_cash,
+        revenue_ttm=rev,
+        total_equity=total_equity,
+        peg_info=peg_info,
+        earnings_growth=earnings_growth,
+        buyback_yield=res_by["buyback_yield"],
+    )
+
+    # EV/EBITDA ~24.2x
+    assert res_mult["ev_ebitda"] == pytest.approx(24.2, abs=0.5)
+    # P/FCF ~30.9x
+    assert res_mult["p_fcf"] == pytest.approx(30.9, abs=1.5)
+    # PEG ~1.78x
+    assert res_mult["peg"] == pytest.approx(1.78, abs=0.1)
+
+    # Rentabilidad
+    res_rent = calcular_ratios_rentabilidad(
+        revenue_ttm=rev,
+        gross_profit_ttm=rev,
+        operating_income_ttm=ebitda * 0.85,
+        net_income_ttm=11_500_000_000.0,
+        total_assets=total_assets,
+        total_equity=total_equity,
+        roe_fallback=roe_finviz,
+        roa_fallback=roa_finviz,
+        roic_fallback=roic_finviz,
+    )
+
+    assert res_rent["roe"] == pytest.approx(241.2, abs=1.0)
+    assert 24.0 <= res_rent["roa"] <= 31.0
+    assert res_rent["roic"] == pytest.approx(58.5, abs=1.0)
+
+
+def test_calcular_buyback_yield_columnas_ascendentes_cronologicas():
+    """
+    Verifica que calcular_buyback_yield detecte correctamente el orden ascendente
+    de columnas (ej. 2022, 2023, 2024).
+    """
+    inc = pd.DataFrame({
+        "2022": [1_000_000_000.0],
+        "2023": [960_000_000.0],
+        "2024": [920_000_000.0],
+    }, index=["Diluted Average Shares"])
+
+    res = calcular_buyback_yield(inc=inc, bs=pd.DataFrame(), cf=pd.DataFrame(), mcap=100_000_000_000.0)
+
+    # (960M - 920M) / 960M = +4.17%
+    assert res["buyback_yield"] == pytest.approx(4.17, abs=0.1)
+    assert res["buyback_yield_str"] == "4.2%"
+    assert res["col_by"] == "🟢"
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
