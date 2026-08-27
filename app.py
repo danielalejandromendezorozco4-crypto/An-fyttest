@@ -322,6 +322,7 @@ else:
                 fcf_ttm=fcf_ttm,
                 shares_current=shares_current,
                 is_fibra_util=is_fibra_util,
+                current_ratio_fallback=safe_num(m_ttm.get("current_ratio", 0.0)),
             )
 
             net_debt = res_solv["net_debt"]
@@ -378,6 +379,9 @@ else:
                 short_term_debt=sh_debt,
                 tax_rate=tax_rate,
                 is_asset_light=is_asset_light,
+                roe_fallback=safe_num(m_ttm.get("roe", 0.0)),
+                roa_fallback=safe_num(m_ttm.get("roa", 0.0)),
+                roic_fallback=safe_num(m_ttm.get("roic", 0.0)),
             )
 
             mg_op = res_rent["mg_op"]

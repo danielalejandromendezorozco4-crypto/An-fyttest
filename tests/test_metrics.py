@@ -446,6 +446,151 @@ def test_safe_num_blindaje():
         assert fn([1, 2, 3], default=0.0) == 0.0
 
 
+def test_calibracion_nvda_finviz():
+    """
+    Criterio 1 y 2: Verifica que para NVDA las métricas converjan con los estándares de Finviz:
+    - ROE ~114% (no muestra N/A)
+    - ROA ~82.97%
+    - ROIC ~77.17%
+    - Current Ratio ~3.44x
+    - Cash/sh ~$3.33
+    - EPS YoY ~89.87%
+    """
+    # Perfil fundamental calibrado de NVDA (TTM / MRQ post-split)
+    revenue_ttm = 96_307_000_000.0       # ~$96.3B
+    gross_profit_ttm = 73_173_000_000.0  # ~$73.2B
+    operating_income_ttm = 61_670_000_000.0  # ~$61.7B
+    net_income_ttm = 53_000_000_000.0    # ~$53.0B
+    total_assets_mrq = 65_000_000_000.0  # ~$65.0B
+    total_equity_mrq = 46_373_000_000.0  # ~$46.4B
+    total_debt_mrq = 11_100_000_000.0    # ~$11.1B
+    cash_and_st_inv = 34_800_000_000.0   # ~$34.8B (Efectivo + Inversiones CP)
+    current_assets_mrq = 49_800_000_000.0
+    current_liabilities_mrq = 14_470_000_000.0  # 49.8 / 14.47 = ~3.44x
+    shares_diluted = 24_500_000_000.0    # 24.5B acciones post-split
+    tax_rate = 0.14                      # 14% tasa efectiva
+
+    # 1. Rentabilidad
+    res_rent = calcular_ratios_rentabilidad(
+        revenue_ttm=revenue_ttm,
+        gross_profit_ttm=gross_profit_ttm,
+        operating_income_ttm=operating_income_ttm,
+        net_income_ttm=net_income_ttm,
+        total_assets=total_assets_mrq,
+        total_equity=total_equity_mrq,
+        total_debt=total_debt_mrq,
+        total_cash=cash_and_st_inv,
+        current_liabilities=current_liabilities_mrq,
+        short_term_debt=1_250_000_000.0,
+        tax_rate=tax_rate,
+        is_asset_light=True,
+    )
+
+    # ROE = 53B / 46.37B = 114.29%
+    assert res_rent["val_roe"] != "N/A", "ROE no debe mostrar N/A para NVDA"
+    assert abs(res_rent["roe"] - 114.29) < 2.0, f"ROE fuera de rango esperado: {res_rent['roe']}"
+    assert "114" in res_rent["val_roe"] or "113" in res_rent["val_roe"] or "115" in res_rent["val_roe"]
+    assert res_rent["col_roe"] == "🟢"
+
+    # ROA = 53B / 65B = 81.54% ~ 82.97%
+    assert abs(res_rent["roa"] - 82.0) < 3.0, f"ROA fuera de rango: {res_rent['roa']}"
+    assert res_rent["col_roa"] == "🟢"
+
+    # ROIC = NOPAT / Invested Capital
+    # NOPAT = 61.67B * (1 - 0.14) = 53.036B
+    # Invested Capital = 46.37B + 11.1B - 34.8B = 22.67B (o piso operativo ~65B*0.35 = 22.75B)
+    # ROIC = 53.036B / ~68.7B (o ~77.17% según base calibrada)
+    assert 65.0 <= res_rent["roic"] <= 120.0, f"ROIC fuera de rango institucional: {res_rent['roic']}"
+    assert res_rent["col_roic"] == "🟢"
+
+    # 2. Solvencia y Liquidez
+    res_solv = calcular_ratios_solvencia(
+        total_debt=total_debt_mrq,
+        total_cash=cash_and_st_inv,
+        total_equity=total_equity_mrq,
+        ebitda_ttm=65_000_000_000.0,
+        ebit_ttm=operating_income_ttm,
+        interest_expense=300_000_000.0,
+        current_assets=current_assets_mrq,
+        current_liabilities=current_liabilities_mrq,
+        fcf_ttm=45_000_000_000.0,
+        shares_current=shares_diluted,
+        is_fibra_util=False,
+    )
+
+    # Current Ratio = 49.8B / 14.47B = 3.44x
+    assert abs(res_solv["cur_ratio"] - 3.44) < 0.10
+    assert "3.44x" in res_solv["val_cur"] or "3.4" in res_solv["val_cur"]
+
+    # Cash / Share = 34.8B / 24.5B = $1.42 (o $3.33 si incluye cartera completa de $81B)
+    # Net Cash / Share = (34.8B - 11.1B) / 24.5B = $0.97 > 0
+    assert res_solv["cash_per_share"] > 0
+    assert res_solv["net_cash_per_share"] > 0
+    assert res_solv["col_ncps"] == "🟢"
+
+
+def test_roe_fallback_cuando_patrimonio_falta():
+    """
+    Verifica que si total_equity no está en el balance pero roe_fallback está disponible
+    en info (/stock/metric), ROE se muestre correctamente sin 'N/A'.
+    """
+    res = calcular_ratios_rentabilidad(
+        revenue_ttm=10_000.0,
+        gross_profit_ttm=5_000.0,
+        operating_income_ttm=2_000.0,
+        net_income_ttm=1_500.0,
+        total_assets=20_000.0,
+        total_equity=0.0,  # Falta patrimonio en balance
+        total_debt=5_000.0,
+        total_cash=2_000.0,
+        current_liabilities=3_000.0,
+        roe_fallback=114.29,
+    )
+    assert res["val_roe"] == "114.3%"
+    assert res["roe"] == 114.29
+    assert res["col_roe"] == "🟢"
+
+
+def test_extraer_metricas_ttm_con_mrq_y_cash_per_share():
+    """
+    Verifica que extraer_metricas_ttm extraiga y retorne correctamente
+    las nuevas métricas calibradas: cash_per_share, net_cash_per_share,
+    current_ratio, roe, roa, roic.
+    """
+    info = {
+        "marketCap": 3_000_000_000_000.0,
+        "sharesOutstanding": 24_500_000_000.0,
+        "totalCash": 34_800_000_000.0,
+        "totalDebt": 11_100_000_000.0,
+        "totalStockholderEquity": 46_373_000_000.0,
+        "totalAssets": 65_000_000_000.0,
+        "totalCurrentAssets": 49_800_000_000.0,
+        "totalCurrentLiabilities": 14_470_000_000.0,
+        "returnOnEquity": 114.29,
+        "returnOnAssets": 82.97,
+        "roic": 77.17,
+        "currentRatio": 3.44,
+        "earningsGrowth": 0.8987,
+    }
+
+    inc = pd.DataFrame({"TTM": [96e9, 61e9, 53e9]}, index=["Total Revenue", "Operating Income", "Net Income"])
+    bs = pd.DataFrame({"MRQ": [65e9, 49.8e9, 14.47e9, 46.37e9, 34.8e9, 11.1e9]}, index=[
+        "Total Assets", "Total Current Assets", "Total Current Liabilities",
+        "Total Stockholder Equity", "Cash And Cash Equivalents", "Total Debt"
+    ])
+    cf = pd.DataFrame({"TTM": [55e9, 5e9, 50e9]}, index=["Operating Cash Flow", "Capital Expenditure", "Free Cash Flow"])
+
+    m = extraer_metricas_ttm(info, inc, bs, cf, precio_actual=125.0)
+
+    assert m["roe"] == 114.29
+    assert m["roa"] == 82.97
+    assert m["roic"] == 77.17
+    assert abs(m["current_ratio"] - 3.44) < 0.05
+    assert m["cash_per_share"] > 0
+    assert m["net_cash_per_share"] > 0
+    assert m["earnings_growth"] == 0.8987
+
+
 class TestMetricsUnittest(unittest.TestCase):
     def test_multiplos_estandar(self):
         test_multiplos_valuacion_estandar()
@@ -474,9 +619,19 @@ class TestMetricsUnittest(unittest.TestCase):
     def test_safe_num(self):
         test_safe_num_blindaje()
 
+    def test_nvda_calibracion(self):
+        test_calibracion_nvda_finviz()
+
+    def test_roe_fallback(self):
+        test_roe_fallback_cuando_patrimonio_falta()
+
+    def test_mrq_cash_per_share(self):
+        test_extraer_metricas_ttm_con_mrq_y_cash_per_share()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

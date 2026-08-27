@@ -172,17 +172,20 @@ def calcular_ratios_rentabilidad(
     short_term_debt: float = 0.0,
     tax_rate: float = 0.21,
     is_asset_light: bool = False,
+    roe_fallback: float = 0.0,
+    roa_fallback: float = 0.0,
+    roic_fallback: float = 0.0,
 ) -> dict:
     """
-    Calcula los ratios de rentabilidad y eficiencia operativa en base a cifras TTM.
+    Calcula los ratios de rentabilidad y eficiencia operativa en base a cifras TTM y balance MRQ.
 
     Ratios calculados:
     - Margen Bruto: (Gross Profit TTM / Revenue TTM) * 100
     - Margen Operativo: (Operating Income TTM / Revenue TTM) * 100
     - Margen Neto: (Net Income TTM / Revenue TTM) * 100
-    - ROE: (Net Income TTM / Total Stockholders Equity) * 100
-    - ROA: (Net Income TTM / Total Assets) * 100
-    - ROIC: (NOPAT / Capital Invertido Operativo) * 100
+    - ROE: (Net Income TTM / Total Stockholders Equity MRQ) * 100
+    - ROA: (Net Income TTM / Total Assets MRQ) * 100
+    - ROIC: (NOPAT TTM / Capital Invertido Operativo) * 100
 
     Returns:
         Diccionario con valores flotantes, strings formateadas y alertas de semáforo.
@@ -192,53 +195,83 @@ def calcular_ratios_rentabilidad(
     mg_op = (operating_income_ttm / revenue_ttm * 100.0) if revenue_ttm > 0 else 0.0
     net_margin = (net_income_ttm / revenue_ttm * 100.0) if revenue_ttm > 0 else 0.0
 
-    # 2. ROE
-    if total_equity <= 0:
-        roe = 0.0
-        val_roe = "N/A"
-        col_roe, msg_roe = "⚪", "ROE No Aplicable (Patrimonio Negativo)."
-    else:
+    # 2. ROE (Finviz Standard)
+    if total_equity > 0 and net_income_ttm != 0.0:
         roe = (net_income_ttm / total_equity) * 100.0
+    elif roe_fallback > 0.0:
+        roe = roe_fallback
+    elif total_equity <= 0 and roe_fallback <= 0.0:
+        roe = 0.0
+    else:
+        roe = roe_fallback if roe_fallback != 0.0 else 0.0
+
+    if roe != 0.0 or total_equity > 0:
         val_roe = f"{roe:.1f}%"
         if roe > 20.0:
             col_roe, msg_roe = "🟢", "Excelente rentabilidad sobre capital propio."
         elif roe >= 10.0:
             col_roe, msg_roe = "🟡", "Rendimiento aceptable."
-        else:
+        elif roe >= 0.0:
             col_roe, msg_roe = "🔴", "Rendimiento deficiente."
+        else:
+            col_roe, msg_roe = "🔴", "Pérdidas sobre el capital propio."
+    else:
+        val_roe = "N/A"
+        col_roe, msg_roe = "⚪", "ROE No Aplicable (Patrimonio Negativo o sin datos)."
 
-    # 3. ROA
-    roa = (net_income_ttm / total_assets * 100.0) if total_assets > 0 else 0.0
+    # 3. ROA (Finviz Standard)
+    if total_assets > 0 and net_income_ttm != 0.0:
+        roa = (net_income_ttm / total_assets * 100.0)
+    elif roa_fallback > 0.0:
+        roa = roa_fallback
+    else:
+        roa = 0.0
+
+    roa_str = f"{roa:.1f}%"
     if is_asset_light and roa > 15.0:
         col_roa, msg_roa = "🟢", "Modelo Asset-Light Sobresaliente."
     elif roa > 8.0:
         col_roa, msg_roa = "🟢", "Alta Eficiencia en Uso de Recursos."
     elif roa >= 4.0:
         col_roa, msg_roa = "🟡", "Eficiencia Moderada."
-    else:
+    elif roa >= 0.0:
         col_roa, msg_roa = "🔴", "Baja Eficiencia de Activos."
+    else:
+        col_roa, msg_roa = "🔴", "Rendimiento sobre activos negativo."
 
-    # 4. ROIC (NOPAT / Capital Invertido Operativo)
+    # 4. ROIC (Finviz / Institutional Standard: NOPAT TTM / Operating Invested Capital)
     t_rate_clamped = min(max(tax_rate, 0.0), 0.40)
     nopat = operating_income_ttm * (1.0 - t_rate_clamped)
 
     # Capital Invertido Operativo = Activos Totales - Pasivos Circulantes Operativos (Current Liabilities - Short Debt)
     op_cl = max(current_liabilities - short_term_debt, 0.0)
-    invested_capital = total_assets - op_cl
-    if invested_capital <= 0 or (total_equity > 0 and invested_capital > total_assets):
-        invested_capital = max(total_equity + total_debt - total_cash, total_assets * 0.5, 1.0)
-    if invested_capital <= 0:
-        invested_capital = max(total_assets * 0.5, 1.0)
+    if total_assets > 0:
+        invested_capital = total_assets - op_cl
+    else:
+        invested_capital = max(total_equity + total_debt - total_cash, total_equity + total_debt, 1.0)
 
-    roic = (nopat / invested_capital * 100.0) if (invested_capital > 0 and nopat != 0) else 0.0
-    roic = min(max(roic, -50.0), 95.0)  # Acotar a límites realistas
+    if invested_capital <= 0:
+        invested_capital = max(total_equity + total_debt, total_assets * 0.5, 1.0)
+
+    if invested_capital > 0 and nopat != 0.0:
+        roic = (nopat / invested_capital * 100.0)
+    elif roic_fallback > 0.0:
+        roic = roic_fallback
+    else:
+        roic = 0.0
+
+    # Acotar para evitar valores infinitos en denominadores ínfimos sin censurar retornos reales (>100%)
+    roic = min(max(roic, -100.0), 500.0)
+    roic_str = f"{roic:.1f}%"
 
     if roic > 20.0:
         col_roic, msg_roic = "🟢", "Alta Calidad: Ventaja competitiva clara."
     elif roic >= 12.0:
         col_roic, msg_roic = "🟡", "Retorno sobre el capital aceptable."
-    else:
+    elif roic >= 0.0:
         col_roic, msg_roic = "🔴", "Posible destrucción de valor operativo."
+    else:
+        col_roic, msg_roic = "🔴", "Retorno sobre capital negativo."
 
     return {
         "gross_margin": gross_margin,
@@ -252,13 +285,13 @@ def calcular_ratios_rentabilidad(
         "col_roe": col_roe,
         "msg_roe": msg_roe,
         "roa": roa,
-        "roa_str": f"{roa:.1f}%",
+        "roa_str": roa_str,
         "col_roa": col_roa,
         "msg_roa": msg_roa,
         "nopat": nopat,
         "invested_capital": invested_capital,
         "roic": roic,
-        "roic_str": f"{roic:.1f}%",
+        "roic_str": roic_str,
         "col_roic": col_roic,
         "msg_roic": msg_roic,
     }
@@ -280,16 +313,18 @@ def calcular_ratios_solvencia(
     fcf_ttm: float = 0.0,
     shares_current: float = 1.0,
     is_fibra_util: bool = False,
+    current_ratio_fallback: float = 0.0,
 ) -> dict:
     """
-    Calcula ratios de solvencia, liquidez y apalancamiento consolidado.
+    Calcula ratios de solvencia, liquidez y apalancamiento consolidado según estándares Finviz.
 
     Ratios calculados:
     - Deuda Neta / EBITDA: (Total Debt - Total Cash) / EBITDA TTM.
     - Cobertura de Intereses: EBIT / Gastos por Intereses.
-    - Razón Corriente: Activos Circulantes / Pasivos Circulantes.
+    - Razón Corriente: Activos Circulantes (MRQ) / Pasivos Circulantes (MRQ).
     - Deuda / Patrimonio: Deuda Total / Capital Contable.
     - FCF / Deuda: Cobertura anual de deuda mediante flujo de caja libre.
+    - Caja por Acción: (Total Cash + ST Investments) / Shares.
     - Caja Neta por Acción: (Total Cash - Total Debt) / Shares.
 
     Returns:
@@ -329,8 +364,14 @@ def calcular_ratios_solvencia(
         else:
             col_cob, msg_cob = "🔴", "Peligro: El flujo operativo apenas cubre los intereses."
 
-    # 3. Razón Corriente (Current Ratio)
-    cur_ratio = (current_assets / current_liabilities) if current_liabilities > 0 else 1.2
+    # 3. Razón Corriente (Current Ratio - MRQ Standard)
+    if current_liabilities > 0 and current_assets > 0:
+        cur_ratio = current_assets / current_liabilities
+    elif current_ratio_fallback > 0:
+        cur_ratio = current_ratio_fallback
+    else:
+        cur_ratio = 1.2
+
     val_cur = f"{cur_ratio:.2f}x"
     msg_cur_alerta = ""
     if cur_ratio > 2.5:
@@ -370,11 +411,16 @@ def calcular_ratios_solvencia(
     else:
         col_fcfd, msg_fcfd = "🔴", f"Cobertura Débil: El FCF cubre solo el {fcf_debt_ratio:.1f}% de la deuda total."
 
-    # 6. Caja Neta por Acción
+    # 6. Caja por Acción (Finviz Cash/sh) y Caja Neta por Acción
+    cash_per_share = (total_cash / shares_current) if shares_current > 0 else 0.0
+    val_cps_str = f"${cash_per_share:,.2f}"
+
     net_cash_per_share = (total_cash - total_debt) / shares_current if shares_current > 0 else 0.0
-    val_ncps_str = f"${net_cash_per_share:,.2f}" if net_cash_per_share > 0 else f"-${abs(net_cash_per_share):,.2f}"
-    col_ncps = "🟢" if net_cash_per_share > 0 else "🔴"
-    msg_ncps = f"Caja Neta Positiva de {val_ncps_str} por acción." if net_cash_per_share > 0 else f"Deuda Neta de {val_ncps_str} por acción."
+    val_ncps_str = f"${net_cash_per_share:,.2f}" if net_cash_per_share >= 0 else f"-${abs(net_cash_per_share):,.2f}"
+    col_ncps = "🟢" if net_cash_per_share > 0 else ("🟡" if net_cash_per_share == 0 else "🔴")
+    msg_ncps = f"Caja Neta Positiva de {val_ncps_str} por acción." if net_cash_per_share > 0 else (
+        "Caja y Deuda en equilibrio por acción." if net_cash_per_share == 0 else f"Deuda Neta de {val_ncps_str} por acción."
+    )
 
     return {
         "net_debt": net_debt,
@@ -398,6 +444,8 @@ def calcular_ratios_solvencia(
         "fcf_debt_ratio": fcf_debt_ratio,
         "col_fcfd": col_fcfd,
         "msg_fcfd": msg_fcfd,
+        "cash_per_share": cash_per_share,
+        "val_cps_str": val_cps_str,
         "net_cash_per_share": net_cash_per_share,
         "val_ncps_str": val_ncps_str,
         "col_ncps": col_ncps,

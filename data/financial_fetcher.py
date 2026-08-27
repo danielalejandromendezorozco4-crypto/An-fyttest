@@ -312,12 +312,12 @@ def fetch_datos_fundamentales(
 ) -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Extrae, homogeneiza y estructura el perfil corporativo, múltiplos clave y estados financieros
-    históricos (Income Statement, Balance Sheet, Cash Flow) a partir de Finnhub API.
+    históricos y más recientes (MRQ / TTM) a partir de Finnhub API.
 
     Endpoints consumidos:
     - `/stock/profile2`: Perfil, market cap en millones, shares outstanding en millones.
     - `/stock/metric?metric=all`: Ratios financieros TTM y series históricas anuales.
-    - `/stock/financials-reported`: Estados financieros as-reported SEC (10-K).
+    - `/stock/financials-reported`: Estados financieros as-reported SEC (10-K y 10-Q).
     """
     ticker = str(ticker).upper().strip()
     info: Dict[str, Any] = {}
@@ -329,15 +329,18 @@ def fetch_datos_fundamentales(
         return info, inc, bs, cf
 
     # 1. Consultas concurrentes a Finnhub
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         f_prof = executor.submit(
             _finnhub_get, "stock/profile2", {"symbol": ticker}, finnhub_api_key
         )
         f_metric = executor.submit(
             _finnhub_get, "stock/metric", {"symbol": ticker, "metric": "all"}, finnhub_api_key
         )
-        f_rep = executor.submit(
+        f_rep_a = executor.submit(
             _finnhub_get, "stock/financials-reported", {"symbol": ticker, "freq": "annual"}, finnhub_api_key
+        )
+        f_rep_q = executor.submit(
+            _finnhub_get, "stock/financials-reported", {"symbol": ticker, "freq": "quarterly"}, finnhub_api_key
         )
 
         try:
@@ -351,12 +354,16 @@ def fetch_datos_fundamentales(
             metric_data = {}
 
         try:
-            rep_data = f_rep.result(timeout=12.0) or {}
+            rep_data_a = f_rep_a.result(timeout=12.0) or {}
         except Exception:
-            rep_data = {}
+            rep_data_a = {}
+
+        try:
+            rep_data_q = f_rep_q.result(timeout=12.0) or {}
+        except Exception:
+            rep_data_q = {}
 
     # 2. Procesamiento de Perfil (/stock/profile2)
-    # Nota Finnhub: marketCapitalization y shareOutstanding vienen expresados en MILLONES.
     mcap_m = safe_num(prof_data.get("marketCapitalization", 0.0))
     shares_m = safe_num(prof_data.get("shareOutstanding", 0.0))
 
@@ -373,116 +380,226 @@ def fetch_datos_fundamentales(
     beta = safe_num(metrics_dict.get("beta", 1.0), default=1.0)
     eps_ttm = safe_num(metrics_dict.get("epsTTM", metrics_dict.get("epsNormalizedAnnual", 0.0)))
     pe_ttm = safe_num(metrics_dict.get("peTTM", metrics_dict.get("peAnnual", 0.0)))
-    div_rate = safe_num(metrics_dict.get("dividendPerShareAnnual", metrics_dict.get("dividendPerShareTTM", 0.0)))
-    current_ratio = safe_num(metrics_dict.get("currentRatioQuarterly", metrics_dict.get("currentRatioAnnual", 1.0)), default=1.0)
+    div_rate = safe_num(metrics_dict.get("dividendPerShareTTM", metrics_dict.get("dividendPerShareAnnual", 0.0)))
+    div_yield_ind = safe_num(metrics_dict.get("dividendYieldIndicatedAnnual", metrics_dict.get("dividendYieldTTM", 0.0)))
+    current_ratio = safe_num(metrics_dict.get("currentRatioQuarterly", metrics_dict.get("currentRatioAnnual", 0.0)), default=0.0)
     debt_to_equity = safe_num(metrics_dict.get("totalDebt/totalEquityQuarterly", metrics_dict.get("totalDebt/totalEquityAnnual", 0.0)))
-    roe_val = safe_num(metrics_dict.get("roeTTM", metrics_dict.get("roeAnnual", 0.0)))
-    roa_val = safe_num(metrics_dict.get("roaTTM", metrics_dict.get("roaAnnual", 0.0)))
-    roic_val = safe_num(metrics_dict.get("roicTTM", metrics_dict.get("roicAnnual", 0.0)))
+    roe_val = safe_num(metrics_dict.get("roeTTM", metrics_dict.get("roeAnnual", metrics_dict.get("roeRfy", 0.0))))
+    roa_val = safe_num(metrics_dict.get("roaTTM", metrics_dict.get("roaAnnual", metrics_dict.get("roaRfy", 0.0))))
+    roic_val = safe_num(metrics_dict.get("roicTTM", metrics_dict.get("roicAnnual", metrics_dict.get("roicRfy", 0.0))))
+    cash_per_share_metric = safe_num(metrics_dict.get("cashPerSharePerShareQuarterly", metrics_dict.get("cashPerSharePerShareAnnual", 0.0)))
+
     op_margins_raw = safe_num(metrics_dict.get("operatingMarginTTM", metrics_dict.get("operatingMarginAnnual", 0.0)))
     op_margins = op_margins_raw / 100.0 if op_margins_raw > 1.0 else op_margins_raw
-    rev_growth_raw = safe_num(metrics_dict.get("revenueGrowthTTMYoy", metrics_dict.get("revenueGrowth3Y", 0.0)))
+    rev_growth_raw = safe_num(metrics_dict.get("revenueGrowthTTMYoy", metrics_dict.get("revenueGrowthQuarterlyYoy", metrics_dict.get("revenueGrowth3Y", 0.0))))
     rev_growth = rev_growth_raw / 100.0 if abs(rev_growth_raw) > 1.0 else rev_growth_raw
-    eps_growth_raw = safe_num(metrics_dict.get("epsGrowthTTMYoy", metrics_dict.get("epsGrowth3Y", 0.0)))
+    eps_growth_raw = safe_num(metrics_dict.get("epsGrowthTTMYoy", metrics_dict.get("epsGrowthAnnual", metrics_dict.get("epsGrowth3Y", 0.0))))
     eps_growth = eps_growth_raw / 100.0 if abs(eps_growth_raw) > 1.0 else eps_growth_raw
 
-    # 4. Construcción de DataFrames Financieros desde /stock/financials-reported
+    # 4. Funciones auxiliares de parseo XBRL
+    def _get_val(concepts: List[str], label_kw: List[str], source_map: Dict[str, float], label_map: Dict[str, float]) -> float:
+        for c in concepts:
+            if c in source_map and source_map[c] != 0.0:
+                return source_map[c]
+        for kw in label_kw:
+            kw_clean = kw.lower().replace("'", "").replace("’", "").replace(" ", "").strip()
+            for l_key, val in label_map.items():
+                l_clean = l_key.lower().replace("'", "").replace("’", "").replace(" ", "").strip()
+                if kw_clean in l_clean and val != 0.0:
+                    return val
+        return 0.0
+
+    def _get_total_cash_and_investments(bs_map: Dict[str, float], bs_labels: Dict[str, float]) -> float:
+        comb_val = _get_val(
+            ["CashCashEquivalentsAndShortTermInvestments", "CashAndShortTermInvestments", "CashCashEquivalentsAndMarketableSecurities"],
+            ["cash, cash equivalents and short-term investments", "cash and short term investments", "cash and short-term investments"],
+            bs_map, bs_labels
+        )
+        if comb_val > 0:
+            return comb_val
+        cash_pure = _get_val(
+            ["CashAndCashEquivalentsAtCarryingValue", "CashAndCashEquivalents", "Cash", "CashEquivalentsAtCarryingValue"],
+            ["cash and cash equivalents", "cash & cash equivalents", "cash"],
+            bs_map, bs_labels
+        )
+        st_inv = _get_val(
+            ["MarketableSecuritiesCurrent", "ShortTermInvestments", "AvailableForSaleSecuritiesCurrent", "OtherShortTermInvestments", "MarketableSecurities"],
+            ["marketable securities", "short-term investments", "short term investments", "short-term marketable securities"],
+            bs_map, bs_labels
+        )
+        return cash_pure + st_inv
+
+    def _parse_filing_report(filing: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+        report_items = filing.get("report", {})
+        # ic
+        ic_items = report_items.get("ic", [])
+        ic_map = {item.get("concept", ""): safe_num(item.get("value")) for item in ic_items if "concept" in item}
+        ic_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in ic_items if "label" in item}
+
+        rev = _get_val(
+            ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet", "Revenue", "TotalRevenue"],
+            ["total net sales", "revenue", "total revenue", "sales"],
+            ic_map, ic_labels
+        )
+        gross_p = _get_val(["GrossProfit"], ["gross profit"], ic_map, ic_labels) or rev
+        op_inc = _get_val(["OperatingIncomeLoss", "OperatingProfit", "OperatingIncome"], ["operating income", "operating profit"], ic_map, ic_labels)
+        net_inc = _get_val(["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncome"], ["net income", "net loss", "net income available to common"], ic_map, ic_labels)
+        int_exp = abs(_get_val(["InterestExpense", "InterestExpenseNonoperating", "InterestAndDebtExpense"], ["interest expense"], ic_map, ic_labels))
+        pretax_inc = _get_val(["IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments", "PretaxIncome"], ["income before tax", "pretax income"], ic_map, ic_labels)
+        tax_prov = _get_val(["IncomeTaxExpenseBenefit", "IncomeTaxExpense"], ["income tax"], ic_map, ic_labels)
+        shares_dil = _get_val(["WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingDiluted"], ["diluted shares", "shares diluted"], ic_map, ic_labels)
+
+        inc_d = {
+            "Total Revenue": rev,
+            "Gross Profit": gross_p,
+            "Operating Income": op_inc,
+            "Net Income": net_inc,
+            "Interest Expense": int_exp,
+            "Pretax Income": pretax_inc,
+            "Tax Provision": tax_prov,
+            "Diluted Average Shares": shares_dil or shares_outstanding,
+            "Basic Average Shares": shares_dil or shares_outstanding,
+        }
+
+        # bs
+        bs_items = report_items.get("bs", [])
+        bs_map = {item.get("concept", ""): safe_num(item.get("value")) for item in bs_items if "concept" in item}
+        bs_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in bs_items if "label" in item}
+
+        t_assets = _get_val(["Assets", "TotalAssets"], ["total assets"], bs_map, bs_labels)
+        c_assets = _get_val(["AssetsCurrent", "TotalAssetsCurrent"], ["total current assets", "current assets"], bs_map, bs_labels)
+        c_liab = _get_val(["LiabilitiesCurrent", "TotalLiabilitiesCurrent"], ["total current liabilities", "current liabilities"], bs_map, bs_labels)
+        t_equity = _get_val(
+            [
+                "StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+                "CommonStockholdersEquity", "TotalStockholdersEquity", "TotalEquity", "CommonEquity", "TotalStockholderEquity"
+            ],
+            [
+                "total stockholders equity", "total shareholders equity", "total equity",
+                "stockholders equity", "shareholders equity", "total shareowners equity", "common stock equity"
+            ],
+            bs_map, bs_labels
+        )
+        if t_equity == 0.0 and t_assets > 0:
+            t_liab = _get_val(["Liabilities", "TotalLiabilities"], ["total liabilities"], bs_map, bs_labels)
+            if t_liab > 0:
+                t_equity = max(t_assets - t_liab, 0.0)
+
+        cash_val = _get_total_cash_and_investments(bs_map, bs_labels)
+        lt_debt = _get_val(["LongTermDebtNoncurrent", "LongTermDebt"], ["long-term debt", "long term debt"], bs_map, bs_labels)
+        st_debt = _get_val(["DebtCurrent", "ShortTermBorrowings"], ["current debt", "short-term debt"], bs_map, bs_labels)
+        t_debt = lt_debt + st_debt if (lt_debt > 0 or st_debt > 0) else _get_val(["TotalDebt"], ["total debt"], bs_map, bs_labels)
+
+        bs_d = {
+            "Total Assets": t_assets,
+            "Current Assets": c_assets,
+            "Total Current Assets": c_assets,
+            "Current Liabilities": c_liab,
+            "Total Current Liabilities": c_liab,
+            "Total Stockholder Equity": t_equity,
+            "Cash And Cash Equivalents": cash_val,
+            "Long Term Debt": lt_debt,
+            "Current Debt": st_debt,
+            "Total Debt": t_debt,
+        }
+
+        # cf
+        cf_items = report_items.get("cf", [])
+        cf_map = {item.get("concept", ""): safe_num(item.get("value")) for item in cf_items if "concept" in item}
+        cf_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in cf_items if "label" in item}
+
+        ocf = _get_val(["NetCashProvidedByUsedInOperatingActivities"], ["operating activities", "operating cash flow"], cf_map, cf_labels)
+        capex = abs(_get_val(["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"], ["capital expenditure", "property, plant and equipment", "additions to property"], cf_map, cf_labels))
+        repurchase = abs(_get_val(["PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfStock"], ["repurchase of common stock", "repurchases of stock"], cf_map, cf_labels))
+        fcf = ocf - capex
+
+        cf_d = {
+            "Operating Cash Flow": ocf,
+            "Capital Expenditure": capex,
+            "Free Cash Flow": fcf,
+            "Repurchase Of Capital Stock": repurchase,
+        }
+
+        return inc_d, bs_d, cf_d
+
+    # 5. Procesamiento de Filings SEC Anuales y Trimestrales (MRQ / TTM)
     dict_inc: Dict[str, Dict[str, float]] = {}
     dict_bs: Dict[str, Dict[str, float]] = {}
     dict_cf: Dict[str, Dict[str, float]] = {}
 
-    rep_list = rep_data.get("data", []) if isinstance(rep_data, dict) else []
-    if isinstance(rep_list, list) and len(rep_list) > 0:
-        for filing in rep_list:
+    rep_list_a = rep_data_a.get("data", []) if isinstance(rep_data_a, dict) else []
+    rep_list_q = rep_data_q.get("data", []) if isinstance(rep_data_q, dict) else []
+
+    # Variables MRQ y TTM derivadas
+    mrq_bs_d: Dict[str, float] = {}
+    ttm_inc_d: Dict[str, float] = {}
+    ttm_cf_d: Dict[str, float] = {}
+
+    # Procesar MRQ (Quarterly más reciente)
+    if isinstance(rep_list_q, list) and len(rep_list_q) > 0:
+        latest_q = rep_list_q[0]
+        _, q_bs, _ = _parse_filing_report(latest_q)
+        if q_bs.get("Total Assets", 0) > 0 or q_bs.get("Current Assets", 0) > 0:
+            mrq_bs_d = q_bs
+
+        # Calcular TTM a partir de los 4 trimestres más recientes
+        if len(rep_list_q) >= 4:
+            q_inc_list = []
+            q_cf_list = []
+            for filing_q in rep_list_q[:4]:
+                qi, _, qc = _parse_filing_report(filing_q)
+                q_inc_list.append(qi)
+                q_cf_list.append(qc)
+
+            ttm_rev = sum(q.get("Total Revenue", 0.0) for q in q_inc_list)
+            ttm_gp = sum(q.get("Gross Profit", 0.0) for q in q_inc_list)
+            ttm_op = sum(q.get("Operating Income", 0.0) for q in q_inc_list)
+            ttm_ni = sum(q.get("Net Income", 0.0) for q in q_inc_list)
+            ttm_int = sum(q.get("Interest Expense", 0.0) for q in q_inc_list)
+            ttm_pretax = sum(q.get("Pretax Income", 0.0) for q in q_inc_list)
+            ttm_tax = sum(q.get("Tax Provision", 0.0) for q in q_inc_list)
+            ttm_ocf = sum(q.get("Operating Cash Flow", 0.0) for q in q_cf_list)
+            ttm_capex = sum(q.get("Capital Expenditure", 0.0) for q in q_cf_list)
+
+            if ttm_rev > 0 or ttm_ni != 0:
+                ttm_inc_d = {
+                    "Total Revenue": ttm_rev,
+                    "Gross Profit": ttm_gp or ttm_rev,
+                    "Operating Income": ttm_op,
+                    "Net Income": ttm_ni,
+                    "Interest Expense": ttm_int,
+                    "Pretax Income": ttm_pretax,
+                    "Tax Provision": ttm_tax,
+                    "Diluted Average Shares": shares_outstanding,
+                    "Basic Average Shares": shares_outstanding,
+                }
+                ttm_cf_d = {
+                    "Operating Cash Flow": ttm_ocf,
+                    "Capital Expenditure": ttm_capex,
+                    "Free Cash Flow": ttm_ocf - ttm_capex,
+                    "Repurchase Of Capital Stock": sum(q.get("Repurchase Of Capital Stock", 0.0) for q in q_cf_list),
+                }
+
+    # Procesar serie anual
+    if isinstance(rep_list_a, list) and len(rep_list_a) > 0:
+        for filing in rep_list_a:
             year_val = filing.get("year") or filing.get("endDate", "")[:4]
             if not year_val:
                 continue
             period_label = str(year_val)
-            report_items = filing.get("report", {})
+            inc_item, bs_item, cf_item = _parse_filing_report(filing)
+            dict_inc[period_label] = inc_item
+            dict_bs[period_label] = bs_item
+            dict_cf[period_label] = cf_item
 
-            # ── A. Income Statement (ic) ────────────────────────────────────
-            ic_items = report_items.get("ic", [])
-            ic_map = {item.get("concept", ""): safe_num(item.get("value")) for item in ic_items if "concept" in item}
-            ic_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in ic_items if "label" in item}
+    # Si tenemos balance MRQ, anteponer o sobreescribir el más reciente en dict_bs
+    if mrq_bs_d:
+        dict_bs["MRQ"] = mrq_bs_d
 
-            def _get_val(concepts: List[str], label_kw: List[str], source_map: Dict[str, float], label_map: Dict[str, float]) -> float:
-                for c in concepts:
-                    if c in source_map and source_map[c] != 0.0:
-                        return source_map[c]
-                for kw in label_kw:
-                    for l_key, val in label_map.items():
-                        if kw.lower() in l_key and val != 0.0:
-                            return val
-                return 0.0
-
-            rev = _get_val(
-                ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet", "Revenue"],
-                ["total net sales", "revenue", "total revenue", "sales"],
-                ic_map, ic_labels
-            )
-            gross_p = _get_val(["GrossProfit"], ["gross profit"], ic_map, ic_labels) or rev
-            op_inc = _get_val(["OperatingIncomeLoss", "OperatingProfit"], ["operating income", "operating profit"], ic_map, ic_labels)
-            net_inc = _get_val(["NetIncomeLoss", "ProfitLoss"], ["net income", "net loss"], ic_map, ic_labels)
-            int_exp = abs(_get_val(["InterestExpense", "InterestExpenseNonoperating"], ["interest expense"], ic_map, ic_labels))
-            pretax_inc = _get_val(["IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments", "PretaxIncome"], ["income before tax"], ic_map, ic_labels)
-            tax_prov = _get_val(["IncomeTaxExpenseBenefit"], ["income tax"], ic_map, ic_labels)
-            shares_dil = _get_val(["WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingDiluted"], ["diluted shares", "shares diluted"], ic_map, ic_labels)
-
-            dict_inc[period_label] = {
-                "Total Revenue": rev,
-                "Gross Profit": gross_p,
-                "Operating Income": op_inc,
-                "Net Income": net_inc,
-                "Interest Expense": int_exp,
-                "Pretax Income": pretax_inc,
-                "Tax Provision": tax_prov,
-                "Diluted Average Shares": shares_dil or shares_outstanding,
-                "Basic Average Shares": shares_dil or shares_outstanding,
-            }
-
-            # ── B. Balance Sheet (bs) ────────────────────────────────────────
-            bs_items = report_items.get("bs", [])
-            bs_map = {item.get("concept", ""): safe_num(item.get("value")) for item in bs_items if "concept" in item}
-            bs_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in bs_items if "label" in item}
-
-            t_assets = _get_val(["Assets"], ["total assets"], bs_map, bs_labels)
-            c_assets = _get_val(["AssetsCurrent"], ["total current assets", "current assets"], bs_map, bs_labels)
-            c_liab = _get_val(["LiabilitiesCurrent"], ["total current liabilities", "current liabilities"], bs_map, bs_labels)
-            t_equity = _get_val(["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"], ["total shareholders equity", "stockholders equity", "total equity"], bs_map, bs_labels)
-            cash_val = _get_val(["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments", "CashAndCashEquivalents"], ["cash and cash equivalents", "cash"], bs_map, bs_labels)
-            lt_debt = _get_val(["LongTermDebtNoncurrent", "LongTermDebt"], ["long-term debt", "long term debt"], bs_map, bs_labels)
-            st_debt = _get_val(["DebtCurrent", "ShortTermBorrowings"], ["current debt", "short-term debt"], bs_map, bs_labels)
-            t_debt = lt_debt + st_debt if (lt_debt > 0 or st_debt > 0) else _get_val(["TotalDebt"], ["total debt"], bs_map, bs_labels)
-
-            dict_bs[period_label] = {
-                "Total Assets": t_assets,
-                "Current Assets": c_assets,
-                "Total Current Assets": c_assets,
-                "Current Liabilities": c_liab,
-                "Total Current Liabilities": c_liab,
-                "Total Stockholder Equity": t_equity,
-                "Cash And Cash Equivalents": cash_val,
-                "Long Term Debt": lt_debt,
-                "Current Debt": st_debt,
-                "Total Debt": t_debt,
-            }
-
-            # ── C. Cash Flow (cf) ────────────────────────────────────────────
-            cf_items = report_items.get("cf", [])
-            cf_map = {item.get("concept", ""): safe_num(item.get("value")) for item in cf_items if "concept" in item}
-            cf_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in cf_items if "label" in item}
-
-            ocf = _get_val(["NetCashProvidedByUsedInOperatingActivities"], ["operating activities", "operating cash flow"], cf_map, cf_labels)
-            capex = abs(_get_val(["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"], ["capital expenditure", "property, plant and equipment", "additions to property"], cf_map, cf_labels))
-            repurchase = abs(_get_val(["PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfStock"], ["repurchase of common stock", "repurchases of stock"], cf_map, cf_labels))
-            fcf = ocf - capex
-
-            dict_cf[period_label] = {
-                "Operating Cash Flow": ocf,
-                "Capital Expenditure": capex,
-                "Free Cash Flow": fcf,
-                "Repurchase Of Capital Stock": repurchase,
-            }
+    if ttm_inc_d:
+        dict_inc["TTM"] = ttm_inc_d
+    if ttm_cf_d:
+        dict_cf["TTM"] = ttm_cf_d
 
     if dict_inc:
         inc = pd.DataFrame(dict_inc)
@@ -491,7 +608,7 @@ def fetch_datos_fundamentales(
     if dict_cf:
         cf = pd.DataFrame(dict_cf)
 
-    # 5. Respaldo / Fallback de Series Históricas desde /stock/metric si filings SEC están incompletos
+    # 6. Fallback de Series Históricas si filings SEC están vacíos
     if inc.empty and "series" in metric_data:
         try:
             ebitda_series = series_dict.get("ebitda", [])
@@ -524,23 +641,46 @@ def fetch_datos_fundamentales(
         except Exception:
             pass
 
-    # 6. Inyección de valores consolidados a info
-    total_assets_val = _extraer_val_df(bs, ["Total Assets", "totalAssets"])
-    total_debt_val = _extraer_val_df(bs, ["Total Debt", "totalDebt", "Long Term Debt"]) or safe_num(metrics_dict.get("netDebtAnnual", 0.0))
-    total_cash_val = _extraer_val_df(bs, ["Cash And Cash Equivalents", "Cash"])
-    total_equity_val = _extraer_val_df(bs, ["Total Stockholder Equity", "Stockholders Equity"])
-    cur_assets_val = _extraer_val_df(bs, ["Total Current Assets", "Current Assets"])
-    cur_liab_val = _extraer_val_df(bs, ["Total Current Liabilities", "Current Liabilities"])
-    ebit_val = _extraer_val_df(inc, ["Operating Income", "Operating Profit", "EBIT"])
-    net_income_val = _extraer_val_df(inc, ["Net Income"])
-    rev_val = _extraer_val_df(inc, ["Total Revenue", "Revenue"])
-    gross_profit_val = _extraer_val_df(inc, ["Gross Profit"]) or rev_val
-    ocf_val = _extraer_val_df(cf, ["Operating Cash Flow"])
-    fcf_val = _extraer_val_df(cf, ["Free Cash Flow"]) or safe_num(metrics_dict.get("fcfAnnual", 0.0))
-    int_exp_val = abs(_extraer_val_df(inc, ["Interest Expense"]))
-    pretax_val = _extraer_val_df(inc, ["Pretax Income"])
-    tax_prov_val = _extraer_val_df(inc, ["Tax Provision"])
-    ebitda_val = safe_num(metrics_dict.get("ebitdaAnnual", 0.0)) or (ebit_val * 1.15)
+    # 7. Inyección y calibración de valores consolidados a info (TTM + MRQ)
+    total_assets_val = mrq_bs_d.get("Total Assets", 0.0) or _extraer_val_df(bs, ["Total Assets", "totalAssets"])
+    total_debt_val = mrq_bs_d.get("Total Debt", 0.0) or _extraer_val_df(bs, ["Total Debt", "totalDebt", "Long Term Debt"]) or safe_num(metrics_dict.get("totalDebtQuarterly", metrics_dict.get("netDebtAnnual", 0.0)))
+    total_cash_val = mrq_bs_d.get("Cash And Cash Equivalents", 0.0) or _extraer_val_df(bs, ["Cash And Cash Equivalents", "Cash"])
+    total_equity_val = mrq_bs_d.get("Total Stockholder Equity", 0.0) or _extraer_val_df(bs, ["Total Stockholder Equity", "Stockholders Equity"])
+    cur_assets_val = mrq_bs_d.get("Current Assets", 0.0) or _extraer_val_df(bs, ["Total Current Assets", "Current Assets"])
+    cur_liab_val = mrq_bs_d.get("Current Liabilities", 0.0) or _extraer_val_df(bs, ["Total Current Liabilities", "Current Liabilities"])
+    
+    ebit_val = ttm_inc_d.get("Operating Income", 0.0) or _extraer_val_df(inc, ["Operating Income", "Operating Profit", "EBIT"])
+    net_income_val = ttm_inc_d.get("Net Income", 0.0) or _extraer_val_df(inc, ["Net Income"])
+    rev_val = ttm_inc_d.get("Total Revenue", 0.0) or _extraer_val_df(inc, ["Total Revenue", "Revenue"])
+    gross_profit_val = ttm_inc_d.get("Gross Profit", 0.0) or _extraer_val_df(inc, ["Gross Profit"]) or rev_val
+    ocf_val = ttm_cf_d.get("Operating Cash Flow", 0.0) or _extraer_val_df(cf, ["Operating Cash Flow"])
+    fcf_val = ttm_cf_d.get("Free Cash Flow", 0.0) or _extraer_val_df(cf, ["Free Cash Flow"]) or safe_num(metrics_dict.get("fcfTTM", metrics_dict.get("fcfAnnual", 0.0)))
+    int_exp_val = abs(ttm_inc_d.get("Interest Expense", 0.0) or _extraer_val_df(inc, ["Interest Expense"]))
+    pretax_val = ttm_inc_d.get("Pretax Income", 0.0) or _extraer_val_df(inc, ["Pretax Income"])
+    tax_prov_val = ttm_inc_d.get("Tax Provision", 0.0) or _extraer_val_df(inc, ["Tax Provision"])
+    ebitda_val = safe_num(metrics_dict.get("ebitdaTTM", metrics_dict.get("ebitdaAnnual", 0.0))) or (ebit_val * 1.15)
+
+    # Calibración de métricas de mercado (Finviz Standards)
+    if current_ratio <= 0.0 and cur_assets_val > 0 and cur_liab_val > 0:
+        current_ratio = cur_assets_val / cur_liab_val
+
+    if cur_assets_val > 0 and cur_liab_val > 0:
+        cr_calculated = cur_assets_val / cur_liab_val
+        if current_ratio <= 0.0 or abs(cr_calculated - current_ratio) < 0.5:
+            current_ratio = cr_calculated
+
+    if roe_val <= 0.0 and total_equity_val > 0 and net_income_val != 0.0:
+        roe_val = (net_income_val / total_equity_val) * 100.0
+
+    if roa_val <= 0.0 and total_assets_val > 0 and net_income_val != 0.0:
+        roa_val = (net_income_val / total_assets_val) * 100.0
+
+    if total_equity_val <= 0.0 and roe_val > 0.0 and net_income_val > 0.0:
+        total_equity_val = net_income_val / (roe_val / 100.0)
+
+    # Caja por acción y Caja Neta por acción
+    cash_per_share = (total_cash_val / shares_outstanding) if shares_outstanding > 0 else cash_per_share_metric
+    net_cash_per_share = ((total_cash_val - total_debt_val) / shares_outstanding) if shares_outstanding > 0 else 0.0
 
     info.update({
         "symbol": ticker,
@@ -551,6 +691,7 @@ def fetch_datos_fundamentales(
         "sharesOutstanding": shares_outstanding,
         "beta": beta,
         "dividendRate": div_rate,
+        "dividendYield": div_yield_ind,
         "trailingEps": eps_ttm,
         "forwardEps": eps_ttm * (1.0 + max(eps_growth, 0.05)),
         "currentRatio": current_ratio,
@@ -558,6 +699,8 @@ def fetch_datos_fundamentales(
         "returnOnEquity": roe_val,
         "returnOnAssets": roa_val,
         "roic": roic_val,
+        "cashPerShare": cash_per_share,
+        "netCashPerShare": net_cash_per_share,
         "operatingMargins": op_margins,
         "revenueGrowth": rev_growth,
         "earningsGrowth": eps_growth,
@@ -727,10 +870,20 @@ obtener_kd_fmp_fred = obtener_kd_finnhub_fred
 def obtener_datos_dividendos(
     ticker: str, info_dict: Dict[str, Any], finnhub_api_key: str = "", precio_ref: float = 0.0
 ) -> Tuple[float, float, str]:
-    """Calcula el dividendo anualizado, el yield (%) y la fecha ex-dividendo."""
-    div_rate = safe_get(info_dict, ["dividendRate", "trailingAnnualDividendRate", "lastDiv"], 0.0)
+    """Calcula el dividendo anualizado, el yield (%) y la fecha ex-dividendo con fallbacks TTM."""
+    div_rate = safe_get(info_dict, ["dividendRate", "dividendPerShareTTM", "dividendPerShareAnnual", "trailingAnnualDividendRate", "lastDiv"], 0.0)
     div_rate = safe_num(div_rate, 0.0)
-    div_yield = (div_rate / precio_ref * 100.0) if (div_rate > 0 and precio_ref > 0) else 0.0
+    
+    div_yield = safe_get(info_dict, ["dividendYield", "dividendYieldIndicatedAnnual", "dividendYieldTTM"], 0.0)
+    div_yield = safe_num(div_yield, 0.0)
+    if 0.0 < div_yield <= 0.25:
+        div_yield = div_yield * 100.0
+
+    if div_rate > 0 and precio_ref > 0 and div_yield == 0.0:
+        div_yield = (div_rate / precio_ref) * 100.0
+    elif div_rate == 0.0 and div_yield > 0 and precio_ref > 0:
+        div_rate = (div_yield / 100.0) * precio_ref
+
     ex_div_ts = safe_get(info_dict, ["exDividendDate"], None)
     if ex_div_ts and isinstance(ex_div_ts, (int, float)):
         try:
@@ -739,7 +892,7 @@ def obtener_datos_dividendos(
             next_div_date = "N/A"
     else:
         next_div_date = "N/A"
-    return div_rate, div_yield, next_div_date
+    return round(div_rate, 4), round(div_yield, 2), next_div_date
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1099,7 +1252,8 @@ def extraer_metricas_ttm(
             "Cash And Cash Equivalents",
             "CashCashEquivalentsAndShortTermInvestments",
             "Cash Financial", "Cash And Short Term Investments",
-            "Cash, Cash Equivalents & Short Term Investments", "Cash"
+            "Cash, Cash Equivalents & Short Term Investments",
+            "Marketable Securities", "Short Term Investments", "Cash"
         ], default=0.0)
 
     total_equity = safe_num(info.get("totalStockholderEquity", 0.0), 0.0)
@@ -1115,6 +1269,11 @@ def extraer_metricas_ttm(
     if total_assets == 0.0:
         total_assets = _extraer_val_df(bs, ["Total Assets", "TotalAssets", "Total Assets Net", "totalAssets"], default=0.0)
 
+    if total_equity == 0.0 and total_assets > 0:
+        total_liabilities = _extraer_val_df(bs, ["Total Liabilities", "TotalLiabilities", "Liabilities"], default=0.0)
+        if total_liabilities > 0:
+            total_equity = max(total_assets - total_liabilities, 0.0)
+
     current_assets = safe_num(info.get("totalCurrentAssets", 0.0), 0.0)
     if current_assets == 0.0:
         current_assets = _extraer_val_df(bs, ["Total Current Assets", "Current Assets", "CurrentAssets"], default=0.0)
@@ -1126,6 +1285,23 @@ def extraer_metricas_ttm(
     short_term_debt = _extraer_val_df(bs, [
         "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt", "CurrentDebt"
     ], default=0.0)
+
+    # Calibración de métricas fundamentales
+    roe_info = safe_num(info.get("returnOnEquity", 0.0), 0.0)
+    if roe_info <= 0.0 and total_equity > 0 and net_income_ttm != 0.0:
+        roe_info = (net_income_ttm / total_equity) * 100.0
+
+    roa_info = safe_num(info.get("returnOnAssets", 0.0), 0.0)
+    if roa_info <= 0.0 and total_assets > 0 and net_income_ttm != 0.0:
+        roa_info = (net_income_ttm / total_assets) * 100.0
+
+    roic_info = safe_num(info.get("roic", 0.0), 0.0)
+    current_ratio_info = safe_num(info.get("currentRatio", 0.0), 0.0)
+    if current_ratio_info <= 0.0 and current_assets > 0 and current_liabilities > 0:
+        current_ratio_info = current_assets / current_liabilities
+
+    cash_per_share = (total_cash / shares_diluted) if shares_diluted > 0 else safe_num(info.get("cashPerShare", 0.0), 0.0)
+    net_cash_per_share = ((total_cash - total_debt) / shares_diluted) if shares_diluted > 0 else safe_num(info.get("netCashPerShare", 0.0), 0.0)
 
     cagr_revenue_3_5y = 0.0
     op_margin_hist = 0.0
@@ -1229,6 +1405,12 @@ def extraer_metricas_ttm(
         "current_assets": current_assets,
         "current_liabilities": current_liabilities,
         "short_term_debt": short_term_debt,
+        "roe": roe_info,
+        "roa": roa_info,
+        "roic": roic_info,
+        "current_ratio": current_ratio_info,
+        "cash_per_share": cash_per_share,
+        "net_cash_per_share": net_cash_per_share,
         "earnings_growth": earnings_growth,
         "revenue_growth": revenue_growth,
         "cagr_revenue_3_5y": cagr_revenue_3_5y,
