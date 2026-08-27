@@ -41,6 +41,100 @@ def safe_num(val: Any, default: float = 0.0) -> float:
 # 1. MÚLTIPLOS DE VALUACIÓN ESTANDARIZADOS (Finviz / Yahoo Finance / Investing)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def calcular_buyback_yield(
+    inc: Any,
+    bs: Any,
+    cf: Any,
+    shares_current: float = 0.0,
+    mcap: float = 0.0,
+) -> Dict[str, Any]:
+    """
+    Calcula el rendimiento por recompra de acciones (Buyback Yield) y la variación del flotante.
+
+    Metodología:
+    1. Primaria: Variación interanual de acciones en circulación (Income Statement o Balance Sheet).
+       Buyback Yield (%) = ((Shares_Prev - Shares_Curr) / Shares_Prev) * 100
+    2. Fallback: Flujo de caja destinado a recompra de acciones (Cash Flow Statement) / Market Cap.
+       Buyback Yield (%) = (Repurchase Of Capital Stock / Market Cap) * 100
+
+    Returns:
+        dict con:
+        - buyback_yield: float (porcentaje, positivo si reduce flotante, negativo si diluye)
+        - buyback_yield_str: str (formateado con 1 decimal, ej. "2.5%", "0.0%", "-1.2%")
+        - col_by: str ("🟢", "🟡", "🔴")
+        - msg_by: str (mensaje diagnóstico)
+        - repurchase_val: float (monto en USD destinado a recompras)
+    """
+    buyback_yield = 0.0
+    sh_prev = 0.0
+    repurchase_val = 0.0
+
+    # Método 1: Variación interanual de acciones en circulación
+    for df_sh in [inc, bs]:
+        if isinstance(df_sh, pd.DataFrame) and not df_sh.empty:
+            for fila_sh in [
+                'Basic Average Shares', 'Diluted Average Shares',
+                'Ordinary Shares Number', 'Common Stock',
+                'Weighted Average Shares Diluted', 'Weighted Average Shares Basic'
+            ]:
+                if fila_sh in df_sh.index and len(df_sh.columns) > 1:
+                    try:
+                        s_sh = df_sh.loc[fila_sh].dropna()
+                        if isinstance(s_sh, pd.DataFrame):
+                            s_sh = s_sh.iloc[0]
+                        if len(s_sh) > 1:
+                            sh_curr_rep = safe_num(s_sh.iloc[0], 0.0)
+                            sh_prev_rep = safe_num(s_sh.iloc[1], 0.0)
+                            if sh_prev_rep > 0:
+                                sh_prev = sh_prev_rep
+                                sh_for_by = sh_curr_rep if sh_curr_rep > 0 else (shares_current if shares_current > 0 else sh_prev)
+                                buyback_yield = ((sh_prev - sh_for_by) / sh_prev) * 100.0
+                                break
+                    except Exception:
+                        pass
+        if sh_prev > 0:
+            break
+
+    # Método 2 (Fallback): Flujo de caja de recompras sobre Market Cap
+    if isinstance(cf, pd.DataFrame) and not cf.empty:
+        for fila_rep in [
+            'Repurchase Of Capital Stock', 'Payments For Repurchase Of Common Stock',
+            'Repurchase Of Stock', 'Payments For Repurchase Of Equity', 'Common Stock Repurchased'
+        ]:
+            if fila_rep in cf.index:
+                try:
+                    s_rep = cf.loc[fila_rep].dropna()
+                    if isinstance(s_rep, pd.DataFrame):
+                        s_rep = s_rep.iloc[0]
+                    if not s_rep.empty:
+                        repurchase_val = abs(safe_num(s_rep.iloc[0], 0.0))
+                        break
+                except Exception:
+                    pass
+
+    if sh_prev <= 0 and repurchase_val > 0 and mcap > 0:
+        buyback_yield = (repurchase_val / mcap) * 100.0
+
+    # Diagnóstico y semáforo
+    if buyback_yield >= 1.5:
+        col_by, msg_by = "🟢", f"Fuerte Recompra: Reduce flotante en {buyback_yield:.1f}% anual."
+    elif buyback_yield >= 0.0:
+        col_by, msg_by = "🟡", f"Recompra Neutra: Variación de {buyback_yield:.1f}%."
+    else:
+        col_by, msg_by = "🔴", f"Dilución de Accionistas: Incrementa flotante en {abs(buyback_yield):.1f}%."
+
+    buyback_yield_str = f"{buyback_yield:.1f}%"
+
+    return {
+        "buyback_yield": round(buyback_yield, 2),
+        "buyback_yield_str": buyback_yield_str,
+        "col_by": col_by,
+        "msg_by": msg_by,
+        "repurchase_val": repurchase_val,
+        "sh_prev": sh_prev,
+    }
+
+
 def calcular_multiplos_valuacion(
     precio_actual: float,
     mcap: float,
@@ -54,6 +148,7 @@ def calcular_multiplos_valuacion(
     total_equity: float = 0.0,
     peg_info: float = 0.0,
     earnings_growth: float = 0.0,
+    buyback_yield: float = 0.0,
 ) -> dict:
     """
     Calcula los múltiplos de valuación de mercado normalizados a base TTM.
@@ -66,6 +161,7 @@ def calcular_multiplos_valuacion(
     - PEG Ratio: PER / Tasa de crecimiento esperada de utilidades.
     - P/S (Price to Sales): Market Cap / Revenue TTM.
     - P/B (Price to Book): Market Cap / Total Stockholder Equity.
+    - Recompra de Acciones / Buyback Yield: Retorno por recompras de acciones.
 
     Returns:
         Diccionario con valores flotantes, strings formateadas y alertas de semáforo.
@@ -128,6 +224,9 @@ def calcular_multiplos_valuacion(
     p_b = (mcap / total_equity) if total_equity > 0 else 0.0
     p_b_str = f"{p_b:.2f}x" if p_b > 0 else "N/A"
 
+    # 7. Recompra de Acciones (Buyback Yield)
+    buyback_yield_str = f"{buyback_yield:.1f}%"
+
     return {
         "pe": pe,
         "pe_str": pe_str,
@@ -152,6 +251,8 @@ def calcular_multiplos_valuacion(
         "p_s_str": p_s_str,
         "p_b": p_b,
         "p_b_str": p_b_str,
+        "buyback_yield": buyback_yield,
+        "buyback_yield_str": buyback_yield_str,
     }
 
 

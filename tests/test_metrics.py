@@ -11,6 +11,7 @@ from engine.metrics import (
     calcular_piotroski_fscore,
     calcular_scoring,
     evaluar_veredicto,
+    calcular_buyback_yield,
 )
 from data.financial_fetcher import (
     extraer_metricas_ttm,
@@ -713,6 +714,87 @@ def test_consenso_wall_street_sin_cobertura_defensivo():
     assert doble_filtro == "⚪ Valuación Justa o Mixta"
 
 
+def test_calcular_buyback_yield_reduccion_flotante():
+    """
+    Verifica que calcular_buyback_yield calcule un rendimiento positivo
+    cuando el número de acciones en circulación disminuye (recompra neta).
+    Ejemplo AAPL: 16.0B acciones en 2022 -> 15.5B acciones en 2023 = +3.125%
+    """
+    inc = pd.DataFrame({
+        "2023": [15_500_000_000.0],
+        "2022": [16_000_000_000.0],
+    }, index=["Diluted Average Shares"])
+
+    res = calcular_buyback_yield(inc=inc, bs=pd.DataFrame(), cf=pd.DataFrame(), mcap=2_800_000_000_000.0)
+
+    assert res["buyback_yield"] == pytest.approx(3.12, abs=0.02)
+    assert res["buyback_yield_str"] == "3.1%"
+    assert res["col_by"] == "🟢"
+    assert "Fuerte Recompra" in res["msg_by"]
+
+
+def test_calcular_buyback_yield_dilucion_neta():
+    """
+    Verifica que calcular_buyback_yield calcule un rendimiento negativo
+    cuando el número de acciones en circulación se incrementa (dilución de accionistas).
+    Ejemplo: 100M acciones en 2022 -> 110M acciones en 2023 = -10.0%
+    """
+    bs = pd.DataFrame({
+        "2023": [110_000_000.0],
+        "2022": [100_000_000.0],
+    }, index=["Ordinary Shares Number"])
+
+    res = calcular_buyback_yield(inc=pd.DataFrame(), bs=bs, cf=pd.DataFrame(), mcap=5_000_000_000.0)
+
+    assert res["buyback_yield"] == -10.0
+    assert res["buyback_yield_str"] == "-10.0%"
+    assert res["col_by"] == "🔴"
+    assert "Dilución de Accionistas" in res["msg_by"]
+
+
+def test_calcular_buyback_yield_fallback_cashflow():
+    """
+    Verifica que si no hay variación de acciones en balance / income,
+    utilice el flujo de efectivo destinado a recompras sobre el Market Cap.
+    Ejemplo: $10B en recompras con $200B Market Cap = +5.0%
+    """
+    cf = pd.DataFrame({
+        "2023": [10_000_000_000.0],
+    }, index=["Payments For Repurchase Of Common Stock"])
+
+    res = calcular_buyback_yield(inc=pd.DataFrame(), bs=pd.DataFrame(), cf=cf, mcap=200_000_000_000.0)
+
+    assert res["buyback_yield"] == 5.0
+    assert res["buyback_yield_str"] == "5.0%"
+    assert res["repurchase_val"] == 10_000_000_000.0
+    assert res["col_by"] == "🟢"
+
+
+def test_calcular_buyback_yield_sin_recompras_o_etf():
+    """
+    Verifica manejo defensivo para empresas/ETFs sin recompras o con datos vacíos.
+    """
+    res = calcular_buyback_yield(inc=pd.DataFrame(), bs=pd.DataFrame(), cf=pd.DataFrame(), mcap=0.0)
+
+    assert res["buyback_yield"] == 0.0
+    assert res["buyback_yield_str"] == "0.0%"
+    assert res["col_by"] == "🟡"
+    assert res["repurchase_val"] == 0.0
+
+
+def test_calcular_multiplos_valuacion_con_buyback():
+    """
+    Verifica que calcular_multiplos_valuacion integre y devuelva buyback_yield y su string.
+    """
+    res = calcular_multiplos_valuacion(
+        precio_actual=150.0,
+        mcap=2_000_000_000_000.0,
+        eps_ttm=5.0,
+        buyback_yield=2.8,
+    )
+    assert res["buyback_yield"] == 2.8
+    assert res["buyback_yield_str"] == "2.8%"
+
 
 class TestMetricsUnittest(unittest.TestCase):
     def test_multiplos_estandar(self):
@@ -762,6 +844,21 @@ class TestMetricsUnittest(unittest.TestCase):
 
     def test_consenso_ws_sin_cobertura(self):
         test_consenso_wall_street_sin_cobertura_defensivo()
+
+    def test_buyback_yield_reduccion(self):
+        test_calcular_buyback_yield_reduccion_flotante()
+
+    def test_buyback_yield_dilucion(self):
+        test_calcular_buyback_yield_dilucion_neta()
+
+    def test_buyback_yield_fallback_cf(self):
+        test_calcular_buyback_yield_fallback_cashflow()
+
+    def test_buyback_yield_sin_recompras(self):
+        test_calcular_buyback_yield_sin_recompras_o_etf()
+
+    def test_multiplos_con_buyback(self):
+        test_calcular_multiplos_valuacion_con_buyback()
 
 
 if __name__ == "__main__":

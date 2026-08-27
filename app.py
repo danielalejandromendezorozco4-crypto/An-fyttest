@@ -41,6 +41,7 @@ from engine.metrics import (
     calcular_ratios_solvencia,
     calcular_scoring,
     evaluar_veredicto,
+    calcular_buyback_yield,
 )
 from services.ai_service import (
     obtener_analisis_macro_ia,
@@ -428,47 +429,11 @@ else:
                 eps_growth_str = "N/D"
                 col_eps, msg_eps = "⚪", "Crecimiento de EPS no disponible o no reportado."
             # BUYBACK YIELD (Variación interanual de acciones en circulación o recompras netas)
-            sh_prev = 0.0
-            for df_sh in [inc, bs]:
-                if not df_sh.empty:
-                    for fila_sh in ['Basic Average Shares', 'Diluted Average Shares', 'Ordinary Shares Number', 'Common Stock']:
-                        if fila_sh in df_sh.index and len(df_sh.columns) > 1:
-                            try:
-                                s_sh = df_sh.loc[fila_sh].dropna()
-                                if isinstance(s_sh, pd.DataFrame): s_sh = s_sh.iloc[0]
-                                if len(s_sh) > 1:
-                                    sh_curr_rep = safe_num(s_sh.iloc[0], 0.0)
-                                    sh_prev_rep = safe_num(s_sh.iloc[1], 0.0)
-                                    if sh_prev_rep > 0:
-                                        sh_prev = sh_prev_rep
-                                        sh_for_by = sh_curr_rep if sh_curr_rep > 0 else shares_current
-                                        buyback_yield = ((sh_prev - sh_for_by) / sh_prev * 100)
-                                        break
-                            except Exception:
-                                pass
-                if sh_prev > 0:
-                    break
-
-            if sh_prev <= 0:
-                repurchase_val = 0.0
-                if not cf.empty:
-                    for fila_rep in ['Repurchase Of Capital Stock', 'Payments For Repurchase Of Common Stock', 'Repurchase Of Stock']:
-                        if fila_rep in cf.index:
-                            try:
-                                s_rep = cf.loc[fila_rep].dropna()
-                                if isinstance(s_rep, pd.DataFrame): s_rep = s_rep.iloc[0]
-                                if not s_rep.empty:
-                                    repurchase_val = abs(safe_num(s_rep.iloc[0], 0.0))
-                                    break
-                            except Exception:
-                                pass
-                if repurchase_val > 0 and mcap > 0:
-                    buyback_yield = (repurchase_val / mcap) * 100.0
-                else:
-                    buyback_yield = 0.0
-            if buyback_yield >= 1.5: col_by, msg_by = "🟢", f"Fuerte Recompra: Reduce flotante en {buyback_yield:.1f}% anual."
-            elif buyback_yield >= 0.0: col_by, msg_by = "🟡", f"Recompra Neutra: Variación de {buyback_yield:.1f}%."
-            else: col_by, msg_by = "🔴", f"Dilución de Accionistas: Incrementa flotante en {abs(buyback_yield):.1f}%."
+            res_by = calcular_buyback_yield(inc, bs, cf, shares_current=shares_current, mcap=mcap)
+            buyback_yield = res_by["buyback_yield"]
+            buyback_yield_str = res_by["buyback_yield_str"]
+            col_by = res_by["col_by"]
+            msg_by = res_by["msg_by"]
             div_rate, div_yield, next_div_date = obtener_datos_dividendos(ticker_input, info, finnhub_key, precio_actual)
             val_div_metric = f"${div_rate:.2f} ({div_yield:.2f}%)" if div_rate > 0 else "N/A"
             msg_div_tooltip = f"Rendimiento anualizado por dividendo: {div_yield:.2f}%\nPróxima fecha ex-dividendo estimada: {next_div_date}"
@@ -577,6 +542,7 @@ else:
                 total_equity=total_eq,
                 peg_info=m_ttm["peg_ratio_info"],
                 earnings_growth=m_ttm["earnings_growth"],
+                buyback_yield=buyback_yield,
             )
 
             pe = res_mult["pe"]
@@ -693,6 +659,20 @@ else:
             h_peg  = f"¿Qué es? PER / Tasa de Crecimiento Esperado.\n¿Para qué sirve? Ajusta el múltiplo de valuación según la velocidad a la que crecen las utilidades.\nDiagnóstico: Con un PEG de {peg:.2f}x, la acción cotiza con {peg_msg} la tasa de crecimiento esperada de sus ganancias."
             
             h_ev   = f"¿Qué es? Valor de Empresa (EV) / EBITDA.\n¿Para qué sirve? Valora la operación del negocio neutralizando su estructura de deuda y carga fiscal.\nDiagnóstico: El Valor total de la Empresa (EV) equivale a {ev_ebitda:.1f} años de su beneficio operativo EBITDA actual."
+            
+            if buyback_yield > 0:
+                diag_by_m3 = f"La empresa reduce sus acciones en circulación al {buyback_yield:.1f}% anual, incrementando el beneficio por acción (EPS)."
+            elif buyback_yield < 0:
+                diag_by_m3 = f"Existe una emisión neta o dilución de acciones del {abs(buyback_yield):.1f}% anual."
+            else:
+                diag_by_m3 = "Sin recompras netas significativas registradas en el período (0.0%)."
+
+            h_by_m3 = (
+                "¿Qué es? Recompra de Acciones / Buyback Yield.\n"
+                "¿Para qué sirve? Mide el retorno de capital al accionista mediante la compra de acciones propias en el mercado, "
+                "reduciendo el número de acciones en circulación y aumentando el beneficio por acción (EPS).\n"
+                f"Diagnóstico: {diag_by_m3}"
+            )
             
             h_z    = f"¿Qué es? Modelo Altman Z-Score.\n¿Para qué sirve? Predice riesgo de quiebra.\nDiagnóstico: {msg_z}"
             h_b    = f"¿Qué es? Coeficiente Beta.\n¿Para qué sirve? Mide volatilidad bursátil.\nDiagnóstico: {msg_b}"
@@ -892,11 +872,12 @@ else:
                     row1_c3.metric(f"{col_upside} Consenso W.St", val_target_str, delta_target_str, help=h_ws)
 
                 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
-                row2_c1, row2_c2, row2_c3, row2_c4 = st.columns(4)
+                row2_c1, row2_c2, row2_c3, row2_c4, row2_c5 = st.columns(5)
                 row2_c1.metric(f"{col_pe} PER (P/E)", pe_str, help=h_pe)
                 row2_c2.metric(f"{col_pfcf} P/FCF", p_fcf_str, help=h_pfcf)
                 row2_c3.metric(f"{col_peg} PEG Forward", peg_str, help=h_peg)
                 row2_c4.metric(f"{col_ev} EV / EBITDA", ev_ebitda_str, help=h_ev)
+                row2_c5.metric("Recompra Acciones", buyback_yield_str, help=h_by_m3)
 
                 if mostrar_ddm:
                     explicacion_modelo = (
