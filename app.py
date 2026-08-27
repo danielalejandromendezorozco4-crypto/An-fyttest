@@ -602,11 +602,17 @@ else:
             p_s = res_mult["p_s"]
             p_s_str = res_mult["p_s_str"]
             p_b = res_mult["p_b"]
-            p_b_str = res_mult["p_b_str"]
-
-            target = m_ttm["target_mean_price"]
-            upside = (((target - precio_actual) / precio_actual) * 100) if precio_actual != 0 else 0.0
-            col_upside = "🟢" if upside > 0 else "🔴"
+            target = safe_num(m_ttm.get("target_mean_price", 0.0), 0.0)
+            if target > 0 and precio_actual > 0:
+                upside = ((target - precio_actual) / precio_actual) * 100.0
+                col_upside = "🟢" if upside > 0 else ("🔴" if upside < 0 else "🟡")
+                val_target_str = f"${target:,.2f}"
+                delta_target_str = f"{upside:+.1f}% vs Mercado"
+            else:
+                upside = 0.0
+                col_upside = "⚪"
+                val_target_str = "N/D"
+                delta_target_str = None
             col_vintr = "🟢" if v_intr_dcf >= precio_actual else "🔴"
             
             # --- MÓDULO 4: RIESGOS Y SALUD CONTABLE (15%) ---
@@ -649,7 +655,7 @@ else:
                 res_veredicto["is_knockout"], res_veredicto["veredicto"], res_veredicto["color_v"], res_veredicto["veredicto_txt"]
             )
             
-            doble_filtro = "🟢 Oportunidad de Alta Confianza (Cotiza por debajo de tu Precio Máx de Compra y Wall Street le ve alto potencial)." if (precio_actual <= precio_max_compra and upside > 15) else ("🟡 Valor Oculto" if (v_intr > precio_actual and upside > 0) else "⚪ Valuación Justa o Mixta")
+            doble_filtro = "🟢 Oportunidad de Alta Confianza (Cotiza por debajo de tu Precio Máx de Compra y Wall Street le ve alto potencial)." if (precio_actual <= precio_max_compra and target > 0 and upside > 15) else ("🟡 Valor Oculto" if (v_intr > precio_actual and target > 0 and upside > 0) else "⚪ Valuación Justa o Mixta")
 
             # --- DEFINICIÓN DE TOOLTIPS MÓDULOS 1 Y 2 ---
             h_nde = f"¿Qué es? Deuda neta dividida por EBITDA.\n¿Para qué sirve? Mide cuántos años tardaría en pagar su deuda.\nDiagnóstico: {msg_nde}"
@@ -670,7 +676,10 @@ else:
             h_vint = "¿Qué es? Modelo DCF (Flujos de Caja Descontados).\n¿Para qué sirve? Estima el valor presente de la caja libre futura que generará el negocio, descontada al WACC.\nDiagnóstico: Representa el valor intrínseco fundamental."
             h_ddm  = "¿Qué es? Modelo Gordon Growth (DDM).\n¿Para qué sirve? Valúa la acción basándose en el valor presente de sus dividendos futuros asumiendo crecimiento constante.\nDiagnóstico: Complementario para empresas maduras o REITs."
             h_pmax = f"¿Qué es? Valor Intrínseco menos Margen de Seguridad.\n¿Para qué sirve? Define el umbral máximo de precio para mitigar riesgos de error en la proyección.\nDiagnóstico: Descuento de seguridad exigido del {desc_req*100:.0f}%."
-            h_ws   = f"¿Qué es? Precio Objetivo Consenso (12 meses).\n¿Para qué sirve? Indica la valoración promedio proyectada por analistas de Wall Street.\nDiagnóstico: Upside esperado del {upside:.1f}%."
+            if target > 0:
+                h_ws = f"¿Qué es? Precio Objetivo Consenso (12 meses).\n¿Para qué sirve? Indica la valoración promedio proyectada por analistas de Wall Street.\nDiagnóstico: Precio objetivo de {val_target_str} USD con un potencial (upside) esperado del {upside:+.1f}% respecto al precio actual."
+            else:
+                h_ws = "¿Qué es? Precio Objetivo Consenso (12 meses).\n¿Para qué sirve? Indica la valoración promedio proyectada por analistas de Wall Street.\nDiagnóstico: Sin cobertura de analistas disponible para este activo."
             
             h_pe   = f"¿Qué es? Múltiplo Precio / Beneficio Neto (P/E).\n¿Para qué sirve? Mide la valoración de las utilidades contables del último año (TTM).\nDiagnóstico: La empresa cotiza a {pe:.1f} veces sus ganancias anuales, lo que requiere un crecimiento continuo de beneficios para sostener la valoración de mercado."
             h_pfcf = f"¿Qué es? Precio / Flujo de Caja Libre.\n¿Para qué sirve? Valora la empresa en función del efectivo real generado, aislando posibles trucos contables.\nDiagnóstico: Con un P/FCF de {p_fcf:.1f}x, la empresa requiere {p_fcf:.1f} años de generación de flujo libre de caja para cubrir su precio actual de mercado."
@@ -869,22 +878,18 @@ else:
 
                 upside_vs_precio = ((v_intr_dcf - precio_actual) / precio_actual * 100.0) if precio_actual > 0 else 0.0
                 col_vintr = "🟢" if v_intr_dcf >= precio_actual else "🔴"
-                col_mseg = "🟢" if margen_seguridad >= 0.10 else ("🟡" if margen_seguridad >= 0.0 else "🔴")
 
                 if mostrar_ddm:
-                    row1_c1, row1_c2, row1_c3, row1_c4, row1_c5 = st.columns(5)
+                    row1_c1, row1_c2, row1_c3, row1_c4 = st.columns(4)
                     row1_c1.metric(f"{col_vintr} V. Intrínseco (FCFF)", f"${v_intr_dcf:,.2f}", f"{upside_vs_precio:+.1f}% vs Mercado", help=h_vint)
                     row1_c2.metric(f"{col_ddm} V. Intrínseco (DDM)", val_ddm_str, help=h_ddm)
-                    row1_c3.metric(f"{col_mseg} Margen Seguridad", f"{margen_seguridad*100:+.1f}%", help="Diferencial porcentual entre el valor intrínseco FCFF y la cotización actual.")
-                    row1_c4.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
-                    row1_c5.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}" if target > 0 else "N/D", f"{upside:+.1f}%" if target > 0 else None, help=h_ws)
-                else:
-                    row1_c1, row1_c2, row1_c3, row1_c4, row1_c5 = st.columns(5)
-                    row1_c1.metric(f"{col_vintr} V. Intrínseco (FCFF)", f"${v_intr_dcf:,.2f}", f"{upside_vs_precio:+.1f}% vs Mercado", help=h_vint)
-                    row1_c2.metric(f"{col_mseg} Margen Seguridad", f"{margen_seguridad*100:+.1f}%", help="Diferencial porcentual entre el valor intrínseco FCFF y la cotización actual.")
                     row1_c3.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
-                    row1_c4.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}" if target > 0 else "N/D", f"{upside:+.1f}%" if target > 0 else None, help=h_ws)
-                    row1_c5.metric("💵 Cotización Mercado", f"${precio_actual:,.2f}", help="Último precio de cierre registrado en mercado.")
+                    row1_c4.metric(f"{col_upside} Consenso W.St", val_target_str, delta_target_str, help=h_ws)
+                else:
+                    row1_c1, row1_c2, row1_c3 = st.columns(3)
+                    row1_c1.metric(f"{col_vintr} V. Intrínseco (FCFF)", f"${v_intr_dcf:,.2f}", f"{upside_vs_precio:+.1f}% vs Mercado", help=h_vint)
+                    row1_c2.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
+                    row1_c3.metric(f"{col_upside} Consenso W.St", val_target_str, delta_target_str, help=h_ws)
 
                 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
                 row2_c1, row2_c2, row2_c3, row2_c4 = st.columns(4)

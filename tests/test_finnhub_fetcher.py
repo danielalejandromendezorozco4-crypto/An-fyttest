@@ -314,3 +314,122 @@ class TestFinnhubSectorMapping:
         assert _map_gics_sector("Real Estate Investment Trusts") == "Real Estate"
         assert _map_gics_sector("Telecommunications") == "Communication Services"
         assert _map_gics_sector("Chemicals") == "Basic Materials"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. PRUEBAS DE EXTRACCIÓN Y VALIDACIÓN DEL CONSENSO DE WALL STREET
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFinnhubConsensusPriceTarget:
+    @patch("data.financial_fetcher._finnhub_get")
+    def test_fetch_datos_fundamentales_consenso_target_mean(self, mock_get):
+        """Verifica que el targetMean de analistas se extrae correctamente."""
+        def side_effect(endpoint, params=None, api_key="", timeout=8.0):
+            if endpoint == "stock/profile2":
+                return {"name": "NVIDIA Corp", "ticker": "NVDA", "finnhubIndustry": "Semiconductors", "marketCapitalization": 3000000.0, "shareOutstanding": 24000.0}
+            if endpoint == "stock/metric":
+                return {"metric": {"beta": 1.45, "epsTTM": 2.80, "peTTM": 45.0}}
+            if endpoint == "stock/price-target":
+                return {
+                    "symbol": "NVDA",
+                    "targetHigh": 200.0,
+                    "targetLow": 110.0,
+                    "targetMean": 165.50,
+                    "targetMedian": 160.0,
+                    "numberAnalysts": 45
+                }
+            return None
+
+        mock_get.side_effect = side_effect
+        info, inc, bs, cf = fetch_datos_fundamentales("NVDA", "key_test")
+
+        assert info["targetMeanPrice"] == 165.50
+        assert info["targetHighPrice"] == 200.0
+        assert info["targetLowPrice"] == 110.0
+
+        m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual=120.0)
+        assert m_ttm["target_mean_price"] == 165.50
+
+    @patch("data.financial_fetcher._finnhub_get")
+    def test_fetch_datos_fundamentales_consenso_target_median_fallback(self, mock_get):
+        """Verifica que si targetMean no está disponible, se utiliza targetMedian."""
+        def side_effect(endpoint, params=None, api_key="", timeout=8.0):
+            if endpoint == "stock/profile2":
+                return {"name": "Apple Inc", "ticker": "AAPL", "finnhubIndustry": "Technology", "marketCapitalization": 3000000.0, "shareOutstanding": 15000.0}
+            if endpoint == "stock/metric":
+                return {"metric": {"beta": 1.10}}
+            if endpoint == "stock/price-target":
+                return {
+                    "symbol": "AAPL",
+                    "targetHigh": 280.0,
+                    "targetLow": 190.0,
+                    "targetMedian": 240.0,
+                }
+            return None
+
+        mock_get.side_effect = side_effect
+        info, inc, bs, cf = fetch_datos_fundamentales("AAPL", "key_test")
+
+        assert info["targetMeanPrice"] == 240.0
+
+        m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual=220.0)
+        assert m_ttm["target_mean_price"] == 240.0
+
+    @patch("data.financial_fetcher._finnhub_get")
+    def test_fetch_datos_fundamentales_consenso_high_low_fallback(self, mock_get):
+        """Verifica fallback al promedio de High y Low cuando mean y median no existen."""
+        def side_effect(endpoint, params=None, api_key="", timeout=8.0):
+            if endpoint == "stock/profile2":
+                return {"name": "Microsoft Corp", "ticker": "MSFT", "finnhubIndustry": "Technology", "marketCapitalization": 3200000.0, "shareOutstanding": 7400.0}
+            if endpoint == "stock/metric":
+                return {"metric": {}}
+            if endpoint == "stock/price-target":
+                return {
+                    "symbol": "MSFT",
+                    "targetHigh": 500.0,
+                    "targetLow": 400.0,
+                }
+            return None
+
+        mock_get.side_effect = side_effect
+        info, inc, bs, cf = fetch_datos_fundamentales("MSFT", "key_test")
+
+        assert info["targetMeanPrice"] == 450.0
+
+    @patch("data.financial_fetcher._finnhub_get")
+    def test_fetch_datos_fundamentales_consenso_metric_dict_fallback(self, mock_get):
+        """Verifica fallback a /stock/metric cuando /stock/price-target retorna vacío."""
+        def side_effect(endpoint, params=None, api_key="", timeout=8.0):
+            if endpoint == "stock/profile2":
+                return {"name": "Tesla Inc", "ticker": "TSLA", "finnhubIndustry": "Consumer Cyclical", "marketCapitalization": 800000.0, "shareOutstanding": 3100.0}
+            if endpoint == "stock/metric":
+                return {"metric": {"targetPrice": 260.0}}
+            if endpoint == "stock/price-target":
+                return {}
+            return None
+
+        mock_get.side_effect = side_effect
+        info, inc, bs, cf = fetch_datos_fundamentales("TSLA", "key_test")
+
+        assert info["targetMeanPrice"] == 260.0
+
+    @patch("data.financial_fetcher._finnhub_get")
+    def test_fetch_datos_fundamentales_sin_cobertura_analistas(self, mock_get):
+        """Verifica manejo elegante cuando un activo no tiene cobertura de analistas (retorna 0.0 sin error)."""
+        def side_effect(endpoint, params=None, api_key="", timeout=8.0):
+            if endpoint == "stock/profile2":
+                return {"name": "Small Cap ETF", "ticker": "SML", "finnhubIndustry": "Financial Services", "marketCapitalization": 500.0, "shareOutstanding": 10.0}
+            if endpoint == "stock/metric":
+                return {"metric": {}}
+            if endpoint == "stock/price-target":
+                return {}
+            return None
+
+        mock_get.side_effect = side_effect
+        info, inc, bs, cf = fetch_datos_fundamentales("SML", "key_test")
+
+        assert info["targetMeanPrice"] == 0.0
+
+        m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual=50.0)
+        assert m_ttm["target_mean_price"] == 0.0
+

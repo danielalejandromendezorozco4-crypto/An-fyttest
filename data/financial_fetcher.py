@@ -381,13 +381,48 @@ def fetch_datos_fundamentales(
     industry_raw = prof_data.get("finnhubIndustry", "General")
     sector_std = _map_gics_sector(industry_raw)
 
-    # 3. Procesamiento de Métricas Básicas (/stock/metric) y Precio Objetivo
+    # 3. Procesamiento de Métricas Básicas (/stock/metric) y Precio Objetivo (/stock/price-target)
     metrics_dict = metric_data.get("metric", {}) if isinstance(metric_data, dict) else {}
     series_dict = metric_data.get("series", {}).get("annual", {}) if isinstance(metric_data, dict) else {}
 
-    target_mean_price = safe_num(target_data.get("targetMean", target_data.get("targetMedian", 0.0)))
-    target_high_price = safe_num(target_data.get("targetHigh", 0.0))
-    target_low_price = safe_num(target_data.get("targetLow", 0.0))
+    # Normalización resiliente de la respuesta de price-target (dict o lista)
+    if isinstance(target_data, list) and len(target_data) > 0:
+        target_info = target_data[0] if isinstance(target_data[0], dict) else {}
+    elif isinstance(target_data, dict):
+        target_info = target_data
+    else:
+        target_info = {}
+
+    target_mean_val = (
+        target_info.get("targetMean")
+        or target_info.get("targetMedian")
+        or target_info.get("targetMeanPrice")
+        or target_info.get("targetMedianPrice")
+        or target_info.get("target_mean")
+        or target_info.get("target_median")
+        or target_info.get("priceTarget")
+        or target_info.get("targetPrice")
+    )
+    target_mean_price = safe_num(target_mean_val, 0.0)
+    target_high_price = safe_num(target_info.get("targetHigh", target_info.get("target_high", 0.0)))
+    target_low_price = safe_num(target_info.get("targetLow", target_info.get("target_low", 0.0)))
+
+    # Fallback 1: Si no hay mean/median pero existen high y low positivos
+    if target_mean_price <= 0.0 and target_high_price > 0.0 and target_low_price > 0.0:
+        target_mean_price = round((target_high_price + target_low_price) / 2.0, 2)
+
+    # Fallback 2: Buscar en metrics_dict (/stock/metric)
+    if target_mean_price <= 0.0:
+        target_mean_price = safe_num(
+            metrics_dict.get("targetPrice")
+            or metrics_dict.get("targetMeanPrice")
+            or metrics_dict.get("priceTarget")
+            or metrics_dict.get("targetMean")
+            or metrics_dict.get("targetMedian")
+            or metrics_dict.get("consensusPriceTarget")
+            or metrics_dict.get("targetPriceMean"),
+            0.0
+        )
 
     beta = safe_num(metrics_dict.get("beta", 1.0), default=1.0)
     eps_ttm = safe_num(metrics_dict.get("epsTTM", metrics_dict.get("epsNormalizedAnnual", 0.0)))
@@ -1420,7 +1455,18 @@ def extraer_metricas_ttm(
     peg_ratio_info = safe_num(info.get("pegRatio", 0.0), 0.0)
     beta = safe_num(info.get("beta", 1.0), 1.0)
     short_percent_of_float = safe_num(info.get("shortPercentOfFloat", 0.0), 0.0)
-    target_mean_price = safe_num(info.get("targetMeanPrice", 0.0), 0.0)
+    target_mean_price = safe_num(
+        info.get("targetMeanPrice")
+        or info.get("target_mean_price")
+        or info.get("targetMean")
+        or info.get("targetMedian")
+        or info.get("targetPrice")
+        or info.get("priceTarget")
+        or info.get("targetMedianPrice")
+        or info.get("target_median")
+        or info.get("target_mean"),
+        0.0
+    )
 
     return {
         "shares_diluted": shares_diluted,

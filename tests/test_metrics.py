@@ -682,6 +682,38 @@ def test_consenso_wall_street_price_target():
     assert upside > 0
 
 
+def test_consenso_wall_street_sin_cobertura_defensivo():
+    """
+    Verifica que empresas o ETFs sin cobertura de analistas (target = 0.0)
+    se procesen de forma segura: upside = 0.0, semáforo neutral '⚪', texto 'N/D'
+    y no alteren negativamente el filtro de doble entrada ni causen división por cero.
+    """
+    target = 0.0
+    precio_actual = 50.0
+    precio_max_compra = 60.0
+    v_intr = 65.0
+
+    if target > 0 and precio_actual > 0:
+        upside = ((target - precio_actual) / precio_actual) * 100.0
+        col_upside = "🟢" if upside > 0 else ("🔴" if upside < 0 else "🟡")
+        val_target_str = f"${target:,.2f}"
+        delta_target_str = f"{upside:+.1f}% vs Mercado"
+    else:
+        upside = 0.0
+        col_upside = "⚪"
+        val_target_str = "N/D"
+        delta_target_str = None
+
+    assert upside == 0.0
+    assert col_upside == "⚪"
+    assert val_target_str == "N/D"
+    assert delta_target_str is None
+
+    doble_filtro = "🟢 Oportunidad de Alta Confianza (Cotiza por debajo de tu Precio Máx de Compra y Wall Street le ve alto potencial)." if (precio_actual <= precio_max_compra and target > 0 and upside > 15) else ("🟡 Valor Oculto" if (v_intr > precio_actual and target > 0 and upside > 0) else "⚪ Valuación Justa o Mixta")
+    assert doble_filtro == "⚪ Valuación Justa o Mixta"
+
+
+
 class TestMetricsUnittest(unittest.TestCase):
     def test_multiplos_estandar(self):
         test_multiplos_valuacion_estandar()
@@ -727,6 +759,9 @@ class TestMetricsUnittest(unittest.TestCase):
 
     def test_consenso_ws(self):
         test_consenso_wall_street_price_target()
+
+    def test_consenso_ws_sin_cobertura(self):
+        test_consenso_wall_street_sin_cobertura_defensivo()
 
 
 if __name__ == "__main__":
