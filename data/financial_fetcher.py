@@ -329,7 +329,7 @@ def fetch_datos_fundamentales(
         return info, inc, bs, cf
 
     # 1. Consultas concurrentes a Finnhub
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         f_prof = executor.submit(
             _finnhub_get, "stock/profile2", {"symbol": ticker}, finnhub_api_key
         )
@@ -341,6 +341,9 @@ def fetch_datos_fundamentales(
         )
         f_rep_q = executor.submit(
             _finnhub_get, "stock/financials-reported", {"symbol": ticker, "freq": "quarterly"}, finnhub_api_key
+        )
+        f_target = executor.submit(
+            _finnhub_get, "stock/price-target", {"symbol": ticker}, finnhub_api_key
         )
 
         try:
@@ -363,6 +366,11 @@ def fetch_datos_fundamentales(
         except Exception:
             rep_data_q = {}
 
+        try:
+            target_data = f_target.result(timeout=8.0) or {}
+        except Exception:
+            target_data = {}
+
     # 2. Procesamiento de Perfil (/stock/profile2)
     mcap_m = safe_num(prof_data.get("marketCapitalization", 0.0))
     shares_m = safe_num(prof_data.get("shareOutstanding", 0.0))
@@ -373,9 +381,13 @@ def fetch_datos_fundamentales(
     industry_raw = prof_data.get("finnhubIndustry", "General")
     sector_std = _map_gics_sector(industry_raw)
 
-    # 3. Procesamiento de Métricas Básicas (/stock/metric)
+    # 3. Procesamiento de Métricas Básicas (/stock/metric) y Precio Objetivo
     metrics_dict = metric_data.get("metric", {}) if isinstance(metric_data, dict) else {}
     series_dict = metric_data.get("series", {}).get("annual", {}) if isinstance(metric_data, dict) else {}
+
+    target_mean_price = safe_num(target_data.get("targetMean", target_data.get("targetMedian", 0.0)))
+    target_high_price = safe_num(target_data.get("targetHigh", 0.0))
+    target_low_price = safe_num(target_data.get("targetLow", 0.0))
 
     beta = safe_num(metrics_dict.get("beta", 1.0), default=1.0)
     eps_ttm = safe_num(metrics_dict.get("epsTTM", metrics_dict.get("epsNormalizedAnnual", 0.0)))
@@ -480,27 +492,30 @@ def fetch_datos_fundamentales(
             ],
             bs_map, bs_labels
         )
-        if t_equity == 0.0 and t_assets > 0:
-            t_liab = _get_val(["Liabilities", "TotalLiabilities"], ["total liabilities"], bs_map, bs_labels)
-            if t_liab > 0:
-                t_equity = max(t_assets - t_liab, 0.0)
-
-        cash_val = _get_total_cash_and_investments(bs_map, bs_labels)
-        lt_debt = _get_val(["LongTermDebtNoncurrent", "LongTermDebt"], ["long-term debt", "long term debt"], bs_map, bs_labels)
-        st_debt = _get_val(["DebtCurrent", "ShortTermBorrowings"], ["current debt", "short-term debt"], bs_map, bs_labels)
-        t_debt = lt_debt + st_debt if (lt_debt > 0 or st_debt > 0) else _get_val(["TotalDebt"], ["total debt"], bs_map, bs_labels)
+        l_debt = _get_val(
+            [
+                "LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations", "LongTermDebt",
+                "LongTermDebtCurrent", "DebtLongtermAndShorttermCombinedTotal"
+            ],
+            ["long-term debt", "long term debt", "total debt"],
+            bs_map, bs_labels
+        )
+        s_debt = _get_val(
+            ["ShortTermBorrowings", "CurrentDebt", "DebtCurrent", "CommercialPaper"],
+            ["short-term debt", "current portion of long-term debt", "commercial paper"],
+            bs_map, bs_labels
+        )
+        tot_cash_inv = _get_total_cash_and_investments(bs_map, bs_labels)
 
         bs_d = {
             "Total Assets": t_assets,
             "Current Assets": c_assets,
-            "Total Current Assets": c_assets,
             "Current Liabilities": c_liab,
-            "Total Current Liabilities": c_liab,
             "Total Stockholder Equity": t_equity,
-            "Cash And Cash Equivalents": cash_val,
-            "Long Term Debt": lt_debt,
-            "Current Debt": st_debt,
-            "Total Debt": t_debt,
+            "Total Debt": l_debt + s_debt,
+            "Long Term Debt": l_debt,
+            "Current Debt": s_debt,
+            "Cash And Cash Equivalents": tot_cash_inv,
         }
 
         # cf
@@ -580,9 +595,19 @@ def fetch_datos_fundamentales(
                     "Repurchase Of Capital Stock": sum(q.get("Repurchase Of Capital Stock", 0.0) for q in q_cf_list),
                 }
 
-    # Procesar serie anual
+            # Calcular EPS YoY y Revenue YoY interanual comparando 4Q actuales vs 4Q anteriores
+            if len(rep_list_q) >= 8:
+                q_inc_prev = [_parse_filing_report(fq)[0] for fq in rep_list_q[4:8]]
+                prev_ttm_ni = sum(q.get("Net Income", 0.0) for q in q_inc_prev)
+                prev_ttm_rev = sum(q.get("Total Revenue", 0.0) for q in q_inc_prev)
+                if prev_ttm_ni > 0 and ttm_ni > 0:
+                    eps_growth = (ttm_ni - prev_ttm_ni) / prev_ttm_ni
+                if prev_ttm_rev > 0 and ttm_rev > 0:
+                    rev_growth = (ttm_rev - prev_ttm_rev) / prev_ttm_rev
+
+    # Procesar serie anual (hasta 6 años para garantizar al menos 5 períodos completos)
     if isinstance(rep_list_a, list) and len(rep_list_a) > 0:
-        for filing in rep_list_a:
+        for filing in rep_list_a[:6]:
             year_val = filing.get("year") or filing.get("endDate", "")[:4]
             if not year_val:
                 continue
@@ -592,7 +617,7 @@ def fetch_datos_fundamentales(
             dict_bs[period_label] = bs_item
             dict_cf[period_label] = cf_item
 
-    # Si tenemos balance MRQ, anteponer o sobreescribir el más reciente en dict_bs
+    # Si tenemos balance MRQ y TTM, agregarlos a los diccionarios
     if mrq_bs_d:
         dict_bs["MRQ"] = mrq_bs_d
 
@@ -723,7 +748,9 @@ def fetch_datos_fundamentales(
         "taxProvision": tax_prov_val,
         "ebitda": ebitda_val,
         "pegRatio": safe_num(pe_ttm / (eps_growth * 100.0)) if (pe_ttm > 0 and eps_growth > 0) else 0.0,
-        "targetMeanPrice": 0.0,
+        "targetMeanPrice": target_mean_price,
+        "targetHighPrice": target_high_price,
+        "targetLowPrice": target_low_price,
         "shortPercentOfFloat": 0.0,
     })
 
@@ -874,15 +901,13 @@ def obtener_datos_dividendos(
     div_rate = safe_get(info_dict, ["dividendRate", "dividendPerShareTTM", "dividendPerShareAnnual", "trailingAnnualDividendRate", "lastDiv"], 0.0)
     div_rate = safe_num(div_rate, 0.0)
     
-    div_yield = safe_get(info_dict, ["dividendYield", "dividendYieldIndicatedAnnual", "dividendYieldTTM"], 0.0)
-    div_yield = safe_num(div_yield, 0.0)
-    if 0.0 < div_yield <= 0.25:
-        div_yield = div_yield * 100.0
-
-    if div_rate > 0 and precio_ref > 0 and div_yield == 0.0:
+    if div_rate > 0 and precio_ref > 0:
         div_yield = (div_rate / precio_ref) * 100.0
-    elif div_rate == 0.0 and div_yield > 0 and precio_ref > 0:
-        div_rate = (div_yield / 100.0) * precio_ref
+    else:
+        div_yield = safe_get(info_dict, ["dividendYield", "dividendYieldIndicatedAnnual", "dividendYieldTTM"], 0.0)
+        div_yield = safe_num(div_yield, 0.0)
+        if div_yield > 0 and precio_ref > 0 and div_rate == 0.0:
+            div_rate = (div_yield / 100.0) * precio_ref
 
     ex_div_ts = safe_get(info_dict, ["exDividendDate"], None)
     if ex_div_ts and isinstance(ex_div_ts, (int, float)):
@@ -892,7 +917,7 @@ def obtener_datos_dividendos(
             next_div_date = "N/A"
     else:
         next_div_date = "N/A"
-    return round(div_rate, 4), round(div_yield, 2), next_div_date
+    return round(div_rate, 4), round(div_yield, 3), next_div_date
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -985,21 +1010,33 @@ def extraer_fcff_desapalancado(
     Extrae y sanitiza los insumos para el cálculo de FCFF histórico siguiendo
     una jerarquía dual-path estricta que elimina el doble conteo de la deuda.
     """
+    ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
+    fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
+    capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0))) or (abs(ocf_ttm - fcf_ttm) if (ocf_ttm > 0 and fcf_ttm > 0) else 0.0)
+    ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
+
     ocf_hist = _extraer_serie(cf, [
         "Operating Cash Flow", "OperatingCashFlow",
         "Cash Flow From Continuing Operating Activities",
         "Total Cash From Operating Activities",
         "Net Cash Provided By Operating Activities"
     ])
-    if not ocf_hist:
-        ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
-        ocf_hist = [ocf_ttm] if ocf_ttm != 0.0 else [0.0]
+    if ocf_ttm > 0:
+        if not ocf_hist:
+            ocf_hist = [ocf_ttm]
+        elif abs(ocf_hist[0] - ocf_ttm) > 1000 and "TTM" not in cf.columns:
+            ocf_hist = [ocf_ttm] + ocf_hist
+    elif not ocf_hist:
+        ocf_hist = [0.0]
 
     capex_hist = obtener_capex_historico(cf)
-    if not capex_hist:
-        fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
-        ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
-        capex_hist = [abs(ocf_ttm - fcf_ttm)] if (ocf_ttm != 0.0 and fcf_ttm != 0.0) else [0.0]
+    if capex_ttm > 0:
+        if not capex_hist:
+            capex_hist = [capex_ttm]
+        elif abs(capex_hist[0] - capex_ttm) > 1000 and "TTM" not in cf.columns:
+            capex_hist = [capex_ttm] + capex_hist
+    elif not capex_hist:
+        capex_hist = [0.0]
 
     interest_hist = _extraer_serie(inc, [
         "Interest Expense", "InterestExpense",
@@ -1024,9 +1061,13 @@ def extraer_fcff_desapalancado(
         "Operating Income", "OperatingIncome", "EBIT",
         "Normalized EBIT", "Normalized Operating Profit", "Operating Profit"
     ])
-    if not ebit_hist:
-        ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
-        ebit_hist = [ebit_ttm] if ebit_ttm != 0.0 else []
+    if ebit_ttm > 0:
+        if not ebit_hist:
+            ebit_hist = [ebit_ttm]
+        elif abs(ebit_hist[0] - ebit_ttm) > 1000 and "TTM" not in inc.columns:
+            ebit_hist = [ebit_ttm] + ebit_hist
+    elif not ebit_hist:
+        ebit_hist = []
 
     da_hist = _extraer_serie(cf, [
         "Depreciation Amortization Depletion",

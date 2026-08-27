@@ -182,7 +182,8 @@ def calcular_curva_crecimiento_5y(
     else:
         g_1_5 = 0.08
 
-    g_1_5_clamped = min(max(g_1_5, 0.02), 0.22)
+    g_max = 0.45 if g_1_5 > 0.20 else 0.25
+    g_1_5_clamped = min(max(g_1_5, 0.02), g_max)
     return [round(g_1_5_clamped, 5)] * n_years
 
 
@@ -353,7 +354,7 @@ def calcular_fcff_valuation(
         else:
             fcff_base = max(ocf_hist[0] * 0.50 if ocf_hist else 0.0, 1e6)
 
-    # 6. Tasa de Crecimiento Fase 1
+    # 6. Tasa de Crecimiento Fase 1 (Prospectiva y Dinámica)
     if growth_rate_exp is not None and growth_rate_exp > 0:
         g_1_5 = growth_rate_exp
     elif revenue_growth_api > 0:
@@ -362,7 +363,10 @@ def calcular_fcff_valuation(
         g_1_5 = cagr_revenue_hist
     else:
         g_1_5 = 0.08
-    g_1_5 = min(max(g_1_5, 0.02), 0.22)
+
+    # Para empresas de hipercrecimiento probado, permitir tasas prospectivas de hasta 40%-45% en Fase 1
+    g_max_fase1 = 0.45 if (growth_rate_exp is not None or revenue_growth_api > 0.20 or cagr_revenue_hist > 0.20) else 0.25
+    g_1_5 = min(max(g_1_5, 0.02), g_max_fase1)
 
     # 7. Proyeccion 2 etapas + Fade Period con Mid-Year Convention
     fcff_proyectado: list[float] = []

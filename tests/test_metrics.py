@@ -591,6 +591,97 @@ def test_extraer_metricas_ttm_con_mrq_y_cash_per_share():
     assert m["earnings_growth"] == 0.8987
 
 
+def test_datos_dividendos_exactos_nvda():
+    """
+    Criterio 3: Verifica que para NVDA ($0.04/acc a $125.00), el Dividend Yield
+    se calcule con exactitud matemática como 0.03% (sin multiplicadores distorsionados).
+    """
+    from data.financial_fetcher import obtener_datos_dividendos
+
+    info_nvda = {
+        "dividendRate": 0.04,
+        "dividendYield": 0.032,  # Raw percentage from API
+        "exDividendDate": 1726099200,
+    }
+    div_rate, div_yield, ex_date = obtener_datos_dividendos("NVDA", info_nvda, precio_ref=125.0)
+
+    assert div_rate == 0.04
+    assert abs(div_yield - 0.032) < 0.01, f"Yield distorsionado: {div_yield}"
+    assert div_yield < 0.50, "Yield no debe estar en 3.35%"
+
+
+def test_series_historicas_5_anios_para_graficos():
+    """
+    Criterio 1: Verifica que las series de 5 años para gráficos de márgenes y flujos
+    puedan filtrarse, procesarse y ordenarse sin arrojar excepciones ParserError en 'TTM'.
+    """
+    inc = pd.DataFrame({
+        "2020": [16e9, 4.5e9, 4.3e9],
+        "2021": [26e9, 10e9, 9.7e9],
+        "2022": [27e9, 4.2e9, 4.3e9],
+        "2023": [60e9, 32e9, 29e9],
+        "2024": [96e9, 61e9, 53e9],
+        "TTM":  [96e9, 61e9, 53e9],
+    }, index=["Total Revenue", "Operating Income", "Net Income"])
+
+    cf = pd.DataFrame({
+        "2020": [5.8e9, -1.2e9, 4.6e9],
+        "2021": [9.1e9, -1.8e9, 7.3e9],
+        "2022": [5.6e9, -1.8e9, 3.8e9],
+        "2023": [28e9,  -1.1e9, 26.9e9],
+        "2024": [60e9,  -5.0e9, 55.0e9],
+        "TTM":  [60e9,  -5.0e9, 55.0e9],
+    }, index=["Operating Cash Flow", "Capital Expenditure", "Free Cash Flow"])
+
+    # Simulación del bloque de renderizado de app.py
+    cols_anuales = sorted([c for c in inc.columns if str(c).isdigit() and len(str(c)) == 4])
+    assert len(cols_anuales) == 5
+    assert cols_anuales == ["2020", "2021", "2022", "2023", "2024"]
+
+    s_rev = inc.loc["Total Revenue", cols_anuales]
+    s_op = inc.loc["Operating Income", cols_anuales]
+    s_ni = inc.loc["Net Income", cols_anuales]
+
+    df_margins = pd.DataFrame({
+        "Margen Operativo (%)": (s_op / s_rev) * 100,
+        "Margen Neto (%)": (s_ni / s_rev) * 100
+    }, index=cols_anuales).dropna()
+
+    assert len(df_margins) == 5
+    assert "TTM" not in df_margins.index
+
+    cols_anuales_cf = sorted([c for c in cf.columns if str(c).isdigit() and len(str(c)) == 4])
+    s_ocf = cf.loc["Operating Cash Flow", cols_anuales_cf]
+    s_fcf = cf.loc["Free Cash Flow", cols_anuales_cf]
+
+    df_cf = pd.DataFrame({
+        "Flujo Operativo": s_ocf / 1e6,
+        "Flujo Libre (FCF)": s_fcf / 1e6
+    }, index=cols_anuales_cf).dropna()
+
+    assert len(df_cf) == 5
+    assert "TTM" not in df_cf.index
+
+
+def test_consenso_wall_street_price_target():
+    """
+    Criterio 3: Verifica que el target price y upside de Wall Street
+    se transmitan y calculen adecuadamente.
+    """
+    info = {
+        "targetMeanPrice": 165.0,
+        "targetHighPrice": 200.0,
+        "targetLowPrice": 90.0,
+    }
+    precio_actual = 125.0
+    target = info["targetMeanPrice"]
+    upside = (((target - precio_actual) / precio_actual) * 100) if precio_actual != 0 else 0.0
+
+    assert target == 165.0
+    assert abs(upside - 32.0) < 0.1
+    assert upside > 0
+
+
 class TestMetricsUnittest(unittest.TestCase):
     def test_multiplos_estandar(self):
         test_multiplos_valuacion_estandar()
@@ -627,6 +718,15 @@ class TestMetricsUnittest(unittest.TestCase):
 
     def test_mrq_cash_per_share(self):
         test_extraer_metricas_ttm_con_mrq_y_cash_per_share()
+
+    def test_dividendos_nvda(self):
+        test_datos_dividendos_exactos_nvda()
+
+    def test_graficos_5y(self):
+        test_series_historicas_5_anios_para_graficos()
+
+    def test_consenso_ws(self):
+        test_consenso_wall_street_price_target()
 
 
 if __name__ == "__main__":

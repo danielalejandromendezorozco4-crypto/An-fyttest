@@ -485,6 +485,13 @@ else:
             # Extraer partidas FCFF con dual-path (EBIT primario + OCF fallback)
             comp_fcff = extraer_fcff_desapalancado(cf, inc, bs, info)
 
+            # Tasa de crecimiento prospectiva para la Fase 1
+            growth_exp = 0.0
+            if eps_growth > 0:
+                growth_exp = min(eps_growth / 100.0, 0.38) if eps_growth > 38 else (eps_growth / 100.0)
+            elif m_ttm.get("revenue_growth", 0.0) > 0:
+                growth_exp = m_ttm.get("revenue_growth", 0.0)
+
             # ── MOTOR FCFF INSTITUCIONAL (Fuente central de verdad) ──
             res_fcff = calcular_fcff_valuation(
                 ocf_hist              = comp_fcff["ocf_hist"],
@@ -500,6 +507,7 @@ else:
                 rf                    = rf_tnx,
                 precio_actual         = precio_actual,
                 erp                   = erp_mercado,
+                growth_rate_exp       = growth_exp if growth_exp > 0 else None,
                 cagr_revenue_hist     = m_ttm.get("cagr_revenue_3_5y", 0.0),
                 revenue_growth_api    = m_ttm.get("revenue_growth", 0.0),
                 revenue_ttm           = m_ttm.get("revenue_ttm", rev_ttm),
@@ -762,20 +770,29 @@ else:
 
                     if not inc.empty and row_rev and row_op and row_ni:
                         try:
-                            s_rev = inc.loc[row_rev]
+                            # Filtrar columnas anuales numéricas (hasta 5 años)
+                            cols_anuales = sorted([c for c in inc.columns if str(c).isdigit() and len(str(c)) == 4])
+                            if len(cols_anuales) > 5:
+                                cols_anuales = cols_anuales[-5:]
+                            if not cols_anuales:
+                                cols_anuales = [c for c in inc.columns if c not in ["MRQ", "TTM"]]
+                            if not cols_anuales:
+                                cols_anuales = list(inc.columns)
+
+                            s_rev = inc.loc[row_rev, cols_anuales]
                             if isinstance(s_rev, pd.DataFrame): s_rev = s_rev.iloc[0]
-                            s_op = inc.loc[row_op]
+                            s_op = inc.loc[row_op, cols_anuales]
                             if isinstance(s_op, pd.DataFrame): s_op = s_op.iloc[0]
-                            s_ni = inc.loc[row_ni]
+                            s_ni = inc.loc[row_ni, cols_anuales]
                             if isinstance(s_ni, pd.DataFrame): s_ni = s_ni.iloc[0]
 
                             rev_seguro = s_rev.replace(0, np.nan)
                             df_margins = pd.DataFrame({
                                 "Margen Operativo (%)": (s_op / rev_seguro) * 100,
                                 "Margen Neto (%)": (s_ni / rev_seguro) * 100
-                            }).dropna()
+                            }, index=cols_anuales).dropna()
                             
-                            df_margins.index = pd.to_datetime(df_margins.index).year.astype(str)
+                            df_margins.index = [str(x) for x in df_margins.index]
                             df_margins = df_margins.sort_index()
                             fig_m = px.bar(df_margins, barmode='group', text_auto='.1f', color_discrete_sequence=['#0A192F', '#0284C7'])
                             fig_m.update_layout(
@@ -804,14 +821,23 @@ else:
 
                     if not cf.empty and (row_ocf or row_fcf):
                         try:
-                            s_ocf = cf.loc[row_ocf] if row_ocf else pd.Series(0.0, index=cf.columns)
+                            # Filtrar columnas anuales numéricas (hasta 5 años)
+                            cols_anuales_cf = sorted([c for c in cf.columns if str(c).isdigit() and len(str(c)) == 4])
+                            if len(cols_anuales_cf) > 5:
+                                cols_anuales_cf = cols_anuales_cf[-5:]
+                            if not cols_anuales_cf:
+                                cols_anuales_cf = [c for c in cf.columns if c not in ["MRQ", "TTM"]]
+                            if not cols_anuales_cf:
+                                cols_anuales_cf = list(cf.columns)
+
+                            s_ocf = cf.loc[row_ocf, cols_anuales_cf] if row_ocf else pd.Series(0.0, index=cols_anuales_cf)
                             if isinstance(s_ocf, pd.DataFrame): s_ocf = s_ocf.iloc[0]
 
                             if row_fcf:
-                                s_fcf = cf.loc[row_fcf]
+                                s_fcf = cf.loc[row_fcf, cols_anuales_cf]
                                 if isinstance(s_fcf, pd.DataFrame): s_fcf = s_fcf.iloc[0]
                             elif row_capex and row_ocf:
-                                s_capex = cf.loc[row_capex]
+                                s_capex = cf.loc[row_capex, cols_anuales_cf]
                                 if isinstance(s_capex, pd.DataFrame): s_capex = s_capex.iloc[0]
                                 s_fcf = s_ocf.fillna(0.0) - s_capex.abs().fillna(0.0)
                             else:
@@ -820,9 +846,9 @@ else:
                             df_cf = pd.DataFrame({
                                 "Flujo Operativo": s_ocf / 1e6,
                                 "Flujo Libre (FCF)": s_fcf / 1e6
-                            }).dropna()
+                            }, index=cols_anuales_cf).dropna()
                             
-                            df_cf.index = pd.to_datetime(df_cf.index).year.astype(str)
+                            df_cf.index = [str(x) for x in df_cf.index]
                             df_cf = df_cf.sort_index()
                             fig_cf = px.bar(df_cf, barmode='group', text_auto=',.0f', color_discrete_sequence=['#0284C7', '#059669'])
                             fig_cf.update_layout(

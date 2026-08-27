@@ -450,6 +450,41 @@ def test_msft_megacap_sin_nan_ni_error():
     assert len(res["fcff_pv_detalle"]) == 8, "Esperado 5 años + 3 fade = 8 filas"
 
 
+def test_fcff_valuation_nvda_calibracion():
+    """
+    Criterio 2: Verifica que para NVDA con FCF TTM (~$55B) y tasa de crecimiento
+    prospectiva del ~38.5% con Fade Period de 4 años, el modelo DCF/FCFF arroje
+    un Valor Intrínseco coherente en el rango de ~$210 - $218 por acción.
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist         = [60e9, 28e9, 5.6e9, 9.1e9],
+        capex_hist       = [5e9, 1.1e9, 1.8e9, 1.0e9],  # FCF TTM = 55e9
+        interest_hist    = [300e6, 250e6, 200e6],
+        pretax_hist      = [61e9, 32e9, 5e9],
+        taxprov_hist     = [8.5e9, 4.5e9, 600e6],       # Tax rate ~14%
+        total_debt       = 11.1e9,
+        total_cash       = 34.8e9,                      # Caja Neta Positiva
+        shares_diluted   = 24.5e9,
+        mcap             = 3_050e9,
+        beta             = 1.15,                        # Beta fundamental ajustada
+        rf               = 4.25,
+        precio_actual    = 125.0,
+        erp              = 4.5,
+        growth_rate_exp  = 0.39,                        # Crecimiento prospectivo Fase 1 (39%)
+        revenue_growth_api = 0.89,
+        revenue_ttm      = 96.3e9,
+        operating_margin_hist = 0.62,
+        fade_years       = 4,
+        g_term_override  = 0.025,
+    )
+
+    v_intr = res["valor_intrinseco"]
+    assert 205.0 <= v_intr <= 225.0, f"Valor Intrínseco NVDA fuera de rango esperado: {v_intr}"
+    assert res["fcff_base"] >= 50e9
+    assert res["wacc"] > 0
+    assert res["enterprise_value"] > 4_500e9
+
+
 class TestRefactorizacionV2(unittest.TestCase):
     """Suite unittest que envuelve los tests de refactorización v2."""
 
@@ -476,6 +511,9 @@ class TestRefactorizacionV2(unittest.TestCase):
 
     def test_msft_megacap(self):
         test_msft_megacap_sin_nan_ni_error()
+
+    def test_nvda_calibracion_dcf(self):
+        test_fcff_valuation_nvda_calibracion()
 
 
 if __name__ == "__main__":
