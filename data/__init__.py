@@ -16,6 +16,7 @@ from data.financial_fetcher import (
     obtener_kd_fmp_fred,
     obtener_datos_dividendos,
     obtener_noticias_financieras,
+    obtener_consenso_wall_street,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "obtener_kd_fmp_fred",
     "obtener_datos_dividendos",
     "obtener_noticias_financieras",
+    "obtener_consenso_wall_street",
 ]

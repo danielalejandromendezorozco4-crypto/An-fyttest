@@ -306,13 +306,147 @@ def _map_gics_sector(finnhub_industry: str) -> str:
     return finnhub_industry.title() if finnhub_industry else "General"
 
 
+def obtener_consenso_wall_street(
+    ticker: str,
+    finnhub_api_key: str = "",
+    target_data: Optional[Any] = None,
+    metrics_dict: Optional[Dict[str, Any]] = None,
+) -> Tuple[float, float, float]:
+    """
+    Extrae el precio objetivo de consenso de Wall Street (Mean, High, Low) siguiendo
+    una jerarquía multi-fuente defensiva:
+
+    1. Finnhub `/stock/price-target`: (targetMean, targetMedian, targetMeanPrice, etc.)
+    2. Finnhub `/stock/metric`: (targetPrice, targetMeanPrice, consensusPriceTarget)
+    3. yfinance (Fallback de Alta Disponibilidad):
+       - Prioridad 3.1: Atributo estructurado `ticker.analyst_price_targets` ('mean', 'median', 'current').
+       - Prioridad 3.2: Diccionario `ticker.info` ('targetMeanPrice', 'targetMedianPrice').
+       - Prioridad 3.3: Recomendaciones / estimaciones (`recommendations_summary` / `recommendations`).
+
+    Returns:
+        Tuple[float, float, float]: (target_mean, target_high, target_low)
+        Si el activo no tiene cobertura o es ETF/FIBRA sin cobertura, retorna (0.0, 0.0, 0.0).
+    """
+    ticker = str(ticker).upper().strip()
+    if not ticker:
+        return 0.0, 0.0, 0.0
+
+    target_mean_price = 0.0
+    target_high_price = 0.0
+    target_low_price = 0.0
+
+    # ── CAPA 1: Finnhub /stock/price-target ──
+    if target_data is None and finnhub_api_key:
+        try:
+            target_data = _finnhub_get("stock/price-target", {"symbol": ticker}, api_key=finnhub_api_key)
+        except Exception:
+            target_data = None
+
+    if target_data:
+        if isinstance(target_data, list) and len(target_data) > 0:
+            target_info = target_data[0] if isinstance(target_data[0], dict) else {}
+        elif isinstance(target_data, dict):
+            target_info = target_data
+        else:
+            target_info = {}
+
+        target_mean_val = (
+            target_info.get("targetMean")
+            or target_info.get("targetMedian")
+            or target_info.get("targetMeanPrice")
+            or target_info.get("targetMedianPrice")
+            or target_info.get("target_mean")
+            or target_info.get("target_median")
+            or target_info.get("priceTarget")
+            or target_info.get("targetPrice")
+        )
+        target_mean_price = safe_num(target_mean_val, 0.0)
+        target_high_price = safe_num(target_info.get("targetHigh", target_info.get("target_high", 0.0)))
+        target_low_price = safe_num(target_info.get("targetLow", target_info.get("target_low", 0.0)))
+
+        if target_mean_price <= 0.0 and target_high_price > 0.0 and target_low_price > 0.0:
+            target_mean_price = round((target_high_price + target_low_price) / 2.0, 2)
+
+    # ── CAPA 2: Finnhub /stock/metric ──
+    if target_mean_price <= 0.0 and metrics_dict:
+        target_mean_price = safe_num(
+            metrics_dict.get("targetPrice")
+            or metrics_dict.get("targetMeanPrice")
+            or metrics_dict.get("priceTarget")
+            or metrics_dict.get("targetMean")
+            or metrics_dict.get("targetMedian")
+            or metrics_dict.get("consensusPriceTarget")
+            or metrics_dict.get("targetPriceMean"),
+            0.0
+        )
+
+    # ── CAPA 3: Fallback yfinance (Jerarquía Robusta de Analistas) ──
+    if target_mean_price <= 0.0:
+        try:
+            import yfinance as yf
+            ticker_yf = yf.Ticker(ticker)
+
+            # Prioridad 3.1: Atributo estructurado analyst_price_targets
+            try:
+                apt = getattr(ticker_yf, "analyst_price_targets", None)
+                if isinstance(apt, dict) and apt:
+                    mean_val = safe_num(apt.get("mean") or apt.get("median") or apt.get("current"), 0.0)
+                    if mean_val > 0.0:
+                        target_mean_price = mean_val
+                        if target_high_price <= 0.0:
+                            target_high_price = safe_num(apt.get("high"), 0.0)
+                        if target_low_price <= 0.0:
+                            target_low_price = safe_num(apt.get("low"), 0.0)
+            except Exception as e_apt:
+                logger.debug("yfinance analyst_price_targets no disponible para %s: %s", ticker, e_apt)
+
+            # Prioridad 3.2: Diccionario info
+            if target_mean_price <= 0.0:
+                try:
+                    yf_info = getattr(ticker_yf, "info", None) or {}
+                    if isinstance(yf_info, dict) and yf_info:
+                        mean_val = safe_num(
+                            yf_info.get("targetMeanPrice")
+                            or yf_info.get("targetMedianPrice")
+                            or yf_info.get("targetPrice")
+                            or yf_info.get("target_mean_price"),
+                            0.0
+                        )
+                        if mean_val > 0.0:
+                            target_mean_price = mean_val
+                            if target_high_price <= 0.0:
+                                target_high_price = safe_num(yf_info.get("targetHighPrice"), 0.0)
+                            if target_low_price <= 0.0:
+                                target_low_price = safe_num(yf_info.get("targetLowPrice"), 0.0)
+                except Exception as e_info:
+                    logger.debug("yfinance info targetMeanPrice no disponible para %s: %s", ticker, e_info)
+
+            # Prioridad 3.3: recommendations_summary / recommendations
+            if target_mean_price <= 0.0:
+                try:
+                    rec_sum = getattr(ticker_yf, "recommendations_summary", None)
+                    if isinstance(rec_sum, pd.DataFrame) and not rec_sum.empty:
+                        for col in ["targetMeanPrice", "targetMedianPrice", "mean", "targetPrice", "target"]:
+                            if col in rec_sum.columns:
+                                val = safe_num(rec_sum[col].iloc[0], 0.0)
+                                if val > 0.0:
+                                    target_mean_price = val
+                                    break
+                except Exception as e_rec:
+                    logger.debug("yfinance recommendations_summary no disponible para %s: %s", ticker, e_rec)
+        except Exception as e_yf:
+            logger.debug("Fallback yfinance falló para %s: %s", ticker, e_yf)
+
+    return round(target_mean_price, 2), round(target_high_price, 2), round(target_low_price, 2)
+
+
 @st.cache_data(ttl=FINNHUB_CACHE_TTL_METRICS)
 def fetch_datos_fundamentales(
     ticker: str, finnhub_api_key: str = ""
 ) -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Extrae, homogeneiza y estructura el perfil corporativo, múltiplos clave y estados financieros
-    históricos y más recientes (MRQ / TTM) a partir de Finnhub API.
+    históricos y más recientes (MRQ / TTM) a partir de Finnhub API y fallbacks institucionales.
 
     Endpoints consumidos:
     - `/stock/profile2`: Perfil, market cap en millones, shares outstanding en millones.
@@ -381,48 +515,17 @@ def fetch_datos_fundamentales(
     industry_raw = prof_data.get("finnhubIndustry", "General")
     sector_std = _map_gics_sector(industry_raw)
 
-    # 3. Procesamiento de Métricas Básicas (/stock/metric) y Precio Objetivo (/stock/price-target)
+    # 3. Procesamiento de Métricas Básicas (/stock/metric) y Precio Objetivo
     metrics_dict = metric_data.get("metric", {}) if isinstance(metric_data, dict) else {}
     series_dict = metric_data.get("series", {}).get("annual", {}) if isinstance(metric_data, dict) else {}
 
-    # Normalización resiliente de la respuesta de price-target (dict o lista)
-    if isinstance(target_data, list) and len(target_data) > 0:
-        target_info = target_data[0] if isinstance(target_data[0], dict) else {}
-    elif isinstance(target_data, dict):
-        target_info = target_data
-    else:
-        target_info = {}
-
-    target_mean_val = (
-        target_info.get("targetMean")
-        or target_info.get("targetMedian")
-        or target_info.get("targetMeanPrice")
-        or target_info.get("targetMedianPrice")
-        or target_info.get("target_mean")
-        or target_info.get("target_median")
-        or target_info.get("priceTarget")
-        or target_info.get("targetPrice")
+    # Extracción jerárquica robusta de Consenso de Wall Street (Finnhub + Fallback yfinance)
+    target_mean_price, target_high_price, target_low_price = obtener_consenso_wall_street(
+        ticker=ticker,
+        finnhub_api_key=finnhub_api_key,
+        target_data=target_data,
+        metrics_dict=metrics_dict,
     )
-    target_mean_price = safe_num(target_mean_val, 0.0)
-    target_high_price = safe_num(target_info.get("targetHigh", target_info.get("target_high", 0.0)))
-    target_low_price = safe_num(target_info.get("targetLow", target_info.get("target_low", 0.0)))
-
-    # Fallback 1: Si no hay mean/median pero existen high y low positivos
-    if target_mean_price <= 0.0 and target_high_price > 0.0 and target_low_price > 0.0:
-        target_mean_price = round((target_high_price + target_low_price) / 2.0, 2)
-
-    # Fallback 2: Buscar en metrics_dict (/stock/metric)
-    if target_mean_price <= 0.0:
-        target_mean_price = safe_num(
-            metrics_dict.get("targetPrice")
-            or metrics_dict.get("targetMeanPrice")
-            or metrics_dict.get("priceTarget")
-            or metrics_dict.get("targetMean")
-            or metrics_dict.get("targetMedian")
-            or metrics_dict.get("consensusPriceTarget")
-            or metrics_dict.get("targetPriceMean"),
-            0.0
-        )
 
     beta = safe_num(metrics_dict.get("beta", 1.0), default=1.0)
     eps_ttm = safe_num(metrics_dict.get("epsTTM", metrics_dict.get("epsNormalizedAnnual", 0.0)))
@@ -1467,6 +1570,11 @@ def extraer_metricas_ttm(
         or info.get("target_mean"),
         0.0
     )
+    if target_mean_price <= 0.0 and info.get("symbol"):
+        sym = str(info.get("symbol")).upper().strip()
+        t_mean, _, _ = obtener_consenso_wall_street(sym)
+        if t_mean > 0.0:
+            target_mean_price = t_mean
 
     return {
         "shares_diluted": shares_diluted,

@@ -23,6 +23,7 @@ from data.financial_fetcher import (
     obtener_kd_finnhub_fred,
     obtener_noticias_financieras,
     obtener_session_finnhub,
+    obtener_consenso_wall_street,
     safe_num,
 )
 
@@ -432,4 +433,86 @@ class TestFinnhubConsensusPriceTarget:
 
         m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual=50.0)
         assert m_ttm["target_mean_price"] == 0.0
+
+    @patch("yfinance.Ticker")
+    def test_obtener_consenso_wall_street_yfinance_analyst_price_targets(self, mock_yf_ticker):
+        """Verifica fallback a yfinance.Ticker.analyst_price_targets para tickers como MA."""
+        mock_instance = MagicMock()
+        mock_instance.analyst_price_targets = {
+            "current": 598.47,
+            "high": 735.0,
+            "low": 550.0,
+            "mean": 667.30,
+            "median": 668.0,
+        }
+        mock_instance.info = {}
+        mock_yf_ticker.return_value = mock_instance
+
+        mean, high, low = obtener_consenso_wall_street("MA")
+        assert mean == 667.30
+        assert high == 735.0
+        assert low == 550.0
+
+    @patch("yfinance.Ticker")
+    def test_obtener_consenso_wall_street_yfinance_info_fallback(self, mock_yf_ticker):
+        """Verifica fallback a yfinance.Ticker.info cuando analyst_price_targets está vacío."""
+        mock_instance = MagicMock()
+        mock_instance.analyst_price_targets = None
+        mock_instance.info = {
+            "targetMeanPrice": 305.80,
+            "targetHighPrice": 500.0,
+            "targetLowPrice": 180.0,
+        }
+        mock_yf_ticker.return_value = mock_instance
+
+        mean, high, low = obtener_consenso_wall_street("NVDA")
+        assert mean == 305.80
+        assert high == 500.0
+        assert low == 180.0
+
+    @patch("yfinance.Ticker")
+    def test_obtener_consenso_wall_street_sin_cobertura_etf(self, mock_yf_ticker):
+        """Verifica que para activos como VOO sin analistas, retorne (0.0, 0.0, 0.0)."""
+        mock_instance = MagicMock()
+        mock_instance.analyst_price_targets = {}
+        mock_instance.info = {}
+        mock_yf_ticker.return_value = mock_instance
+
+        mean, high, low = obtener_consenso_wall_street("VOO")
+        assert mean == 0.0
+        assert high == 0.0
+        assert low == 0.0
+
+    @patch("yfinance.Ticker")
+    @patch("data.financial_fetcher._finnhub_get")
+    def test_fetch_datos_fundamentales_yfinance_integration(self, mock_finnhub_get, mock_yf_ticker):
+        """Verifica integración completa cuando Finnhub no tiene target y se recurre a yfinance."""
+        def finnhub_side_effect(endpoint, params=None, api_key="", timeout=8.0):
+            if endpoint == "stock/profile2":
+                return {"name": "Mastercard Inc", "ticker": "MA", "finnhubIndustry": "Credit Services", "marketCapitalization": 500000.0, "shareOutstanding": 930.0}
+            if endpoint == "stock/metric":
+                return {"metric": {}}
+            if endpoint == "stock/price-target":
+                return {}  # Finnhub sin target
+            return None
+
+        mock_finnhub_get.side_effect = finnhub_side_effect
+
+        mock_instance = MagicMock()
+        mock_instance.analyst_price_targets = {
+            "mean": 667.30,
+            "high": 735.0,
+            "low": 550.0,
+        }
+        mock_yf_ticker.return_value = mock_instance
+
+        info, inc, bs, cf = fetch_datos_fundamentales("MA", "key_test")
+
+        assert info["targetMeanPrice"] == 667.30
+        assert info["targetHighPrice"] == 735.0
+        assert info["targetLowPrice"] == 550.0
+
+        m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual=600.0)
+        assert m_ttm["target_mean_price"] == 667.30
+
 
