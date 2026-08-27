@@ -21,6 +21,7 @@ try:
         calcular_altman_zscore,
         calcular_scoring,
         evaluar_veredicto,
+        calcular_buyback_yield,
     )
 
     __all__ = [
@@ -39,6 +40,7 @@ try:
         "calcular_altman_zscore",
         "calcular_scoring",
         "evaluar_veredicto",
+        "calcular_buyback_yield",
     ]
 except ImportError:
     __all__ = []
