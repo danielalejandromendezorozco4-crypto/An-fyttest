@@ -616,6 +616,13 @@ def fetch_datos_fundamentales(
         pretax_inc = _get_val(["IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments", "PretaxIncome"], ["income before tax", "pretax income"], ic_map, ic_labels)
         tax_prov = _get_val(["IncomeTaxExpenseBenefit", "IncomeTaxExpense"], ["income tax"], ic_map, ic_labels)
         shares_dil = _get_val(["WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingDiluted"], ["diluted shares", "shares diluted"], ic_map, ic_labels)
+        eps_dil = _get_val(
+            ["EarningsPerShareDiluted", "DilutedEarningsPerShareBasicAndDiluted", "DilutedEPS", "EarningsPerShareBasic", "BasicEPS"],
+            ["diluted earnings per share", "diluted eps", "basic eps", "earnings per share"],
+            ic_map, ic_labels
+        )
+        if eps_dil == 0.0 and net_inc != 0.0 and (shares_dil or shares_outstanding) > 0:
+            eps_dil = net_inc / (shares_dil or shares_outstanding)
 
         inc_d = {
             "Total Revenue": rev,
@@ -625,6 +632,7 @@ def fetch_datos_fundamentales(
             "Interest Expense": int_exp,
             "Pretax Income": pretax_inc,
             "Tax Provision": tax_prov,
+            "Diluted EPS": eps_dil,
             "Diluted Average Shares": shares_dil or shares_outstanding,
             "Basic Average Shares": shares_dil or shares_outstanding,
         }
@@ -681,7 +689,16 @@ def fetch_datos_fundamentales(
 
         ocf = _get_val(["NetCashProvidedByUsedInOperatingActivities"], ["operating activities", "operating cash flow"], cf_map, cf_labels)
         capex = abs(_get_val(["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"], ["capital expenditure", "property, plant and equipment", "additions to property"], cf_map, cf_labels))
-        repurchase = abs(_get_val(["PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfStock"], ["repurchase of common stock", "repurchases of stock"], cf_map, cf_labels))
+        repurchase = abs(_get_val(
+            ["PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfStock", "PaymentsForRepurchaseOfEquity", "PaymentsForRepurchaseOfPreferredStockAndPreferenceStock"],
+            ["repurchase of common stock", "repurchases of stock", "common stock repurchased"],
+            cf_map, cf_labels
+        ))
+        da_val = abs(_get_val(
+            ["DepreciationDepletionAndAmortization", "DepreciationAndAmortization", "Depreciation", "AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment"],
+            ["depreciation and amortization", "depreciation", "amortization"],
+            cf_map, cf_labels
+        ))
         fcf = ocf - capex
 
         cf_d = {
@@ -689,6 +706,7 @@ def fetch_datos_fundamentales(
             "Capital Expenditure": capex,
             "Free Cash Flow": fcf,
             "Repurchase Of Capital Stock": repurchase,
+            "Depreciation & Amortization": da_val,
         }
 
         return inc_d, bs_d, cf_d
@@ -751,15 +769,22 @@ def fetch_datos_fundamentales(
                     "Repurchase Of Capital Stock": sum(q.get("Repurchase Of Capital Stock", 0.0) for q in q_cf_list),
                 }
 
-            # Calcular EPS YoY y Revenue YoY interanual comparando 4Q actuales vs 4Q anteriores
+            # Calcular EPS YoY y Revenue YoY interanual comparando 4Q actuales vs 4Q anteriores o t vs t-4
             if len(rep_list_q) >= 8:
                 q_inc_prev = [_parse_filing_report(fq)[0] for fq in rep_list_q[4:8]]
                 prev_ttm_ni = sum(q.get("Net Income", 0.0) for q in q_inc_prev)
                 prev_ttm_rev = sum(q.get("Total Revenue", 0.0) for q in q_inc_prev)
-                if prev_ttm_ni > 0 and ttm_ni > 0:
+                if prev_ttm_ni > 0 and ttm_ni > 0 and eps_growth == 0.0:
                     eps_growth = (ttm_ni - prev_ttm_ni) / prev_ttm_ni
-                if prev_ttm_rev > 0 and ttm_rev > 0:
+                if prev_ttm_rev > 0 and ttm_rev > 0 and rev_growth == 0.0:
                     rev_growth = (ttm_rev - prev_ttm_rev) / prev_ttm_rev
+            elif len(rep_list_q) >= 5 and eps_growth == 0.0:
+                q_curr_ic = _parse_filing_report(rep_list_q[0])[0]
+                q_prev_ic = _parse_filing_report(rep_list_q[4])[0]
+                q_curr_eps = q_curr_ic.get("Diluted EPS", 0.0) or (q_curr_ic.get("Net Income", 0.0) / shares_outstanding if shares_outstanding > 0 else 0.0)
+                q_prev_eps = q_prev_ic.get("Diluted EPS", 0.0) or (q_prev_ic.get("Net Income", 0.0) / shares_outstanding if shares_outstanding > 0 else 0.0)
+                if q_curr_eps > 0 and q_prev_eps > 0:
+                    eps_growth = (q_curr_eps - q_prev_eps) / q_prev_eps
 
     # Procesar serie anual (hasta 6 años para garantizar al menos 5 períodos completos)
     if isinstance(rep_list_a, list) and len(rep_list_a) > 0:
@@ -926,7 +951,7 @@ def fetch_datos_fundamentales(
                     rev_growth = yf_rg
 
                 yf_peg = safe_num(yf_info.get("pegRatio"), 0.0)
-                if yf_peg > 0.0 and (peg_val <= 0.0 or abs(peg_val - yf_peg) < 1.5):
+                if yf_peg > 0.0 and peg_val <= 0.0:
                     peg_val = yf_peg
 
                 # Target Price
@@ -1516,11 +1541,21 @@ def extraer_metricas_ttm(
             "Normalized EBIT", "Normalized Operating Profit"
         ], default=0.0)
 
+    da_ttm = _extraer_val_df(cf, [
+        "Depreciation & Amortization", "Depreciation And Amortization",
+        "Depreciation Amortization Depletion", "Depreciation", "DepreciationAmortization"
+    ], default=0.0)
+    if da_ttm == 0.0:
+        da_ttm = _extraer_val_df(inc, [
+            "Reconciled Depreciation", "Depreciation And Amortization In Income Statement",
+            "Depreciation & Amortization", "Depreciation"
+        ], default=0.0)
+
     ebitda_ttm = safe_num(info.get("ebitda", 0.0), 0.0)
     if ebitda_ttm <= 0:
         ebitda_ttm = _extraer_val_df(inc, ["EBITDA", "Normalized EBITDA", "ebitda"], default=0.0)
     if ebitda_ttm <= 0 and operating_income_ttm > 0:
-        ebitda_ttm = operating_income_ttm * 1.15
+        ebitda_ttm = operating_income_ttm + (da_ttm if da_ttm > 0 else operating_income_ttm * 0.15)
 
     net_income_ttm = safe_num(info.get("netIncomeToCommon", 0.0), 0.0)
     if net_income_ttm == 0.0:

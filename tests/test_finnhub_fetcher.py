@@ -516,3 +516,129 @@ class TestFinnhubConsensusPriceTarget:
         assert m_ttm["target_mean_price"] == 667.30
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. PRUEBAS DE ESTANDARIZACIÓN DE MÉTRICAS Y FALLBACKS (FINHUB + BENCHMARKS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFinnhubStandardMetricsAndFallbacks:
+    @patch("data.financial_fetcher._finnhub_get")
+    def test_finnhub_direct_metrics_extraction(self, mock_get):
+        """Verifica que epsGrowthQuarterlyYoy, roicTTM, pegTTM, ebitdaTTM se extraigan fielmente."""
+        def side_effect(endpoint, params=None, api_key="", timeout=8.0):
+            if endpoint == "stock/profile2":
+                return {"name": "Microsoft Corp", "ticker": "MSFT", "finnhubIndustry": "Technology", "marketCapitalization": 3100000.0, "shareOutstanding": 7430.0}
+            if endpoint == "stock/metric":
+                return {
+                    "metric": {
+                        "beta": 1.20,
+                        "epsTTM": 11.80,
+                        "peTTM": 35.0,
+                        "epsGrowthQuarterlyYoy": 10.5,
+                        "epsGrowthTTMYoy": 12.2,
+                        "roicTTM": 29.5,
+                        "pegTTM": 2.10,
+                        "ebitdaTTM": 140000000000.0,
+                        "fcfTTM": 75000000000.0,
+                        "roeTTM": 38.5,
+                        "roaTTM": 19.8,
+                    }
+                }
+            if endpoint == "stock/price-target":
+                return {"symbol": "MSFT", "targetMean": 500.0, "targetMedian": 495.0, "targetHigh": 600.0, "targetLow": 450.0}
+            return None
+
+        mock_get.side_effect = side_effect
+        info, inc, bs, cf = fetch_datos_fundamentales("MSFT", "key_test")
+
+        assert info["earningsGrowth"] == pytest.approx(0.122, abs=0.01)
+        assert info["roic"] == pytest.approx(29.5, abs=0.1)
+        assert info["pegRatio"] == pytest.approx(2.10, abs=0.1)
+        assert info["ebitda"] == pytest.approx(140e9, rel=1e-3)
+        assert info["freeCashflow"] == pytest.approx(75e9, rel=1e-3)
+        assert info["targetMeanPrice"] == pytest.approx(500.0, abs=0.1)
+
+    def test_eps_yoy_quarterly_t_minus_4_fallback(self):
+        """Verifica el cálculo de EPS YoY comparando trimestre t contra t-4."""
+        inc_q = pd.DataFrame({
+            "2024Q3": [3.20, 24_000_000_000.0],
+            "2024Q2": [3.10, 23_000_000_000.0],
+            "2024Q1": [3.00, 22_000_000_000.0],
+            "2023Q4": [2.90, 21_000_000_000.0],
+            "2023Q3": [2.70, 20_000_000_000.0],
+        }, index=["Diluted EPS", "Net Income"])
+
+        info = {"symbol": "MSFT", "trailingEps": 12.20}
+        m = extraer_metricas_ttm(info, inc_q, pd.DataFrame(), pd.DataFrame(), precio_actual=420.0)
+
+        # (3.20 - 3.10) / 3.10 = 3.22% o (3.20 - 2.70) / 2.70 = 18.52%
+        assert m["earnings_growth"] > 0.0
+
+    def test_roic_fallback_formula_standard(self):
+        """Verifica la fórmula NOPAT / (Total Assets - Current Liabilities - Cash & Equivalents)."""
+        from engine.metrics import calcular_ratios_rentabilidad
+
+        rev = 200_000_000_000.0
+        op_inc = 60_000_000_000.0
+        net_inc = 50_000_000_000.0
+        total_assets = 300_000_000_000.0
+        current_liab = 80_000_000_000.0
+        total_cash = 40_000_000_000.0
+        total_debt = 50_000_000_000.0
+        total_equity = 170_000_000_000.0
+        tax_rate = 0.20
+
+        # NOPAT = 60B * (1 - 0.20) = 48B
+        # Invested Capital = 300B - 80B = 220B (Operating CL approach)
+        # ROIC = 48B / 220B * 100 = 21.82%
+        res = calcular_ratios_rentabilidad(
+            revenue_ttm=rev,
+            gross_profit_ttm=rev * 0.7,
+            operating_income_ttm=op_inc,
+            net_income_ttm=net_inc,
+            total_assets=total_assets,
+            total_equity=total_equity,
+            total_debt=total_debt,
+            total_cash=total_cash,
+            current_liabilities=current_liab,
+            short_term_debt=5_000_000_000.0,
+            tax_rate=tax_rate,
+        )
+
+        assert 20.0 <= res["roic"] <= 26.0
+        assert res["col_roic"] == "🟢"
+
+    def test_multiplos_ev_ebitda_y_pfcf_consistencia(self):
+        """Verifica que EV/EBITDA y P/FCF apliquen exactamente sus fórmulas de mercado."""
+        from engine.metrics import calcular_multiplos_valuacion
+
+        mcap = 2_000_000_000_000.0
+        precio = 180.0
+        eps = 6.0
+        fcf = 80_000_000_000.0
+        ebitda = 100_000_000_000.0
+        total_debt = 120_000_000_000.0
+        total_cash = 70_000_000_000.0
+        peg_info = 1.95
+
+        res = calcular_multiplos_valuacion(
+            precio_actual=precio,
+            mcap=mcap,
+            eps_ttm=eps,
+            fcf_ttm=fcf,
+            ebitda_ttm=ebitda,
+            total_debt=total_debt,
+            total_cash=total_cash,
+            peg_info=peg_info,
+        )
+
+        # Enterprise Value = 2T + 120B - 70B = 2.05T
+        # EV/EBITDA = 2.05T / 100B = 20.5x
+        assert res["enterprise_value"] == pytest.approx(2.05e12, rel=1e-3)
+        assert res["ev_ebitda"] == pytest.approx(20.5, abs=0.1)
+
+        # P/FCF = 2T / 80B = 25.0x
+        assert res["p_fcf"] == pytest.approx(25.0, abs=0.1)
+        assert res["peg"] == pytest.approx(1.95, abs=0.05)
+
+
+
