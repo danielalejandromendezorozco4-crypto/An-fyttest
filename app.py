@@ -567,11 +567,15 @@ else:
 
             p_s = res_mult["p_s"]
             p_s_str = res_mult["p_s_str"]
-            p_b = res_mult["p_b"]
             target = safe_num(m_ttm.get("target_mean_price", 0.0), 0.0)
+            if target <= 0.0 and precio_actual > 0:
+                t_mean_fb, _, _ = obtener_consenso_wall_street(ticker_input, finnhub_key)
+                if t_mean_fb > 0.0:
+                    target = t_mean_fb
+
             if target > 0 and precio_actual > 0:
                 upside = ((target - precio_actual) / precio_actual) * 100.0
-                col_upside = "🟢" if upside > 0 else ("🔴" if upside < 0 else "🟡")
+                col_upside = "🟢" if upside >= 5.0 else ("🟡" if upside >= -5.0 else "🔴")
                 val_target_str = f"${target:,.2f}"
                 delta_target_str = f"{upside:+.1f}% vs Mercado"
             else:

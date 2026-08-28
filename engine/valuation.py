@@ -410,13 +410,21 @@ def calcular_fcff_valuation(
     deuda_neta       = total_debt - total_cash
     equity_value     = enterprise_value - deuda_neta
 
-    buyback_rate_    = max(min(float(buyback_rate), 0.20), -0.10)
-    shares_count     = float(shares_diluted)
+    buyback_rate_val = float(buyback_rate) if buyback_rate is not None else 0.0
+    if buyback_rate_val > 1.0:
+        buyback_rate_val = buyback_rate_val / 100.0
+    buyback_rate_ = max(min(buyback_rate_val, 0.08), -0.05)
+
+    shares_count = float(shares_diluted)
     if mcap > 10_000_000 and precio_actual > 0:
         implied_sh = mcap / precio_actual
         if shares_count <= 1000 or shares_count < implied_sh * 0.01 or shares_count > implied_sh * 100:
             shares_count = implied_sh
-    shares_efectivas = max(shares_count * ((1.0 - buyback_rate_) ** n_total), 1.0)
+
+    if buyback_rate_ != 0.0:
+        shares_efectivas = max(shares_count * ((1.0 - buyback_rate_) ** n_total), 1.0)
+    else:
+        shares_efectivas = max(shares_count, 1.0)
     valor_intrinseco = max(equity_value / shares_efectivas, 0.0)
 
     # 10. Margen de Seguridad y Precios Objetivo

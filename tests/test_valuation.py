@@ -485,6 +485,157 @@ def test_fcff_valuation_nvda_calibracion():
     assert res["enterprise_value"] > 4_500e9
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. PRUEBAS DE CALIBRACIÓN DE VALUACIÓN DCF/WACC Y CONSENSO WALL STREET
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_fcff_valuation_mastercard_mercado_congruente():
+    """
+    Criterio 1: Verifica que para Mastercard (MA) con parámetros de mercado estándar
+    (g=2.5%, WACC ~7.5%-9.5%, OCF ~$13.5B, CapEx ~$0.6B, EBIT ~$16B, Debt ~$16B, Cash ~$8.5B),
+    el modelo FCFF genere un Valor Intrínseco congruente con el mercado (~$300-$750)
+    y no valores inflados por recompras históricas.
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist=[13.5e9, 11.5e9, 10.0e9],
+        capex_hist=[0.6e9, 0.5e9, 0.45e9],
+        interest_hist=[0.55e9, 0.45e9, 0.4e9],
+        pretax_hist=[15.0e9, 13.0e9, 11.5e9],
+        taxprov_hist=[2.8e9, 2.3e9, 2.0e9],
+        total_debt=16.0e9,
+        total_cash=8.5e9,
+        shares_diluted=894e6,
+        mcap=520e9,
+        beta=1.05,
+        rf=4.25,
+        precio_actual=598.47,
+        revenue_ttm=27.0e9,
+        revenue_growth_api=0.12,
+        operating_margin_hist=0.58,
+        ebit_hist=[16.0e9, 14.0e9, 12.5e9],
+        da_hist=[0.9e9, 0.8e9, 0.7e9],
+        delta_nwc_hist=[0.2e9, 0.15e9, 0.1e9],
+        buyback_rate=0.0,
+        fade_years=3,
+        g_term_override=0.025,
+    )
+    v_intr = res["valor_intrinseco"]
+    wacc = res["wacc"]
+    assert 300.0 <= v_intr <= 750.0, f"Valor intrínseco de MA fuera de rango: {v_intr}"
+    assert 7.0 <= wacc <= 10.0, f"WACC de MA fuera de rango: {wacc}"
+    assert res["enterprise_value"] > res["equity_value"], "EV debe ser mayor a Equity cuando Deuda Neta > 0"
+    assert abs(res["deuda_neta"] - 7.5e9) < 1e6
+
+
+def test_fcff_valuation_apple_mercado_congruente():
+    """
+    Criterio 1: Verifica que para Apple (AAPL) con WACC ~9%-10.5%, g=2.5%, OCF ~$118B, CapEx ~$10B,
+    el Valor Intrínseco se ubique en rango congruente de mercado (~$120-$280).
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist=[118e9, 110e9, 122e9],
+        capex_hist=[10.5e9, 11.0e9, 10.0e9],
+        interest_hist=[3.6e9, 3.8e9, 2.9e9],
+        pretax_hist=[125e9, 115e9, 119e9],
+        taxprov_hist=[19e9, 17e9, 18e9],
+        total_debt=105e9,
+        total_cash=65e9,
+        shares_diluted=15.2e9,
+        mcap=3400e9,
+        beta=1.10,
+        rf=4.20,
+        precio_actual=230.0,
+        revenue_ttm=395e9,
+        revenue_growth_api=0.08,
+        operating_margin_hist=0.31,
+        ebit_hist=[123e9, 114e9, 119e9],
+        da_hist=[11.5e9, 11.0e9, 11.5e9],
+        delta_nwc_hist=[1.0e9, 0.5e9, 0.8e9],
+        buyback_rate=0.0,
+        fade_years=3,
+        g_term_override=0.025,
+    )
+    v_intr = res["valor_intrinseco"]
+    wacc = res["wacc"]
+    assert 120.0 <= v_intr <= 280.0, f"Valor intrínseco de AAPL fuera de rango: {v_intr}"
+    assert 8.5 <= wacc <= 10.5, f"WACC de AAPL fuera de rango: {wacc}"
+    assert res["equity_value"] == round(res["enterprise_value"] - res["deuda_neta"], 2)
+
+
+def test_ev_to_equity_bridge_deuda_neta_exacto():
+    """
+    Criterio 2: Verifica el puente financiero exacto:
+    Enterprise Value = PV(Flujos) + PV(Terminal Value)
+    Equity Value = Enterprise Value - (Total Debt - Total Cash)
+    Valor Intrínseco por acción = Equity Value / Shares
+    """
+    res = calcular_fcff_valuation(
+        ocf_hist=[100e6],
+        capex_hist=[20e6],
+        interest_hist=[10e6],
+        pretax_hist=[80e6],
+        taxprov_hist=[16e6],
+        total_debt=50e6,
+        total_cash=20e6,      # Deuda neta = 30e6
+        shares_diluted=10e6,
+        mcap=800e6,
+        beta=1.0,
+        rf=4.0,
+        precio_actual=80.0,
+        g_term_override=0.025,
+    )
+    ev = res["enterprise_value"]
+    dn = res["deuda_neta"]
+    eq = res["equity_value"]
+    vi = res["valor_intrinseco"]
+    sh = res["shares_efectivas"]
+
+    assert abs(dn - 30e6) < 1.0
+    assert abs(eq - (ev - dn)) < 1.0
+    assert abs(vi - round(eq / sh, 2)) < 0.05
+
+
+def test_wacc_ponderacion_estricta_market_cap():
+    """
+    Verifica que las ponderaciones We y Wd se calculen sobre Market Cap + Total Debt
+    y nunca sobre el valor contable de capital (Book Value).
+    """
+    mcap = 500e9
+    total_debt = 25e9
+    res = calcular_wacc(
+        tasa_libre_riesgo=4.0,
+        beta=1.0,
+        mcap=mcap,
+        total_debt=total_debt,
+        int_exp=1.25e9,  # Kd = 5.0%
+        tax_rate=0.20,
+        erp=5.0,
+    )
+    assert abs(res["we"] - (500.0 / 525.0)) < 0.001
+    assert abs(res["wd"] - (25.0 / 525.0)) < 0.001
+    assert abs(res["ke"] - 9.0) < 0.01
+    assert abs(res["kd"] - 5.0) < 0.01
+
+
+def test_buyback_rate_normalizacion_y_limites():
+    """
+    Verifica que buyback_rate acepte tanto porcentajes (2.5) como decimales (0.025)
+    y no produzca saltos desproporcionados ni divisiones por cero.
+    """
+    res_dec = calcular_fcff_valuation(
+        ocf_hist=[100e6], capex_hist=[20e6], interest_hist=[5e6], pretax_hist=[80e6],
+        taxprov_hist=[16e6], total_debt=10e6, total_cash=10e6, shares_diluted=10e6,
+        mcap=500e6, beta=1.0, rf=4.0, precio_actual=50.0, buyback_rate=0.025
+    )
+    res_pct = calcular_fcff_valuation(
+        ocf_hist=[100e6], capex_hist=[20e6], interest_hist=[5e6], pretax_hist=[80e6],
+        taxprov_hist=[16e6], total_debt=10e6, total_cash=10e6, shares_diluted=10e6,
+        mcap=500e6, beta=1.0, rf=4.0, precio_actual=50.0, buyback_rate=2.5
+    )
+    assert abs(res_dec["valor_intrinseco"] - res_pct["valor_intrinseco"]) < 0.05
+    assert res_dec["shares_efectivas"] < 10e6
+
+
 class TestRefactorizacionV2(unittest.TestCase):
     """Suite unittest que envuelve los tests de refactorización v2."""
 
@@ -514,6 +665,21 @@ class TestRefactorizacionV2(unittest.TestCase):
 
     def test_nvda_calibracion_dcf(self):
         test_fcff_valuation_nvda_calibracion()
+
+    def test_ma_mercado_congruente(self):
+        test_fcff_valuation_mastercard_mercado_congruente()
+
+    def test_aapl_mercado_congruente(self):
+        test_fcff_valuation_apple_mercado_congruente()
+
+    def test_bridge_deuda_neta(self):
+        test_ev_to_equity_bridge_deuda_neta_exacto()
+
+    def test_wacc_market_cap_we_wd(self):
+        test_wacc_ponderacion_estricta_market_cap()
+
+    def test_buyback_norm(self):
+        test_buyback_rate_normalizacion_y_limites()
 
 
 if __name__ == "__main__":
