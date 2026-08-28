@@ -857,6 +857,22 @@ class TestMetricsUnittest(unittest.TestCase):
     def test_buyback_yield_sin_recompras(self):
         test_calcular_buyback_yield_sin_recompras_o_etf()
 
+    def test_homologacion_ma(self):
+        test_homologacion_metricas_finviz_mastercard_ma()
+
+    def test_peg_forward_ma(self):
+        test_calibracion_peg_forward_ma()
+
+    def test_eps_yoy_ma(self):
+        test_eps_growth_yoy_homogeneo_ma()
+
+    def test_roic_ma(self):
+        test_roic_mastercard_capital_structure()
+
+    def test_aapl_completo(self):
+        test_calibracion_aapl_completo()
+
+
 def test_homologacion_metricas_finviz_mastercard_ma():
     """
     Verifica que los múltiplos de valuación y rentabilidad para Mastercard (MA)
@@ -873,7 +889,7 @@ def test_homologacion_metricas_finviz_mastercard_ma():
     rev = 28_000_000_000.0
     total_equity = 3_100_000_000.0
     total_assets = 46_000_000_000.0
-    peg_info = 1.78
+    peg_info = 1.58
     earnings_growth = 0.221
     roe_finviz = 241.2
     roa_finviz = 29.8
@@ -905,8 +921,10 @@ def test_homologacion_metricas_finviz_mastercard_ma():
     assert res_mult["ev_ebitda"] == pytest.approx(24.2, abs=0.5)
     # P/FCF ~30.9x
     assert res_mult["p_fcf"] == pytest.approx(30.9, abs=1.5)
-    # PEG ~1.78x
-    assert res_mult["peg"] == pytest.approx(1.78, abs=0.1)
+    # PEG ~1.58x (Válido numérico, no N/A)
+    assert res_mult["peg"] == pytest.approx(1.58, abs=0.1)
+    assert res_mult["peg_str"] != "N/A"
+    assert "1.5" in res_mult["peg_str"] or "1.6" in res_mult["peg_str"]
 
     # Rentabilidad
     res_rent = calcular_ratios_rentabilidad(
@@ -916,6 +934,10 @@ def test_homologacion_metricas_finviz_mastercard_ma():
         net_income_ttm=11_500_000_000.0,
         total_assets=total_assets,
         total_equity=total_equity,
+        total_debt=total_debt,
+        total_cash=total_cash,
+        current_liabilities=16_000_000_000.0,
+        short_term_debt=1_500_000_000.0,
         roe_fallback=roe_finviz,
         roa_fallback=roa_finviz,
         roic_fallback=roic_finviz,
@@ -924,6 +946,177 @@ def test_homologacion_metricas_finviz_mastercard_ma():
     assert res_rent["roe"] == pytest.approx(241.2, abs=1.0)
     assert 24.0 <= res_rent["roa"] <= 31.0
     assert res_rent["roic"] == pytest.approx(58.5, abs=1.0)
+    assert res_rent["roic"] < 80.0
+
+
+def test_calibracion_peg_forward_ma():
+    """
+    Criterio 1: Verifica que al evaluar 'MA', el PEG Forward muestre un valor numérico válido
+    (en el rango ~1.5x a 1.65x) en lugar de 'N/A'.
+    """
+    precio = 598.47
+    eps_ttm = 18.16
+    fwd_eps = 23.00
+    earnings_growth = 0.221  # 22.1% YoY
+
+    # Caso A: Con peg_info explícito
+    res_a = calcular_multiplos_valuacion(
+        precio_actual=precio,
+        mcap=524e9,
+        eps_ttm=eps_ttm,
+        forward_eps=fwd_eps,
+        peg_info=1.58,
+        earnings_growth=earnings_growth,
+    )
+    assert res_a["peg"] == pytest.approx(1.58, abs=0.05)
+    assert res_a["peg_str"] != "N/A"
+    assert "x" in res_a["peg_str"]
+
+    # Caso B: Sin peg_info, calculado automáticamente vía Forward P/E / Crecimiento
+    res_b = calcular_multiplos_valuacion(
+        precio_actual=precio,
+        mcap=524e9,
+        eps_ttm=eps_ttm,
+        forward_eps=fwd_eps,
+        peg_info=0.0,
+        earnings_growth=0.165,  # ~16.5% crecimiento consenso forward
+    )
+    # Forward P/E = 598.47 / 23.00 = 26.02x
+    # PEG = 26.02 / 16.5 = 1.577x (~1.58x)
+    assert res_b["peg"] == pytest.approx(1.58, abs=0.10)
+    assert res_b["peg_str"] != "N/A"
+    assert "1.5" in res_b["peg_str"] or "1.6" in res_b["peg_str"]
+
+    # Caso C: Extraer métricas TTM desde info sintética de MA
+    info_ma = {
+        "symbol": "MA",
+        "trailingEps": 18.16,
+        "forwardEps": 23.00,
+        "forwardPE": 26.02,
+        "trailingPE": 32.95,
+        "pegRatio": 1.58,
+        "earningsGrowth": 0.221,
+        "marketCap": 524e9,
+        "sharesOutstanding": 894e6,
+    }
+    m = extraer_metricas_ttm(info_ma, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), precio_actual=precio)
+    assert m["peg_ratio_info"] == pytest.approx(1.58, abs=0.1)
+
+
+def test_eps_growth_yoy_homogeneo_ma():
+    """
+    Criterio 2: Verifica que el EPS YoY para 'MA' refleje un crecimiento coherente y positivo
+    según los últimos reportes TTM (rango de mercado de ~15% a 22%).
+    """
+    # Comparativa homogénea de Income Statement anual
+    inc_ma = pd.DataFrame({
+        "2024": [13.90, 12_900_000_000.0],
+        "2023": [12.26, 11_200_000_000.0],
+        "2022": [10.22, 9_900_000_000.0],
+    }, index=["Diluted EPS", "Net Income"])
+
+    info_ma = {
+        "symbol": "MA",
+        "trailingEps": 18.16,
+        "earningsGrowth": 0.221,  # 22.1%
+    }
+    m = extraer_metricas_ttm(info_ma, inc_ma, pd.DataFrame(), pd.DataFrame(), precio_actual=598.47)
+
+    assert 0.15 <= m["earnings_growth"] <= 0.23, f"EPS YoY fuera de rango esperado: {m['earnings_growth']}"
+
+    # Caso fallback a partir de DataFrame con filas de EPS
+    info_ma_sin_eg = {"symbol": "MA", "trailingEps": 18.16}
+    m_calc = extraer_metricas_ttm(info_ma_sin_eg, inc_ma, pd.DataFrame(), pd.DataFrame(), precio_actual=598.47)
+    # (13.90 - 12.26) / 12.26 = 13.38% o (12.9B - 11.2B) / 11.2B = 15.18%
+    assert 0.13 <= m_calc["earnings_growth"] <= 0.22
+
+
+def test_roic_mastercard_capital_structure():
+    """
+    Criterio 3: Verifica que el ROIC para 'MA' coincida con el rango estándar de mercado (~58% a 60%)
+    en lugar de distorsiones superiores al 80%, considerando la estructura de capital con recompras agresivas.
+    """
+    # Parámetros institucionales representativos de Mastercard (MA)
+    rev_ttm = 28_000_000_000.0
+    op_inc_ttm = 16_000_000_000.0
+    net_inc_ttm = 11_500_000_000.0
+    total_assets = 46_000_000_000.0
+    total_equity = 3_100_000_000.0   # Deprimido contablemente por recompras
+    total_debt = 24_640_000_000.0
+    total_cash = 11_610_000_000.0
+    current_liab = 16_000_000_000.0
+    short_debt = 1_500_000_000.0
+    tax_rate = 0.21
+
+    res = calcular_ratios_rentabilidad(
+        revenue_ttm=rev_ttm,
+        gross_profit_ttm=rev_ttm,
+        operating_income_ttm=op_inc_ttm,
+        net_income_ttm=net_inc_ttm,
+        total_assets=total_assets,
+        total_equity=total_equity,
+        total_debt=total_debt,
+        total_cash=total_cash,
+        current_liabilities=current_liab,
+        short_term_debt=short_debt,
+        tax_rate=tax_rate,
+        is_asset_light=True,
+        roic_fallback=58.5,  # Consenso Finviz / Morningstar
+    )
+
+    # ROIC debe estar estrictamente en el rango de ~58% a 60%
+    assert 57.0 <= res["roic"] <= 61.0, f"ROIC fuera de rango institucional: {res['roic']}"
+    assert res["roic"] < 80.0, "ROIC no debe distorsionarse por encima del 80%"
+    assert res["col_roic"] == "🟢"
+
+
+def test_calibracion_aapl_completo():
+    """
+    Criterio 4: Verifica que las métricas (PEG Forward, EPS YoY y ROIC) se calculen
+    adecuadamente para Apple (AAPL).
+    """
+    precio = 230.0
+    eps_ttm = 6.50
+    fwd_eps = 7.50
+    earnings_growth = 0.12  # 12% YoY
+    rev = 390_000_000_000.0
+    op_inc = 120_000_000_000.0
+    net_inc = 100_000_000_000.0
+    total_assets = 350_000_000_000.0
+    total_equity = 70_000_000_000.0
+    total_debt = 100_000_000_000.0
+    total_cash = 60_000_000_000.0
+    current_liab = 130_000_000_000.0
+    short_debt = 15_000_000_000.0
+
+    res_mult = calcular_multiplos_valuacion(
+        precio_actual=precio,
+        mcap=3_500e9,
+        eps_ttm=eps_ttm,
+        forward_eps=fwd_eps,
+        peg_info=2.50,
+        earnings_growth=earnings_growth,
+    )
+    assert res_mult["peg"] == pytest.approx(2.50, abs=0.1)
+    assert res_mult["peg_str"] != "N/A"
+
+    res_rent = calcular_ratios_rentabilidad(
+        revenue_ttm=rev,
+        gross_profit_ttm=175e9,
+        operating_income_ttm=op_inc,
+        net_income_ttm=net_inc,
+        total_assets=total_assets,
+        total_equity=total_equity,
+        total_debt=total_debt,
+        total_cash=total_cash,
+        current_liabilities=current_liab,
+        short_term_debt=short_debt,
+        tax_rate=0.16,
+        is_asset_light=True,
+        roic_fallback=55.0,
+    )
+    assert 45.0 <= res_rent["roic"] <= 65.0
+    assert res_rent["col_roic"] == "🟢"
 
 
 def test_calcular_buyback_yield_columnas_ascendentes_cronologicas():
@@ -947,6 +1140,7 @@ def test_calcular_buyback_yield_columnas_ascendentes_cronologicas():
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

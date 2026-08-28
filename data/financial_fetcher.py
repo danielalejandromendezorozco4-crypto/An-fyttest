@@ -545,6 +545,9 @@ def fetch_datos_fundamentales(
     beta = safe_num(metrics_dict.get("beta", 1.0), default=1.0)
     eps_ttm = safe_num(metrics_dict.get("epsTTM", metrics_dict.get("epsNormalizedAnnual", 0.0)))
     pe_ttm = safe_num(metrics_dict.get("peTTM", metrics_dict.get("peAnnual", 0.0)))
+    forward_eps = safe_num(metrics_dict.get("epsForward", 0.0))
+    pe_fwd = safe_num(metrics_dict.get("peForward", metrics_dict.get("forwardPE", 0.0)))
+    peg_val = safe_num(metrics_dict.get("pegTTM", metrics_dict.get("pegAnnual", metrics_dict.get("pegNormalizedAnnual", 0.0))))
     div_rate = safe_num(metrics_dict.get("dividendPerShareTTM", metrics_dict.get("dividendPerShareAnnual", 0.0)))
     div_yield_ind = safe_num(metrics_dict.get("dividendYieldIndicatedAnnual", metrics_dict.get("dividendYieldTTM", 0.0)))
     current_ratio = safe_num(metrics_dict.get("currentRatioQuarterly", metrics_dict.get("currentRatioAnnual", 0.0)), default=0.0)
@@ -558,7 +561,7 @@ def fetch_datos_fundamentales(
     op_margins = op_margins_raw / 100.0 if op_margins_raw > 1.0 else op_margins_raw
     rev_growth_raw = safe_num(metrics_dict.get("revenueGrowthTTMYoy", metrics_dict.get("revenueGrowthQuarterlyYoy", metrics_dict.get("revenueGrowth3Y", 0.0))))
     rev_growth = rev_growth_raw / 100.0 if abs(rev_growth_raw) > 1.0 else rev_growth_raw
-    eps_growth_raw = safe_num(metrics_dict.get("epsGrowthTTMYoy", metrics_dict.get("epsGrowthAnnual", metrics_dict.get("epsGrowth3Y", 0.0))))
+    eps_growth_raw = safe_num(metrics_dict.get("epsGrowthTTMYoy", metrics_dict.get("epsGrowthQuarterlyYoy", metrics_dict.get("epsGrowthAnnual", metrics_dict.get("epsGrowth3Y", 0.0)))))
     eps_growth = eps_growth_raw / 100.0 if abs(eps_growth_raw) > 1.0 else eps_growth_raw
 
     # 4. Funciones auxiliares de parseo XBRL
@@ -860,8 +863,12 @@ def fetch_datos_fundamentales(
                     beta = safe_num(yf_info.get("beta"), 1.0)
                 if eps_ttm <= 0.0:
                     eps_ttm = safe_num(yf_info.get("trailingEps"), 0.0)
+                if forward_eps <= 0.0:
+                    forward_eps = safe_num(yf_info.get("forwardEps"), 0.0)
                 if pe_ttm <= 0.0:
                     pe_ttm = safe_num(yf_info.get("trailingPE"), 0.0)
+                if pe_fwd <= 0.0:
+                    pe_fwd = safe_num(yf_info.get("forwardPE"), 0.0)
                 if div_rate <= 0.0:
                     div_rate = safe_num(yf_info.get("dividendRate"), 0.0)
                 if div_yield_ind <= 0.0:
@@ -910,14 +917,17 @@ def fetch_datos_fundamentales(
                 if ebit_val <= 0.0:
                     ebit_val = safe_num(yf_info.get("operatingIncome"), ebitda_val * 0.85 if ebitda_val > 0 else 0.0)
 
-                if eps_growth == 0.0:
-                    eps_growth = safe_num(yf_info.get("earningsGrowth"), 0.0)
-                if rev_growth == 0.0:
-                    rev_growth = safe_num(yf_info.get("revenueGrowth"), 0.0)
+                yf_eg = safe_num(yf_info.get("earningsGrowth"), safe_num(yf_info.get("earningsQuarterlyGrowth"), 0.0))
+                if yf_eg != 0.0 and (eps_growth == 0.0 or (abs(eps_growth) > 1.0 and abs(yf_eg) < 1.0)):
+                    eps_growth = yf_eg
 
-                peg_val = safe_num(yf_info.get("pegRatio"), 0.0)
-                if peg_val > 0.0:
-                    info["pegRatio"] = peg_val
+                yf_rg = safe_num(yf_info.get("revenueGrowth"), safe_num(yf_info.get("revenueQuarterlyGrowth"), 0.0))
+                if yf_rg != 0.0 and rev_growth == 0.0:
+                    rev_growth = yf_rg
+
+                yf_peg = safe_num(yf_info.get("pegRatio"), 0.0)
+                if yf_peg > 0.0 and (peg_val <= 0.0 or abs(peg_val - yf_peg) < 1.5):
+                    peg_val = yf_peg
 
                 # Target Price
                 if target_mean_price <= 0.0:
@@ -975,6 +985,21 @@ def fetch_datos_fundamentales(
     if total_equity_val <= 0.0 and roe_val > 0.0 and net_income_val > 0.0:
         total_equity_val = net_income_val / (roe_val / 100.0)
 
+    if forward_eps <= 0.0 and eps_ttm > 0:
+        forward_eps = eps_ttm * (1.0 + max(eps_growth if eps_growth > 0 else 0.08, 0.05))
+
+    # Cálculo defensivo de PEG Forward si no vino directo de API
+    if peg_val <= 0.0:
+        fwd_growth_calc = ((forward_eps - eps_ttm) / eps_ttm) if (forward_eps > eps_ttm and eps_ttm > 0) else (eps_growth if eps_growth > 0 else 0.0)
+        if pe_fwd > 0 and fwd_growth_calc > 0:
+            g_pct_fwd = fwd_growth_calc * 100.0 if fwd_growth_calc < 1.0 else fwd_growth_calc
+            if g_pct_fwd > 0:
+                peg_val = pe_fwd / g_pct_fwd
+        elif pe_ttm > 0 and eps_growth > 0:
+            g_pct_ttm = eps_growth * 100.0 if eps_growth < 1.0 else eps_growth
+            if g_pct_ttm > 0:
+                peg_val = pe_ttm / g_pct_ttm
+
     # Caja por acción y Caja Neta por acción
     cash_per_share = (total_cash_val / shares_outstanding) if shares_outstanding > 0 else cash_per_share_metric
     net_cash_per_share = ((total_cash_val - total_debt_val) / shares_outstanding) if shares_outstanding > 0 else 0.0
@@ -990,7 +1015,9 @@ def fetch_datos_fundamentales(
         "dividendRate": div_rate,
         "dividendYield": div_yield_ind,
         "trailingEps": eps_ttm,
-        "forwardEps": eps_ttm * (1.0 + max(eps_growth, 0.05)),
+        "forwardEps": forward_eps,
+        "forwardPE": pe_fwd,
+        "trailingPE": pe_ttm,
         "currentRatio": current_ratio,
         "debtToEquity": debt_to_equity,
         "returnOnEquity": roe_val,
@@ -1019,7 +1046,7 @@ def fetch_datos_fundamentales(
         "pretaxIncome": pretax_val,
         "taxProvision": tax_prov_val,
         "ebitda": ebitda_val,
-        "pegRatio": safe_num(pe_ttm / (eps_growth * 100.0)) if (pe_ttm > 0 and eps_growth > 0) else 0.0,
+        "pegRatio": peg_val if peg_val > 0 else (safe_num(pe_ttm / (eps_growth * 100.0)) if (pe_ttm > 0 and eps_growth > 0) else 0.0),
         "targetMeanPrice": target_mean_price,
         "targetHighPrice": target_high_price,
         "targetLowPrice": target_low_price,
@@ -1669,19 +1696,28 @@ def extraer_metricas_ttm(
 
     earnings_growth = safe_num(info.get("earningsGrowth", 0.0), 0.0)
     if earnings_growth == 0.0 and isinstance(inc, pd.DataFrame) and not inc.empty:
-        for fila_ni in ["Net Income", "NetIncome", "Net Income Common Stockholders"]:
+        for fila_ni in [
+            "Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
+            "Net Income", "NetIncome", "Net Income Common Stockholders",
+            "Net Income To Common", "Operating Income", "OperatingIncome"
+        ]:
             if fila_ni in inc.index:
                 try:
                     s_ni = inc.loc[fila_ni].dropna()
                     if isinstance(s_ni, pd.DataFrame):
                         s_ni = s_ni.iloc[0]
                     vals_ni = [safe_num(v, 0.0) for v in s_ni.values if safe_num(v, 0.0) > 0]
-                    if len(vals_ni) >= 2 and vals_ni[0] > 0 and vals_ni[-1] > 0:
+                    if len(vals_ni) >= 2 and vals_ni[0] > 0 and vals_ni[1] > 0:
+                        yoy_ni = (vals_ni[0] - vals_ni[1]) / vals_ni[1]
+                        if -0.60 <= yoy_ni <= 2.5:
+                            earnings_growth = yoy_ni
+                    elif len(vals_ni) >= 2 and vals_ni[0] > 0 and vals_ni[-1] > 0:
                         n_anios_ni = min(len(vals_ni) - 1, 3)
                         ni_cagr = (vals_ni[0] / vals_ni[n_anios_ni]) ** (1.0 / n_anios_ni) - 1.0
                         if -0.50 <= ni_cagr <= 1.0:
                             earnings_growth = ni_cagr
-                    break
+                    if earnings_growth != 0.0:
+                        break
                 except Exception:
                     pass
 
@@ -1690,6 +1726,20 @@ def extraer_metricas_ttm(
         revenue_growth = cagr_revenue_3_5y
 
     peg_ratio_info = safe_num(info.get("pegRatio", 0.0), 0.0)
+    if peg_ratio_info <= 0.0:
+        pe_calc = (precio_actual / eps_diluted_ttm) if (eps_diluted_ttm > 0 and precio_actual > 0) else 0.0
+        pe_fwd_calc = (precio_actual / forward_eps) if (forward_eps > 0 and precio_actual > 0) else 0.0
+        g_for_peg = earnings_growth
+        if g_for_peg <= 0.0 and forward_eps > eps_diluted_ttm > 0:
+            g_for_peg = (forward_eps - eps_diluted_ttm) / eps_diluted_ttm
+
+        if pe_fwd_calc > 0 and g_for_peg > 0:
+            g_pct = g_for_peg * 100.0 if g_for_peg < 1.0 else g_for_peg
+            peg_ratio_info = (pe_fwd_calc / g_pct) if g_pct > 0 else 0.0
+        elif pe_calc > 0 and g_for_peg > 0:
+            g_pct = g_for_peg * 100.0 if g_for_peg < 1.0 else g_for_peg
+            peg_ratio_info = (pe_calc / g_pct) if g_pct > 0 else 0.0
+
     beta = safe_num(info.get("beta", 1.0), 1.0)
     short_percent_of_float = safe_num(info.get("shortPercentOfFloat", 0.0), 0.0)
     target_mean_price = safe_num(

@@ -218,11 +218,19 @@ def calcular_multiplos_valuacion(
     else:
         col_ev, msg_ev = "🔴", "Valuación Elevada o EBITDA no disponible."
 
-    # 5. PEG Ratio (preferir de consenso, fallback a cálculo empírico)
+    # 5. PEG Ratio / PEG Forward (preferir de consenso, fallback a cálculo Forward / Trailing)
     if peg_info > 0:
         peg = peg_info
+    elif pe_forward > 0 and earnings_growth > 0:
+        g_pct = earnings_growth * 100.0 if earnings_growth < 1.0 else earnings_growth
+        peg = pe_forward / g_pct if g_pct > 0 else 0.0
+    elif pe_forward > 0 and forward_eps > eps_ttm > 0:
+        fwd_g = (forward_eps - eps_ttm) / eps_ttm
+        g_pct = fwd_g * 100.0 if fwd_g < 1.0 else fwd_g
+        peg = pe_forward / g_pct if g_pct > 0 else 0.0
     elif pe > 0 and earnings_growth > 0:
-        peg = pe / (earnings_growth * 100.0 if earnings_growth < 1.0 else earnings_growth)
+        g_pct = earnings_growth * 100.0 if earnings_growth < 1.0 else earnings_growth
+        peg = pe / g_pct if g_pct > 0 else 0.0
     else:
         peg = 0.0
     peg_str = f"{peg:.2f}x" if peg > 0 else "N/A"
@@ -369,9 +377,9 @@ def calcular_ratios_rentabilidad(
     else:
         col_roa, msg_roa = "🔴", "Rendimiento sobre activos negativo."
 
-    # 4. ROIC (Finviz / Institutional Standard: NOPAT TTM / Operating Invested Capital)
-    t_rate_clamped = min(max(tax_rate, 0.0), 0.40)
-    nopat = operating_income_ttm * (1.0 - t_rate_clamped)
+    # 4. ROIC (Finviz / Morningstar Standard: NOPAT TTM / Operating Invested Capital)
+    t_rate_clamped = min(max(tax_rate, 0.0), 0.35)
+    nopat = (operating_income_ttm * (1.0 - t_rate_clamped)) if operating_income_ttm > 0 else max(net_income_ttm, 0.0)
 
     # Capital Invertido Operativo = Activos Totales - Pasivos Circulantes Operativos (Current Liabilities - Short Debt)
     op_cl = max(current_liabilities - short_term_debt, 0.0)
@@ -381,19 +389,18 @@ def calcular_ratios_rentabilidad(
         invested_capital = max(total_equity + total_debt - total_cash, total_equity + total_debt, 1.0)
 
     if invested_capital <= 0:
-        invested_capital = max(total_equity + total_debt, total_assets * 0.5, 1.0)
+        invested_capital = max(total_equity + total_debt, total_assets * 0.45, 1.0)
 
+    raw_roic = (nopat / invested_capital * 100.0) if invested_capital > 0 else 0.0
+
+    equity_ratio = (total_equity / total_assets) if total_assets > 0 else 1.0
     if roic_fallback > 0.0:
-        if invested_capital > 0 and nopat != 0.0:
-            raw_roic = (nopat / invested_capital * 100.0)
-            if raw_roic > 100.0 or raw_roic <= 0.0 or abs(raw_roic - roic_fallback) > 25.0:
-                roic = roic_fallback
-            else:
-                roic = raw_roic
-        else:
+        if raw_roic <= 0.0 or raw_roic > 120.0 or abs(raw_roic - roic_fallback) > 8.0 or equity_ratio < 0.15:
             roic = roic_fallback
-    elif invested_capital > 0 and nopat != 0.0:
-        roic = (nopat / invested_capital * 100.0)
+        else:
+            roic = raw_roic
+    elif raw_roic > 0.0:
+        roic = raw_roic
     else:
         roic = 0.0
 
