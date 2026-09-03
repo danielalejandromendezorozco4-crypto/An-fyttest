@@ -425,9 +425,15 @@ def calcular_fcff_valuation(
 
         if ebit_i > 0 and da_i >= 0:
             nopat_i = ebit_i * (1.0 - tax_rate_real)
-            dnwc_clamped = max(min(dnwc_i, nopat_i * 0.5), -nopat_i * 0.5)
+            # Inversión en capital de trabajo operativo (absorción de caja dnwc >= 0)
+            # Evita que variaciones negativas o contables agreguen flujo extraordinario no recurrente
+            dnwc_clamped = max(min(dnwc_i, nopat_i * 0.25), 0.0)
             fcff_ebit = nopat_i + da_i - capex_i - dnwc_clamped
             fcf_cash = ocf_i - capex_i
+            escudo_i = int_i * (1.0 - tax_rate_real)
+            # Validación contable: evitar sobrestimación sobre el flujo físico de caja + escudo fiscal
+            if fcf_cash > 0:
+                fcff_ebit = min(fcff_ebit, fcf_cash + escudo_i)
             if fcff_ebit > 0 and (fcf_cash <= 0 or fcff_ebit >= fcf_cash * 0.4):
                 fcff_historico.append(fcff_ebit)
                 if i == 0:
@@ -470,6 +476,8 @@ def calcular_fcff_valuation(
 
     # Para empresas de hipercrecimiento probado, permitir tasas prospectivas de hasta 40%-45% en Fase 1
     g_max_fase1 = 0.45 if (growth_rate_exp is not None or revenue_growth_api > 0.20 or cagr_revenue_hist > 0.20) else 0.25
+    if mcap > 200e9 and growth_rate_exp is None:
+        g_max_fase1 = min(g_max_fase1, 0.20)
     g_1_5 = min(max(g_1_5, 0.02), g_max_fase1)
 
     # 7. Proyeccion 2 etapas + Fade Period con Mid-Year Convention
@@ -517,7 +525,7 @@ def calcular_fcff_valuation(
     buyback_rate_val = safe_num(buyback_rate, default=0.0)
     if buyback_rate_val > 1.0:
         buyback_rate_val = buyback_rate_val / 100.0
-    buyback_rate_ = max(min(buyback_rate_val, 0.08), -0.05)
+    buyback_rate_ = max(min(buyback_rate_val, 0.05), -0.05)
 
     shares_count = max(safe_num(shares_diluted, default=1.0), 1.0)
     if mcap > 10_000_000 and precio_actual > 0:

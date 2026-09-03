@@ -826,6 +826,90 @@ class TestRecalibracionFCFFYSupuestosAvanzados(unittest.TestCase):
         self.assertEqual(res.num_analysts, 37)
         self.assertEqual(res.recommendation, "strong_buy")
 
+    def test_ma_fcff_no_sobrevalorado_evita_986(self):
+        """Verifica que con CapEx anual real (~1.2B) MA se valore entre $400-$650 y no en $986+."""
+        # Parámetros agresivos (fade=4, bb=2%, g=3%)
+        res_agr = calcular_fcff_valuation(
+            ocf_hist=[17.43e9, 17.65e9, 14.78e9],
+            capex_hist=[1.215e9, 1.194e9, 1.088e9],
+            interest_hist=[0.55e9, 0.45e9, 0.4e9],
+            pretax_hist=[18.0e9, 15.5e9, 13.5e9],
+            taxprov_hist=[3.5e9, 3.0e9, 2.6e9],
+            total_debt=24.64e9,
+            total_cash=11.61e9,
+            shares_diluted=869.46e6,
+            mcap=511e9,
+            beta=1.05,
+            rf=4.25,
+            precio_actual=588.0,
+            erp=5.0,
+            cagr_revenue_hist=0.12,
+            revenue_growth_api=0.12,
+            revenue_ttm=28.0e9,
+            operating_margin_hist=0.58,
+            ticker="MA",
+            buyback_rate=0.02,
+            fade_years=4,
+            g_term_override=0.03,
+            ebit_hist=[19.51e9, 16.33e9, 14.63e9],
+            da_hist=[1.1e9, 0.95e9, 0.85e9],
+            delta_nwc_hist=[0.1e9, 0.1e9, 0.1e9],
+        )
+        self.assertLess(res_agr["valor_intrinseco"], 650.0, "El valor intrínseco de MA no debe sobrevalorarse a $986")
+        self.assertGreater(res_agr["valor_intrinseco"], 500.0)
+
+        # Parámetros base (fade=3, bb=0%, g=2.5%)
+        res_base = calcular_fcff_valuation(
+            ocf_hist=[17.43e9, 17.65e9, 14.78e9],
+            capex_hist=[1.215e9, 1.194e9, 1.088e9],
+            interest_hist=[0.55e9, 0.45e9, 0.4e9],
+            pretax_hist=[18.0e9, 15.5e9, 13.5e9],
+            taxprov_hist=[3.5e9, 3.0e9, 2.6e9],
+            total_debt=24.64e9,
+            total_cash=11.61e9,
+            shares_diluted=869.46e6,
+            mcap=511e9,
+            beta=1.05,
+            rf=4.25,
+            precio_actual=588.0,
+            erp=5.0,
+            cagr_revenue_hist=0.12,
+            revenue_growth_api=0.12,
+            revenue_ttm=28.0e9,
+            operating_margin_hist=0.58,
+            ticker="MA",
+            buyback_rate=0.0,
+            fade_years=3,
+            g_term_override=0.025,
+            ebit_hist=[19.51e9, 16.33e9, 14.63e9],
+            da_hist=[1.1e9, 0.95e9, 0.85e9],
+            delta_nwc_hist=[0.1e9, 0.1e9, 0.1e9],
+        )
+        self.assertLess(res_base["valor_intrinseco"], 500.0)
+        self.assertGreater(res_base["valor_intrinseco"], 400.0)
+
+    def test_capex_ttm_implicito_extraer_fcff(self):
+        """Verifica que extraer_fcff_desapalancado obtenga CapEx TTM exacto de OCF - FCF."""
+        from data.financial_fetcher import extraer_fcff_desapalancado
+        import pandas as pd
+        mock_info = {
+            "operatingCashflow": 17_437_000_000.0,
+            "freeCashflow": 16_222_000_000.0,
+            "capitalExpenditures": 475_749_376.0,  # Trimestral anómalo
+            "operatingIncome": 19_514_000_000.0,
+        }
+        mock_cf = pd.DataFrame({
+            "2024": {"Operating Cash Flow": 17.43e9, "Capital Expenditure": -1.215e9},
+            "2023": {"Operating Cash Flow": 17.65e9, "Capital Expenditure": -1.194e9},
+        })
+        mock_inc = pd.DataFrame()
+        mock_bs = pd.DataFrame()
+
+        comp = extraer_fcff_desapalancado(mock_cf, mock_inc, mock_bs, mock_info)
+        # CapEx debe ser ~1.215B y no 475M
+        self.assertGreater(comp["capex_hist"][0], 1.0e9)
+        self.assertEqual(len(comp["ocf_hist"]), len(comp["capex_hist"]))
+
 
 if __name__ == "__main__":
     unittest.main()

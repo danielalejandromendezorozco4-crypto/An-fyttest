@@ -568,20 +568,20 @@ else:
 
             p_s = res_mult["p_s"]
             # --- CONSENSO DE WALL STREET (Exclusivo Yahoo Finance) ---
-            try:
-                consenso_res = obtener_consenso_wall_street(ticker_input, yf_info=info)
-                target = safe_num(consenso_res.target_mean, 0.0)
-            except Exception:
-                target = 0.0
-
+            target = safe_num(
+                info.get("targetMeanPrice")
+                or info.get("targetMedianPrice")
+                or info.get("targetPrice")
+                or m_ttm.get("target_mean_price", 0.0),
+                0.0
+            )
             if target <= 0.0:
-                target = safe_num(
-                    info.get("targetMeanPrice")
-                    or info.get("targetMedianPrice")
-                    or info.get("targetPrice")
-                    or m_ttm.get("target_mean_price", 0.0),
-                    0.0
-                )
+                try:
+                    consenso_res = obtener_consenso_wall_street(ticker_input, _yf_info=info)
+                    target = safe_num(consenso_res.target_mean, 0.0)
+                except Exception as e_ws:
+                    logger.debug("Error extrayendo consenso yfinance para %s: %s", ticker_input, e_ws)
+                    target = 0.0
 
             if target > 0 and precio_actual > 0:
                 upside = ((target - precio_actual) / precio_actual) * 100.0

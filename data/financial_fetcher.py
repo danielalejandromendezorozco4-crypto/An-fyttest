@@ -480,6 +480,7 @@ def obtener_consenso_wall_street(
     finnhub_api_key: str = "",
     target_data: Optional[Any] = None,
     metrics_dict: Optional[Dict[str, Any]] = None,
+    _yf_info: Optional[Dict[str, Any]] = None,
     yf_info: Optional[Dict[str, Any]] = None,
 ) -> ConsensusWallStreet:
     """
@@ -488,7 +489,7 @@ def obtener_consenso_wall_street(
     defensivo ante activos sin cobertura o fallos de conexión.
 
     Jerarquía de extracción Yahoo Finance (yfinance):
-    1. Objeto `yf_info` pre-cargado si es provisto (máxima velocidad sin latencia).
+    1. Objeto `_yf_info` o `yf_info` pre-cargado si es provisto (máxima velocidad sin latencia).
     2. Atributo `ticker_yf.analyst_price_targets` ('mean', 'median', 'high', 'low').
     3. Diccionario `ticker_yf.info` ('targetMeanPrice', 'targetMedianPrice', 'targetHighPrice', etc.).
     4. DataFrame `ticker_yf.recommendations_summary` (estimaciones agregadas).
@@ -510,27 +511,29 @@ def obtener_consenso_wall_street(
     num_analysts: Optional[int] = None
     raw_payload: Dict[str, Any] = {}
 
+    info_dict = _yf_info or yf_info
+
     # ── CAPA 1: Insumos directos provistos por el llamador ──
     # 1.1 Intentar con yf_info pre-cargado si existe
-    if isinstance(yf_info, dict) and yf_info:
+    if isinstance(info_dict, dict) and info_dict:
         mean_c = safe_num(
-            yf_info.get("targetMeanPrice")
-            or yf_info.get("targetMedianPrice")
-            or yf_info.get("targetPrice")
-            or yf_info.get("target_mean_price"),
+            info_dict.get("targetMeanPrice")
+            or info_dict.get("targetMedianPrice")
+            or info_dict.get("targetPrice")
+            or info_dict.get("target_mean_price"),
             0.0
         )
         if mean_c > 0.0:
             target_mean_price = mean_c
-            target_high_price = safe_num(yf_info.get("targetHighPrice") or yf_info.get("target_high_price"), 0.0)
-            target_low_price = safe_num(yf_info.get("targetLowPrice") or yf_info.get("target_low_price"), 0.0)
-            n_opinions = yf_info.get("numberOfAnalystOpinions") or yf_info.get("num_analysts")
+            target_high_price = safe_num(info_dict.get("targetHighPrice") or info_dict.get("target_high_price"), 0.0)
+            target_low_price = safe_num(info_dict.get("targetLowPrice") or info_dict.get("target_low_price"), 0.0)
+            n_opinions = info_dict.get("numberOfAnalystOpinions") or info_dict.get("num_analysts")
             if n_opinions is not None:
                 try:
                     num_analysts = int(n_opinions)
                 except (ValueError, TypeError):
                     pass
-            recommendation = yf_info.get("recommendationKey") or yf_info.get("recommendation")
+            recommendation = info_dict.get("recommendationKey") or info_dict.get("recommendation")
             raw_payload["source"] = "yf_info_cache"
 
     # 1.2 Si se proveyó target_data explícito (ej. pruebas o endpoint previo)
@@ -1221,6 +1224,17 @@ def fetch_datos_fundamentales(
         except Exception as e_enrich:
             logger.debug("Error en enriquecimiento yfinance para %s: %s", ticker, e_enrich)
 
+    # Garantizar extracción de Target Price de Consenso Wall Street desde yfinance
+    if target_mean_price <= 0.0:
+        try:
+            cw_fund = obtener_consenso_wall_street(ticker)
+            if cw_fund.target_mean > 0:
+                target_mean_price = cw_fund.target_mean
+                target_high_price = cw_fund.target_high
+                target_low_price = cw_fund.target_low
+        except Exception as e_cw:
+            logger.debug("Error extrayendo consenso en fetch_datos_fundamentales para %s: %s", ticker, e_cw)
+
     # Calibración de métricas de mercado (Finviz Standards)
     if current_ratio <= 0.0 and cur_assets_val > 0 and cur_liab_val > 0:
         current_ratio = cur_assets_val / cur_liab_val
@@ -1566,7 +1580,12 @@ def extraer_fcff_desapalancado(
     """
     ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
     fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
-    capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0))) or (abs(ocf_ttm - fcf_ttm) if (ocf_ttm > 0 and fcf_ttm > 0) else 0.0)
+    # CapEx TTM auditable: OCF - FCF respeta convención contable y escala exacta
+    if ocf_ttm > 0 and fcf_ttm > 0 and ocf_ttm >= fcf_ttm:
+        capex_ttm = ocf_ttm - fcf_ttm
+    else:
+        capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0), 0.0))
+
     ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
 
     ocf_hist = _extraer_serie(cf, [
@@ -1575,22 +1594,31 @@ def extraer_fcff_desapalancado(
         "Total Cash From Operating Activities",
         "Net Cash Provided By Operating Activities"
     ])
-    if ocf_ttm > 0:
-        if not ocf_hist:
-            ocf_hist = [ocf_ttm]
-        elif abs(ocf_hist[0] - ocf_ttm) > 1000 and "TTM" not in cf.columns:
-            ocf_hist = [ocf_ttm] + ocf_hist
-    elif not ocf_hist:
-        ocf_hist = [0.0]
-
     capex_hist = obtener_capex_historico(cf)
-    if capex_ttm > 0:
-        if not capex_hist:
-            capex_hist = [capex_ttm]
-        elif abs(capex_hist[0] - capex_ttm) > 1000 and "TTM" not in cf.columns:
+
+    # Actualizar período más reciente si capex_ttm es coherente con el orden anual
+    if not capex_hist:
+        capex_hist = [capex_ttm] if capex_ttm > 0 else [0.0]
+    elif capex_ttm > 0 and "TTM" in cf.columns:
+        capex_hist[0] = capex_ttm
+    elif capex_ttm > 0 and abs(capex_hist[0] - capex_ttm) > 1000:
+        # Solo prepender si capex_ttm representa un período anual completo (no un trimestre)
+        if capex_ttm >= capex_hist[0] * 0.6:
             capex_hist = [capex_ttm] + capex_hist
-    elif not capex_hist:
-        capex_hist = [0.0]
+
+    if not ocf_hist:
+        ocf_hist = [ocf_ttm] if ocf_ttm > 0 else [0.0]
+    elif ocf_ttm > 0 and "TTM" in cf.columns:
+        ocf_hist[0] = ocf_ttm
+    elif ocf_ttm > 0 and abs(ocf_hist[0] - ocf_ttm) > 1000:
+        if ocf_ttm >= ocf_hist[0] * 0.6:
+            ocf_hist = [ocf_ttm] + ocf_hist
+
+    # Alinear longitud de series para consistencia período a período
+    if ocf_hist and capex_hist:
+        min_c = min(len(ocf_hist), len(capex_hist))
+        ocf_hist = ocf_hist[:min_c]
+        capex_hist = capex_hist[:min_c]
 
     interest_hist = _extraer_serie(inc, [
         "Interest Expense", "InterestExpense",
