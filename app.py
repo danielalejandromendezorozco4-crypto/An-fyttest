@@ -32,6 +32,7 @@ from data.financial_fetcher import (
     extraer_fcff_desapalancado,
     extraer_metricas_ttm,
     obtener_rf_tnx,
+    obtener_consenso_wall_street,
 )
 from engine.metrics import (
     calcular_altman_zscore,
@@ -569,9 +570,25 @@ else:
             p_s_str = res_mult["p_s_str"]
             target = safe_num(m_ttm.get("target_mean_price", 0.0), 0.0)
             if target <= 0.0 and precio_actual > 0:
-                t_mean_fb, _, _ = obtener_consenso_wall_street(ticker_input, finnhub_key)
-                if t_mean_fb > 0.0:
-                    target = t_mean_fb
+                try:
+                    consenso_res = obtener_consenso_wall_street(ticker_input, finnhub_key)
+                    if isinstance(consenso_res, (tuple, list)) and len(consenso_res) >= 1:
+                        t_mean_fb = safe_num(consenso_res[0], 0.0)
+                    elif isinstance(consenso_res, dict):
+                        t_mean_fb = safe_num(
+                            consenso_res.get("target_mean")
+                            or consenso_res.get("target_mean_price")
+                            or consenso_res.get("targetMeanPrice"),
+                            0.0,
+                        )
+                    else:
+                        t_mean_fb = 0.0
+
+                    if t_mean_fb > 0.0:
+                        target = t_mean_fb
+                except Exception:
+                    # Protección defensiva: si falla la API externa, no interrumpir la interfaz
+                    pass
 
             if target > 0 and precio_actual > 0:
                 upside = ((target - precio_actual) / precio_actual) * 100.0

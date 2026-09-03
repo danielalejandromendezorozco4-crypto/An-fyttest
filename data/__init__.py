@@ -17,6 +17,7 @@ from data.financial_fetcher import (
     obtener_datos_dividendos,
     obtener_noticias_financieras,
     obtener_consenso_wall_street,
+    ConsensusWallStreet,
 )
 
 __all__ = [
@@ -37,4 +38,5 @@ __all__ = [
     "obtener_datos_dividendos",
     "obtener_noticias_financieras",
     "obtener_consenso_wall_street",
+    "ConsensusWallStreet",
 ]

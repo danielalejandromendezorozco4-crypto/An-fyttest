@@ -1138,6 +1138,120 @@ def test_calcular_buyback_yield_columnas_ascendentes_cronologicas():
     assert res["col_by"] == "🟢"
 
 
+class TestWallStreetConsensus(unittest.TestCase):
+    """
+    Pruebas unitarias para validar la extracción robusta del consenso de analistas
+    de Wall Street, compatibilidad de tipos (tupla y dict) y protección contra NameError en la app.
+    """
+
+    def test_import_in_app_module(self):
+        """Verifica que obtener_consenso_wall_street esté importado y referenciado en app.py sin NameError."""
+        import ast
+        with open("app.py", "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename="app.py")
+
+        imported_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    imported_names.add(alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported_names.add(alias.name)
+
+        self.assertIn("obtener_consenso_wall_street", imported_names)
+
+    def test_consensus_wall_street_structure_and_unpacking(self):
+        """Verifica que ConsensusWallStreet soporte desempaquetado de tupla (mean, high, low) y acceso dict."""
+        from data.financial_fetcher import ConsensusWallStreet
+        cw = ConsensusWallStreet(
+            target_mean=450.50,
+            target_high=520.0,
+            target_low=390.0,
+            recommendation="buy",
+            num_analysts=32,
+        )
+        # 1. Desempaquetado como tupla de 3 elementos
+        mean, high, low = cw
+        self.assertEqual(mean, 450.50)
+        self.assertEqual(high, 520.0)
+        self.assertEqual(low, 390.0)
+        self.assertIsInstance(cw, tuple)
+        self.assertEqual(len(cw), 3)
+
+        # 2. Acceso por atributos
+        self.assertEqual(cw.target_mean, 450.50)
+        self.assertEqual(cw.target_high, 520.0)
+        self.assertEqual(cw.target_low, 390.0)
+        self.assertEqual(cw.recommendation, "buy")
+        self.assertEqual(cw.num_analysts, 32)
+
+        # 3. Acceso tipo diccionario
+        self.assertEqual(cw["target_mean"], 450.50)
+        self.assertEqual(cw.get("target_high"), 520.0)
+        self.assertEqual(cw.get("recommendation"), "buy")
+        self.assertEqual(cw.get("num_analysts"), 32)
+        self.assertEqual(cw.get("inexistente", "def_val"), "def_val")
+
+        # 4. to_dict y llaves
+        d = cw.to_dict()
+        self.assertIsInstance(d, dict)
+        self.assertIn("target_mean", d)
+        self.assertIn("recommendation", d)
+
+    def test_empty_ticker_returns_safe_defaults(self):
+        """Verifica que un ticker vacío o None retorne estructura con ceros sin error."""
+        from data.financial_fetcher import obtener_consenso_wall_street
+        res = obtener_consenso_wall_street("")
+        self.assertEqual(res, (0.0, 0.0, 0.0))
+        self.assertEqual(res.target_mean, 0.0)
+        self.assertIsNone(res.recommendation)
+        self.assertIsNone(res.num_analysts)
+
+    @unittest.mock.patch("yfinance.Ticker")
+    def test_yfinance_rich_metadata_extraction(self, mock_yf):
+        """Verifica extracción de recomendaciones y número de analistas desde yfinance."""
+        from data.financial_fetcher import obtener_consenso_wall_street
+        mock_instance = unittest.mock.MagicMock()
+        mock_instance.analyst_price_targets = {
+            "mean": 520.0,
+            "high": 580.0,
+            "low": 470.0,
+        }
+        mock_instance.info = {
+            "numberOfAnalystOpinions": 28,
+            "recommendationKey": "strong_buy",
+        }
+        mock_yf.return_value = mock_instance
+
+        res = obtener_consenso_wall_street("AAPL")
+        mean, high, low = res
+        self.assertEqual(mean, 520.0)
+        self.assertEqual(high, 580.0)
+        self.assertEqual(low, 470.0)
+        self.assertEqual(res.num_analysts, 28)
+        self.assertEqual(res.recommendation, "strong_buy")
+        self.assertEqual(res["num_analysts"], 28)
+
+    @unittest.mock.patch("data.financial_fetcher._finnhub_get")
+    def test_finnhub_failure_fallbacks_cleanly(self, mock_fh_get):
+        """Verifica que una falla de red o excepción en Finnhub no rompa la ejecución."""
+        from data.financial_fetcher import obtener_consenso_wall_street
+        mock_fh_get.side_effect = Exception("API Timeout")
+        with unittest.mock.patch("yfinance.Ticker") as mock_yf:
+            mock_inst = unittest.mock.MagicMock()
+            mock_inst.analyst_price_targets = None
+            mock_inst.info = {}
+            mock_inst.recommendations_summary = None
+            mock_yf.return_value = mock_inst
+
+            res = obtener_consenso_wall_street("FAILTICKER", finnhub_api_key="dummy_key")
+            mean, high, low = res
+            self.assertEqual(mean, 0.0)
+            self.assertEqual(high, 0.0)
+            self.assertEqual(low, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 
