@@ -567,17 +567,21 @@ else:
             msg_peg = res_mult["msg_peg"]
 
             p_s = res_mult["p_s"]
-            p_s_str = res_mult["p_s_str"]
-            target = safe_num(m_ttm.get("target_mean_price", 0.0), 0.0)
-            if target <= 0.0 and precio_actual > 0:
-                try:
-                    consenso_res = obtener_consenso_wall_street(ticker_input, finnhub_key)
-                    t_mean_fb = safe_num(consenso_res, 0.0)
-                    if t_mean_fb > 0.0:
-                        target = t_mean_fb
-                except Exception:
-                    # Protección defensiva: si falla la API externa, no interrumpir la interfaz
-                    pass
+            # --- CONSENSO DE WALL STREET (Exclusivo Yahoo Finance) ---
+            try:
+                consenso_res = obtener_consenso_wall_street(ticker_input, yf_info=info)
+                target = safe_num(consenso_res.target_mean, 0.0)
+            except Exception:
+                target = 0.0
+
+            if target <= 0.0:
+                target = safe_num(
+                    info.get("targetMeanPrice")
+                    or info.get("targetMedianPrice")
+                    or info.get("targetPrice")
+                    or m_ttm.get("target_mean_price", 0.0),
+                    0.0
+                )
 
             if target > 0 and precio_actual > 0:
                 upside = ((target - precio_actual) / precio_actual) * 100.0

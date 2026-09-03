@@ -755,5 +755,77 @@ class TestDefensiveNumericUnpacking(unittest.TestCase):
         self.assertGreater(res["valor_intrinseco_ddm"], 0.0)
 
 
+class TestRecalibracionFCFFYSupuestosAvanzados(unittest.TestCase):
+    """Pruebas de consistencia y reactividad para Supuestos Avanzados DCF y Consenso Wall Street."""
+
+    def setUp(self):
+        self.ma_params = dict(
+            ocf_hist=[17.5e9, 15.0e9, 13.0e9],
+            capex_hist=[0.5e9, 0.45e9, 0.4e9],
+            interest_hist=[0.6e9, 0.5e9, 0.4e9],
+            pretax_hist=[18.0e9, 15.5e9, 13.5e9],
+            taxprov_hist=[3.5e9, 3.0e9, 2.6e9],
+            total_debt=24.0e9,
+            total_cash=11.5e9,
+            shares_diluted=870e6,
+            mcap=510e9,
+            beta=1.05,
+            rf=4.25,
+            precio_actual=588.0,
+            revenue_ttm=28.0e9,
+            revenue_growth_api=0.12,
+            operating_margin_hist=0.58,
+            ebit_hist=[19.0e9, 16.5e9, 14.5e9],
+            da_hist=[1.0e9, 0.9e9, 0.8e9],
+            delta_nwc_hist=[0.2e9, 0.15e9, 0.1e9],
+            ticker="MA",
+        )
+
+    def test_sensibilidad_recompra_neta_anual(self):
+        """Verifica que el aumento paulatino de recompras incremente el valor por acción de forma monótona."""
+        res_0 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.025)
+        res_2 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.02, fade_years=3, g_term_override=0.025)
+        res_4 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.04, fade_years=3, g_term_override=0.025)
+
+        self.assertGreater(res_2["valor_intrinseco"], res_0["valor_intrinseco"])
+        self.assertGreater(res_4["valor_intrinseco"], res_2["valor_intrinseco"])
+        self.assertLess(res_2["shares_efectivas"], res_0["shares_efectivas"])
+        self.assertLess(res_4["shares_efectivas"], res_2["shares_efectivas"])
+
+    def test_sensibilidad_fade_period(self):
+        """Verifica que el Fade Period extienda adecuadamente el horizonte y la transición a tasa terminal."""
+        res_1 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=1, g_term_override=0.025)
+        res_5 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=5, g_term_override=0.025)
+
+        self.assertEqual(res_1["n_total"], 6)
+        self.assertEqual(res_5["n_total"], 10)
+        self.assertGreater(res_5["valor_intrinseco"], res_1["valor_intrinseco"])
+
+    def test_sensibilidad_tasa_terminal_g(self):
+        """Verifica que la tasa terminal aumente el valor intrínseco respetando el spread mínimo WACC > g."""
+        res_g15 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.015)
+        res_g30 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.030)
+
+        self.assertGreater(res_g30["valor_intrinseco"], res_g15["valor_intrinseco"])
+        self.assertGreater(res_g30["wacc"] / 100.0, res_g30["g_term"])
+
+    def test_consenso_yfinance_exclusivo(self):
+        """Verifica que el consenso de analistas para MA extraiga un valor numérico positivo desde yfinance."""
+        from data.financial_fetcher import obtener_consenso_wall_street
+        mock_info = {
+            "targetMeanPrice": 670.92,
+            "targetHighPrice": 740.0,
+            "targetLowPrice": 550.0,
+            "numberOfAnalystOpinions": 37,
+            "recommendationKey": "strong_buy",
+        }
+        res = obtener_consenso_wall_street("MA", yf_info=mock_info)
+        self.assertEqual(res.target_mean, 670.92)
+        self.assertEqual(res.target_high, 740.0)
+        self.assertEqual(res.target_low, 550.0)
+        self.assertEqual(res.num_analysts, 37)
+        self.assertEqual(res.recommendation, "strong_buy")
+
+
 if __name__ == "__main__":
     unittest.main()

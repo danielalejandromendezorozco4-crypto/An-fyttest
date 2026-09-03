@@ -348,8 +348,15 @@ def calcular_fcff_valuation(
     operating_margin_hist = safe_num(operating_margin_hist, 0.0)
     cagr_revenue_hist = safe_num(cagr_revenue_hist, 0.0)
     revenue_growth_api = safe_num(revenue_growth_api, 0.0)
-    fade_years = int(safe_num(fade_years, DEFAULT_FADE_YEARS))
-    n_years = int(safe_num(n_years, 5))
+    fade_years = max(int(safe_num(fade_years, DEFAULT_FADE_YEARS)), 1)
+    n_years = max(int(safe_num(n_years, 5)), 1)
+
+    # Reconciliación defensiva de unidades entre Deuda/Efectivo y Market Cap
+    if mcap > 1e9:
+        if 0 < total_debt < 1e5:
+            total_debt = total_debt * 1e6
+        if 0 < total_cash < 1e5:
+            total_cash = total_cash * 1e6
 
     if shares_diluted <= 0 or precio_actual <= 0:
         return _resultado_fcff_vacio(precio_actual, total_cash, total_debt, rf, beta, erp)
