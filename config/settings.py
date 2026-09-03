@@ -1,4 +1,6 @@
+import math
 import os
+from typing import Any
 import unicodedata
 import numpy as np
 import pandas as pd
@@ -101,28 +103,96 @@ def safe_get(d, keys, default=0):
             return d[key]
     return default
 
-def safe_num(val, default=0.0):
+def safe_num(val: Any, default: float = 0.0) -> float:
     """
     Convierte cualquier valor de forma segura a float o al valor por defecto especificado.
-    Maneja None, np.nan, float('nan'), inf, -inf, strings no numéricos y tipos corruptos.
+    Maneja defensivamente:
+    - Escalares numéricos (int, float, np.number).
+    - Objetos de consenso (ConsensusWallStreet) con atributo target_mean.
+    - Tuplas y listas de 1 elemento, o tuplas con 1 escalar numérico y metadatos (ej. (precio, moneda), (valor, status)).
+    - pd.Series, np.ndarray de tamaño 1.
+    - Diccionarios con claves numéricas estándar ('value', 'target_mean', etc.).
+    - Strings formateados ('$1,250.50', '15.5%', '550.00 USD').
+    - None, np.nan, float('nan'), inf, -inf, cadenas no numéricas y tipos corruptos.
     """
     if val is None:
-        return default if default is None else float(default)
+        return float(default) if default is not None else 0.0
+
     try:
-        if isinstance(val, (int, float)):
-            if np.isnan(val) or np.isinf(val):
-                return default if default is None else float(default)
-            return float(val)
+        if hasattr(val, "target_mean"):
+            val = getattr(val, "target_mean")
+
+        while isinstance(val, (tuple, list, set)):
+            if len(val) == 0:
+                return float(default) if default is not None else 0.0
+            if len(val) == 1:
+                val = next(iter(val))
+                if val is None:
+                    return float(default) if default is not None else 0.0
+                continue
+            numerics = []
+            for item in val:
+                if item is not None and not isinstance(item, (dict, list, tuple, set, bool)):
+                    if isinstance(item, (int, float, np.number)):
+                        numerics.append(item)
+                    elif isinstance(item, str):
+                        clean_item = item.replace(',', '').replace('$', '').replace('%', '').strip()
+                        parts = clean_item.split()
+                        if len(parts) > 1:
+                            clean_item = parts[0]
+                        try:
+                            float(clean_item)
+                            numerics.append(item)
+                        except ValueError:
+                            pass
+            if len(numerics) == 1:
+                val = numerics[0]
+            else:
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, (pd.Series, np.ndarray)):
+            if val.size == 0 or val.size > 1:
+                return float(default) if default is not None else 0.0
+            val = val.flat[0] if isinstance(val, np.ndarray) else val.iloc[0]
+            if val is None or pd.isna(val):
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, dict):
+            candidatos = [
+                val.get("value"), val.get("val"), val.get("target_mean"),
+                val.get("target_mean_price"), val.get("mean"), val.get("price"),
+                val.get("close"), val.get("current"),
+            ]
+            found = False
+            for cand in candidatos:
+                if cand is not None and not isinstance(cand, (dict, list, tuple)):
+                    val = cand
+                    found = True
+                    break
+            if not found:
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, (int, float, np.number)):
+            f_val = float(val)
+            if math.isnan(f_val) or math.isinf(f_val):
+                return float(default) if default is not None else 0.0
+            return f_val
+
         if isinstance(val, str):
             clean_str = val.replace(',', '').replace('$', '').replace('%', '').strip()
-            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf'):
-                return default if default is None else float(default)
+            parts = clean_str.split()
+            if len(parts) > 1:
+                clean_str = parts[0]
+            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf', 'n/d'):
+                return float(default) if default is not None else 0.0
             return float(clean_str)
+
         if pd.isna(val):
-            return default if default is None else float(default)
+            return float(default) if default is not None else 0.0
+
         return float(val)
     except (ValueError, TypeError, Exception):
-        return default if default is None else float(default)
+        return float(default) if default is not None else 0.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTES DE INTEGRACIÓN FINNHUB API

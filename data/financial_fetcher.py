@@ -83,22 +83,90 @@ def _finnhub_get(
 def safe_num(val: Any, default: float = 0.0) -> float:
     """
     Convierte cualquier valor de forma segura a float o al valor por defecto especificado.
-    Maneja None, np.nan, float('nan'), inf, -inf, strings formateados ('$1,250.50', '15.5%') y tipos corruptos.
+    Maneja defensivamente:
+    - Escalares numéricos (int, float, np.number).
+    - Objetos de consenso (ConsensusWallStreet) con atributo target_mean.
+    - Tuplas y listas de 1 elemento, o tuplas con 1 escalar numérico y metadatos (ej. (precio, moneda), (valor, status)).
+    - pd.Series, np.ndarray de tamaño 1.
+    - Diccionarios con claves numéricas estándar ('value', 'target_mean', etc.).
+    - Strings formateados ('$1,250.50', '15.5%', '550.00 USD').
+    - None, np.nan, float('nan'), inf, -inf, cadenas no numéricas y tipos corruptos.
     """
     if val is None:
         return float(default) if default is not None else 0.0
+
     try:
-        if isinstance(val, (int, float)):
-            if math.isnan(val) or math.isinf(val) or np.isnan(val) or np.isinf(val):
+        if hasattr(val, "target_mean"):
+            val = getattr(val, "target_mean")
+
+        while isinstance(val, (tuple, list, set)):
+            if len(val) == 0:
                 return float(default) if default is not None else 0.0
-            return float(val)
+            if len(val) == 1:
+                val = next(iter(val))
+                if val is None:
+                    return float(default) if default is not None else 0.0
+                continue
+            numerics = []
+            for item in val:
+                if item is not None and not isinstance(item, (dict, list, tuple, set, bool)):
+                    if isinstance(item, (int, float, np.number)):
+                        numerics.append(item)
+                    elif isinstance(item, str):
+                        clean_item = item.replace(',', '').replace('$', '').replace('%', '').strip()
+                        parts = clean_item.split()
+                        if len(parts) > 1:
+                            clean_item = parts[0]
+                        try:
+                            float(clean_item)
+                            numerics.append(item)
+                        except ValueError:
+                            pass
+            if len(numerics) == 1:
+                val = numerics[0]
+            else:
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, (pd.Series, np.ndarray)):
+            if val.size == 0 or val.size > 1:
+                return float(default) if default is not None else 0.0
+            val = val.flat[0] if isinstance(val, np.ndarray) else val.iloc[0]
+            if val is None or pd.isna(val):
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, dict):
+            candidatos = [
+                val.get("value"), val.get("val"), val.get("target_mean"),
+                val.get("target_mean_price"), val.get("mean"), val.get("price"),
+                val.get("close"), val.get("current"),
+            ]
+            found = False
+            for cand in candidatos:
+                if cand is not None and not isinstance(cand, (dict, list, tuple)):
+                    val = cand
+                    found = True
+                    break
+            if not found:
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, (int, float, np.number)):
+            f_val = float(val)
+            if math.isnan(f_val) or math.isinf(f_val):
+                return float(default) if default is not None else 0.0
+            return f_val
+
         if isinstance(val, str):
             clean_str = val.replace(',', '').replace('$', '').replace('%', '').strip()
-            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf'):
+            parts = clean_str.split()
+            if len(parts) > 1:
+                clean_str = parts[0]
+            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf', 'n/d'):
                 return float(default) if default is not None else 0.0
             return float(clean_str)
+
         if pd.isna(val):
             return float(default) if default is not None else 0.0
+
         return float(val)
     except (ValueError, TypeError, Exception):
         return float(default) if default is not None else 0.0
@@ -332,27 +400,30 @@ class ConsensusWallStreet(tuple):
     """
     def __new__(
         cls,
-        target_mean: float = 0.0,
-        target_high: float = 0.0,
-        target_low: float = 0.0,
+        target_mean: Any = 0.0,
+        target_high: Any = 0.0,
+        target_low: Any = 0.0,
         recommendation: Optional[str] = None,
         num_analysts: Optional[int] = None,
         raw_data: Optional[Dict[str, Any]] = None,
     ) -> ConsensusWallStreet:
-        return super().__new__(cls, (float(target_mean), float(target_high), float(target_low)))
+        m = safe_num(target_mean, default=0.0)
+        h = safe_num(target_high, default=0.0)
+        l = safe_num(target_low, default=0.0)
+        return super().__new__(cls, (m, h, l))
 
     def __init__(
         self,
-        target_mean: float = 0.0,
-        target_high: float = 0.0,
-        target_low: float = 0.0,
+        target_mean: Any = 0.0,
+        target_high: Any = 0.0,
+        target_low: Any = 0.0,
         recommendation: Optional[str] = None,
         num_analysts: Optional[int] = None,
         raw_data: Optional[Dict[str, Any]] = None,
     ) -> None:
-        self.target_mean: float = float(target_mean)
-        self.target_high: float = float(target_high)
-        self.target_low: float = float(target_low)
+        self.target_mean: float = safe_num(target_mean, default=0.0)
+        self.target_high: float = safe_num(target_high, default=0.0)
+        self.target_low: float = safe_num(target_low, default=0.0)
         self.recommendation: Optional[str] = recommendation
         self.num_analysts: Optional[int] = num_analysts
         self._dict: Dict[str, Any] = {
@@ -1313,7 +1384,8 @@ def obtener_rf_tnx(fallback_fred: float = 4.20, finnhub_api_key: str = "") -> fl
     """
     Obtiene la tasa libre de riesgo (R_f).
     """
-    return float(fallback_fred) if fallback_fred > 0 else 4.20
+    val = safe_num(fallback_fred, default=4.20)
+    return val if val > 0 else 4.20
 
 
 @st.cache_data(ttl=FRED_CACHE_TTL)
@@ -1845,7 +1917,7 @@ def extraer_metricas_ttm(
                                 if r_val > 0:
                                     mgs.append(o_val / r_val)
                             if mgs:
-                                op_margin_hist = max(float(np.mean(mgs)), 0.0)
+                                op_margin_hist = max(safe_num(np.mean(mgs), default=0.0), 0.0)
                             break
                     if op_margin_hist > 0:
                         break

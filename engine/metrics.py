@@ -1,6 +1,7 @@
+import math
+from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
-from typing import Optional, Dict, Any
 
 
 def safe_get(d: Any, keys: list, default: Any = 0) -> Any:
@@ -16,22 +17,90 @@ def safe_get(d: Any, keys: list, default: Any = 0) -> Any:
 def safe_num(val: Any, default: float = 0.0) -> float:
     """
     Convierte cualquier valor de forma segura a float o al valor por defecto especificado.
-    Maneja None, np.nan, float('nan'), inf, -inf, strings no numéricos y tipos corruptos.
+    Maneja defensivamente:
+    - Escalares numéricos (int, float, np.number).
+    - Objetos de consenso (ConsensusWallStreet) con atributo target_mean.
+    - Tuplas y listas de 1 elemento, o tuplas con 1 escalar numérico y metadatos (ej. (precio, moneda), (valor, status)).
+    - pd.Series, np.ndarray de tamaño 1.
+    - Diccionarios con claves numéricas estándar ('value', 'target_mean', etc.).
+    - Strings formateados ('$1,250.50', '15.5%', '550.00 USD').
+    - None, np.nan, float('nan'), inf, -inf, cadenas no numéricas y tipos corruptos.
     """
     if val is None:
         return float(default) if default is not None else 0.0
+
     try:
-        if isinstance(val, (int, float)):
-            if np.isnan(val) or np.isinf(val):
+        if hasattr(val, "target_mean"):
+            val = getattr(val, "target_mean")
+
+        while isinstance(val, (tuple, list, set)):
+            if len(val) == 0:
                 return float(default) if default is not None else 0.0
-            return float(val)
+            if len(val) == 1:
+                val = next(iter(val))
+                if val is None:
+                    return float(default) if default is not None else 0.0
+                continue
+            numerics = []
+            for item in val:
+                if item is not None and not isinstance(item, (dict, list, tuple, set, bool)):
+                    if isinstance(item, (int, float, np.number)):
+                        numerics.append(item)
+                    elif isinstance(item, str):
+                        clean_item = item.replace(',', '').replace('$', '').replace('%', '').strip()
+                        parts = clean_item.split()
+                        if len(parts) > 1:
+                            clean_item = parts[0]
+                        try:
+                            float(clean_item)
+                            numerics.append(item)
+                        except ValueError:
+                            pass
+            if len(numerics) == 1:
+                val = numerics[0]
+            else:
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, (pd.Series, np.ndarray)):
+            if val.size == 0 or val.size > 1:
+                return float(default) if default is not None else 0.0
+            val = val.flat[0] if isinstance(val, np.ndarray) else val.iloc[0]
+            if val is None or pd.isna(val):
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, dict):
+            candidatos = [
+                val.get("value"), val.get("val"), val.get("target_mean"),
+                val.get("target_mean_price"), val.get("mean"), val.get("price"),
+                val.get("close"), val.get("current"),
+            ]
+            found = False
+            for cand in candidatos:
+                if cand is not None and not isinstance(cand, (dict, list, tuple)):
+                    val = cand
+                    found = True
+                    break
+            if not found:
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, (int, float, np.number)):
+            f_val = float(val)
+            if math.isnan(f_val) or math.isinf(f_val):
+                return float(default) if default is not None else 0.0
+            return f_val
+
         if isinstance(val, str):
             clean_str = val.replace(',', '').replace('$', '').replace('%', '').strip()
-            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf'):
+            parts = clean_str.split()
+            if len(parts) > 1:
+                clean_str = parts[0]
+            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf', 'n/d'):
                 return float(default) if default is not None else 0.0
             return float(clean_str)
+
         if pd.isna(val):
             return float(default) if default is not None else 0.0
+
         return float(val)
     except (ValueError, TypeError, Exception):
         return float(default) if default is not None else 0.0
@@ -183,6 +252,20 @@ def calcular_multiplos_valuacion(
     Returns:
         Diccionario con valores flotantes, strings formateadas y alertas de semáforo.
     """
+    precio_actual = safe_num(precio_actual, 0.0)
+    mcap = safe_num(mcap, 0.0)
+    eps_ttm = safe_num(eps_ttm, 0.0)
+    forward_eps = safe_num(forward_eps, 0.0)
+    fcf_ttm = safe_num(fcf_ttm, 0.0)
+    ebitda_ttm = safe_num(ebitda_ttm, 0.0)
+    total_debt = safe_num(total_debt, 0.0)
+    total_cash = safe_num(total_cash, 0.0)
+    revenue_ttm = safe_num(revenue_ttm, 0.0)
+    total_equity = safe_num(total_equity, 0.0)
+    peg_info = safe_num(peg_info, 0.0)
+    earnings_growth = safe_num(earnings_growth, 0.0)
+    buyback_yield = safe_num(buyback_yield, 0.0)
+
     # 1. PER Trailing
     pe = (precio_actual / eps_ttm) if eps_ttm > 0 else 0.0
     pe_str = f"{pe:.1f}x" if pe > 0 else "N/A"
@@ -316,6 +399,21 @@ def calcular_ratios_rentabilidad(
     Returns:
         Diccionario con valores flotantes, strings formateadas y alertas de semáforo.
     """
+    revenue_ttm = safe_num(revenue_ttm, 0.0)
+    gross_profit_ttm = safe_num(gross_profit_ttm, 0.0)
+    operating_income_ttm = safe_num(operating_income_ttm, 0.0)
+    net_income_ttm = safe_num(net_income_ttm, 0.0)
+    total_assets = safe_num(total_assets, 0.0)
+    total_equity = safe_num(total_equity, 0.0)
+    total_debt = safe_num(total_debt, 0.0)
+    total_cash = safe_num(total_cash, 0.0)
+    current_liabilities = safe_num(current_liabilities, 0.0)
+    short_term_debt = safe_num(short_term_debt, 0.0)
+    tax_rate = safe_num(tax_rate, 0.21)
+    roe_fallback = safe_num(roe_fallback, 0.0)
+    roa_fallback = safe_num(roa_fallback, 0.0)
+    roic_fallback = safe_num(roic_fallback, 0.0)
+
     # 1. Márgenes
     gross_margin = (gross_profit_ttm / revenue_ttm * 100.0) if revenue_ttm > 0 else 0.0
     mg_op = (operating_income_ttm / revenue_ttm * 100.0) if revenue_ttm > 0 else 0.0
@@ -474,6 +572,18 @@ def calcular_ratios_solvencia(
     Returns:
         Diccionario con valores flotantes, strings formateadas y alertas de semáforo.
     """
+    total_debt = safe_num(total_debt, 0.0)
+    total_cash = safe_num(total_cash, 0.0)
+    total_equity = safe_num(total_equity, 0.0)
+    ebitda_ttm = safe_num(ebitda_ttm, 0.0)
+    ebit_ttm = safe_num(ebit_ttm, 0.0)
+    interest_expense = safe_num(interest_expense, 0.0)
+    current_assets = safe_num(current_assets, 0.0)
+    current_liabilities = safe_num(current_liabilities, 0.0)
+    fcf_ttm = safe_num(fcf_ttm, 0.0)
+    shares_current = max(safe_num(shares_current, 1.0), 1.0)
+    current_ratio_fallback = safe_num(current_ratio_fallback, 0.0)
+
     net_debt = total_debt - total_cash
 
     # 1. Deuda Neta / EBITDA
@@ -651,7 +761,9 @@ def calcular_altman_zscore(debt_eq, roa):
     Función pura para calcular el Altman Z-Score (predicción de quiebra/insolvencia).
     Retorna un diccionario estructurado con métricas y alertas de semáforo.
     """
-    z_score = 3.5 - (debt_eq * 0.4) + (roa * 0.1)
+    d_eq = safe_num(debt_eq, 0.0)
+    r_oa = safe_num(roa, 0.0)
+    z_score = 3.5 - (d_eq * 0.4) + (r_oa * 0.1)
     if z_score > 2.99:
         semaforo = "verde"
         status = "🟢"
@@ -681,19 +793,25 @@ def calcular_scoring(col_nde, col_cob, col_cur, col_de, col_roic, mg_op, col_fcf
     Función pura para consolidar el scoring de 100 Puntos Top-Down.
     Retorna un diccionario estructurado con los puntos globales y desglosados por pilar.
     """
+    mg_op_val = safe_num(mg_op, 0.0)
+    v_intr_val = safe_num(v_intr, 0.0)
+    precio_actual_val = safe_num(precio_actual, 0.0)
+    pe_val = safe_num(pe, 0.0)
+    macro_score_val = safe_num(macro_score, 0.0)
+
     pts_solvencia = (4 if col_nde=="🟢" else 2) + (4 if col_cob=="🟢" else 2) + (3.5 if col_cur=="🟢" else 1.75) + (3.5 if col_de=="🟢" else 1.75)
-    pts_rentabilidad = (5 if col_roic=="🟢" else 2.5) + (5 if mg_op>25 else 2.5) + (5 if col_fcfc=="🟢" else 2.5) + (5 if col_roe=="🟢" else 2.5) + (5 if col_roa=="🟢" else 2.5)
-    pts_valuacion = (10 if v_intr>precio_actual*1.15 else 5) + (10 if 0<pe<20 else 5) + (8 if col_pfcf=="🟢" else 4) + (7 if col_ev=="🟢" else 3) + (5 if col_peg=="🟢" else 2.5)
+    pts_rentabilidad = (5 if col_roic=="🟢" else 2.5) + (5 if mg_op_val>25 else 2.5) + (5 if col_fcfc=="🟢" else 2.5) + (5 if col_roe=="🟢" else 2.5) + (5 if col_roa=="🟢" else 2.5)
+    pts_valuacion = (10 if v_intr_val>precio_actual_val*1.15 else 5) + (10 if 0<pe_val<20 else 5) + (8 if col_pfcf=="🟢" else 4) + (7 if col_ev=="🟢" else 3) + (5 if col_peg=="🟢" else 2.5)
     pts_riesgos = (5 if col_z=="🟢" else 2.5) + (5 if col_b=="🟢" else 2.5) + (5 if col_s=="🟢" else 2.5)
     
-    pts = pts_solvencia + pts_rentabilidad + pts_valuacion + pts_riesgos + macro_score
+    pts = pts_solvencia + pts_rentabilidad + pts_valuacion + pts_riesgos + macro_score_val
     return {
         "pts_total": pts,
         "pts_solvencia": pts_solvencia,
         "pts_rentabilidad": pts_rentabilidad,
         "pts_valuacion": pts_valuacion,
         "pts_riesgos": pts_riesgos,
-        "macro_score": macro_score
+        "macro_score": macro_score_val
     }
 
 def evaluar_veredicto(pts, z_score, net_debt_ebitda, is_fibra_util, cob_int, int_exp, roic):
@@ -701,6 +819,13 @@ def evaluar_veredicto(pts, z_score, net_debt_ebitda, is_fibra_util, cob_int, int
     Función pura para evaluar condiciones de Veto (Knockout) y recomendación final.
     Retorna un diccionario estructurado con la decisión de inversión y alerta de semáforo.
     """
+    pts = safe_num(pts, 0.0)
+    z_score = safe_num(z_score, 0.0)
+    net_debt_ebitda = safe_num(net_debt_ebitda, 0.0)
+    cob_int = safe_num(cob_int, 0.0)
+    int_exp = safe_num(int_exp, 0.0)
+    roic = safe_num(roic, 0.0)
+
     is_knockout = (z_score < 1.81) or (net_debt_ebitda > 4.5 and not is_fibra_util) or (cob_int < 2.0 and int_exp > 1) or (0 < roic < 8)
     if is_knockout:
         veredicto = "⛔ VETO DE INVERSIÓN (Knockout Activo)"

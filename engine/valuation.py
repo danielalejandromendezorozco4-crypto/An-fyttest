@@ -4,6 +4,9 @@ import math
 import statistics
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import numpy as np
+import pandas as pd
+
 from config.settings import (
     DEFAULT_BUYBACK_RATE,
     DEFAULT_FADE_YEARS,
@@ -19,19 +22,92 @@ from config.settings import (
 # -----------------------------------------------------------------------------
 
 def safe_num(val: Any, default: float = 0.0) -> float:
-    """Convierte cualquier valor de forma segura a float o al valor por defecto."""
+    """
+    Convierte cualquier valor de forma segura a float o al valor por defecto especificado.
+    Maneja defensivamente:
+    - Escalares numéricos (int, float, np.number).
+    - Objetos de consenso (ConsensusWallStreet) con atributo target_mean.
+    - Tuplas y listas de 1 elemento, o tuplas con 1 escalar numérico y metadatos (ej. (precio, moneda), (valor, status)).
+    - pd.Series, np.ndarray de tamaño 1.
+    - Diccionarios con claves numéricas estándar ('value', 'target_mean', etc.).
+    - Strings formateados ('$1,250.50', '15.5%', '550.00 USD').
+    - None, np.nan, float('nan'), inf, -inf, cadenas no numéricas y tipos corruptos.
+    """
     if val is None:
         return float(default) if default is not None else 0.0
+
     try:
-        if isinstance(val, (int, float)):
-            if math.isnan(val) or math.isinf(val):
+        if hasattr(val, "target_mean"):
+            val = getattr(val, "target_mean")
+
+        while isinstance(val, (tuple, list, set)):
+            if len(val) == 0:
                 return float(default) if default is not None else 0.0
-            return float(val)
+            if len(val) == 1:
+                val = next(iter(val))
+                if val is None:
+                    return float(default) if default is not None else 0.0
+                continue
+            numerics = []
+            for item in val:
+                if item is not None and not isinstance(item, (dict, list, tuple, set, bool)):
+                    if isinstance(item, (int, float, np.number)):
+                        numerics.append(item)
+                    elif isinstance(item, str):
+                        clean_item = item.replace(',', '').replace('$', '').replace('%', '').strip()
+                        parts = clean_item.split()
+                        if len(parts) > 1:
+                            clean_item = parts[0]
+                        try:
+                            float(clean_item)
+                            numerics.append(item)
+                        except ValueError:
+                            pass
+            if len(numerics) == 1:
+                val = numerics[0]
+            else:
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, (pd.Series, np.ndarray)):
+            if val.size == 0 or val.size > 1:
+                return float(default) if default is not None else 0.0
+            val = val.flat[0] if isinstance(val, np.ndarray) else val.iloc[0]
+            if val is None or pd.isna(val):
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, dict):
+            candidatos = [
+                val.get("value"), val.get("val"), val.get("target_mean"),
+                val.get("target_mean_price"), val.get("mean"), val.get("price"),
+                val.get("close"), val.get("current"),
+            ]
+            found = False
+            for cand in candidatos:
+                if cand is not None and not isinstance(cand, (dict, list, tuple)):
+                    val = cand
+                    found = True
+                    break
+            if not found:
+                return float(default) if default is not None else 0.0
+
+        if isinstance(val, (int, float, np.number)):
+            f_val = float(val)
+            if math.isnan(f_val) or math.isinf(f_val):
+                return float(default) if default is not None else 0.0
+            return f_val
+
         if isinstance(val, str):
             clean_str = val.replace(',', '').replace('$', '').replace('%', '').strip()
-            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf'):
+            parts = clean_str.split()
+            if len(parts) > 1:
+                clean_str = parts[0]
+            if not clean_str or clean_str.lower() in ('nan', 'none', 'n/a', 'null', 'inf', '-inf', 'n/d'):
                 return float(default) if default is not None else 0.0
             return float(clean_str)
+
+        if pd.isna(val):
+            return float(default) if default is not None else 0.0
+
         return float(val)
     except (ValueError, TypeError, Exception):
         return float(default) if default is not None else 0.0
@@ -69,27 +145,30 @@ def calcular_wacc(
         Diccionario con: wacc, ke, kd, we, wd, rf, erp, tax_rate.
     """
     api_k = finnhub_key or fmp_key
-    rf       = max(float(tasa_libre_riesgo) if tasa_libre_riesgo is not None else 4.20, 0.0)
-    beta_val = max(float(beta) if beta is not None else 1.0, 0.05)
-    erp_val  = max(float(erp) if erp is not None else 5.0, 2.0)
-    t_ef     = max(min(float(tax_rate) if tax_rate is not None else 0.21, 0.35), 0.0)
+    rf       = max(safe_num(tasa_libre_riesgo, default=4.20), 0.0)
+    beta_val = max(safe_num(beta, default=1.0), 0.05)
+    erp_val  = max(safe_num(erp, default=5.0), 2.0)
+    t_ef     = max(min(safe_num(tax_rate, default=0.21), 0.35), 0.0)
 
     ke = rf + (beta_val * erp_val)
 
-    total_capital = mcap + total_debt
+    mcap_val = safe_num(mcap, default=0.0)
+    debt_val = safe_num(total_debt, default=0.0)
+    total_capital = mcap_val + debt_val
     if total_capital > 0:
-        we = mcap / total_capital
-        wd = total_debt / total_capital
+        we = mcap_val / total_capital
+        wd = debt_val / total_capital
     else:
         we, wd = 1.0, 0.0
 
-    if total_debt > 0:
-        if int_exp > 0:
-            kd = (int_exp / total_debt) * 100.0
+    if debt_val > 0:
+        int_exp_val = safe_num(int_exp, default=0.0)
+        if int_exp_val > 0:
+            kd = (int_exp_val / debt_val) * 100.0
         elif ticker and (api_k or fred_key):
             try:
                 from data.financial_fetcher import obtener_kd_finnhub_fred  # noqa: PLC0415
-                kd = float(obtener_kd_finnhub_fred(ticker, api_k, fred_key, int_exp, total_debt))
+                kd = safe_num(obtener_kd_finnhub_fred(ticker, api_k, fred_key, int_exp_val, debt_val), default=rf)
             except Exception:
                 kd = rf
         else:
@@ -131,17 +210,20 @@ def calcular_fcff_normalizado(
     Returns:
         Tupla (fcff_total, fcff_por_accion).
     """
-    t_ef  = max(min(float(tax_rate), 0.35), 0.0)
-    mg_op = max(float(operating_margin_hist), 0.10)
+    t_ef  = max(min(safe_num(tax_rate, default=0.21), 0.35), 0.0)
+    mg_op = max(safe_num(operating_margin_hist, default=0.10), 0.10)
+    rev_val = safe_num(revenue_ttm, default=0.0)
+    shares_val = safe_num(shares_diluted, default=0.0)
+    eps_val = safe_num(eps_ttm, default=0.0)
 
-    if revenue_ttm > 0:
-        fcff_total = revenue_ttm * mg_op * (1.0 - t_ef)
-        fcff_ps    = fcff_total / shares_diluted if shares_diluted > 0 else 0.0
+    if rev_val > 0:
+        fcff_total = rev_val * mg_op * (1.0 - t_ef)
+        fcff_ps    = fcff_total / shares_val if shares_val > 0 else 0.0
         return fcff_total, fcff_ps
 
-    if eps_ttm > 0:
-        fcff_ps    = eps_ttm * (1.0 - max(min(reinvestment_rate, 0.50), 0.10))
-        fcff_total = fcff_ps * shares_diluted if shares_diluted > 0 else 0.0
+    if eps_val > 0:
+        fcff_ps    = eps_val * (1.0 - max(min(safe_num(reinvestment_rate, default=0.25), 0.50), 0.10))
+        fcff_total = fcff_ps * shares_val if shares_val > 0 else 0.0
         return fcff_total, fcff_ps
 
     return 0.0, 0.0
@@ -254,6 +336,21 @@ def calcular_fcff_valuation(
         Diccionario con metricas de valuacion, fcff_pv_detalle (tabla
         anio a anio) y metadatos del modelo.
     """
+    total_debt = safe_num(total_debt, 0.0)
+    total_cash = safe_num(total_cash, 0.0)
+    shares_diluted = safe_num(shares_diluted, 0.0)
+    mcap = safe_num(mcap, 0.0)
+    beta = safe_num(beta, 1.0)
+    rf = safe_num(rf, 4.20)
+    precio_actual = safe_num(precio_actual, 0.0)
+    erp = safe_num(erp, 5.0)
+    revenue_ttm = safe_num(revenue_ttm, 0.0)
+    operating_margin_hist = safe_num(operating_margin_hist, 0.0)
+    cagr_revenue_hist = safe_num(cagr_revenue_hist, 0.0)
+    revenue_growth_api = safe_num(revenue_growth_api, 0.0)
+    fade_years = int(safe_num(fade_years, DEFAULT_FADE_YEARS))
+    n_years = int(safe_num(n_years, 5))
+
     if shares_diluted <= 0 or precio_actual <= 0:
         return _resultado_fcff_vacio(precio_actual, total_cash, total_debt, rf, beta, erp)
 
@@ -297,7 +394,7 @@ def calcular_fcff_valuation(
 
     # 3. Tasa Terminal y WACC clamping con invariante financiero
     if g_term_override is not None:
-        g_term = max(min(float(g_term_override), 0.04), 0.005)
+        g_term = max(min(safe_num(g_term_override, default=0.025), 0.04), 0.005)
     else:
         g_term = G_TERM_DEFAULT
 
@@ -410,12 +507,12 @@ def calcular_fcff_valuation(
     deuda_neta       = total_debt - total_cash
     equity_value     = enterprise_value - deuda_neta
 
-    buyback_rate_val = float(buyback_rate) if buyback_rate is not None else 0.0
+    buyback_rate_val = safe_num(buyback_rate, default=0.0)
     if buyback_rate_val > 1.0:
         buyback_rate_val = buyback_rate_val / 100.0
     buyback_rate_ = max(min(buyback_rate_val, 0.08), -0.05)
 
-    shares_count = float(shares_diluted)
+    shares_count = max(safe_num(shares_diluted, default=1.0), 1.0)
     if mcap > 10_000_000 and precio_actual > 0:
         implied_sh = mcap / precio_actual
         if shares_count <= 1000 or shares_count < implied_sh * 0.01 or shares_count > implied_sh * 100:
@@ -489,6 +586,12 @@ def _resultado_fcff_vacio(
     erp: float,
 ) -> Dict[str, Union[float, str, list]]:
     """Resultado neutro cuando faltan datos minimos de valuacion."""
+    precio_actual = safe_num(precio_actual, 0.0)
+    total_cash = safe_num(total_cash, 0.0)
+    total_debt = safe_num(total_debt, 0.0)
+    rf = safe_num(rf, 4.20)
+    beta = safe_num(beta, 1.0)
+    erp = safe_num(erp, 5.0)
     ke = rf + (beta * erp)
     return {
         "valor_intrinseco":  0.0,
@@ -544,11 +647,16 @@ def calcular_ddm(
     Modelo Gordon Growth para Dividendos (DDM):
         v_intr_ddm = (Dividend_Rate * (1 + g_div)) / (Ke_dec - g_div)
     """
-    ke_dec    = (ke / 100.0) if ke > 1.0 else ke
-    g_div_eff = min(max(g_div, 0.015), 0.04)
+    div_rate_val = safe_num(div_rate, default=0.0)
+    ke_val       = safe_num(ke, default=0.0)
+    g_div_val    = safe_num(g_div, default=0.02)
+    p_act        = safe_num(precio_actual, default=0.0)
 
-    if div_rate > 0 and ke_dec > g_div_eff:
-        v_intr_ddm = (div_rate * (1.0 + g_div_eff)) / (ke_dec - g_div_eff)
+    ke_dec    = (ke_val / 100.0) if ke_val > 1.0 else ke_val
+    g_div_eff = min(max(g_div_val, 0.015), 0.04)
+
+    if div_rate_val > 0 and ke_dec > g_div_eff:
+        v_intr_ddm = (div_rate_val * (1.0 + g_div_eff)) / (ke_dec - g_div_eff)
         viable = True
     else:
         v_intr_ddm = 0.0
@@ -558,7 +666,7 @@ def calcular_ddm(
 
     if v_intr_ddm == 0:
         semaforo, status = "gris", "\u26aa"
-    elif v_intr_ddm >= precio_actual:
+    elif v_intr_ddm >= p_act:
         semaforo, status = "verde", "\U0001f7e2"
     else:
         semaforo, status = "rojo", "\U0001f534"
@@ -591,13 +699,16 @@ def calcular_dcf_intr_ps(
     Valuacion DCF por accion para matrices de sensibilidad.
     Aplica Mid-Year Convention y puente EV -> Equity por accion.
     """
-    wacc_dec   = (wacc_var / 100.0) if wacc_var > 1.0 else wacc_var
-    g_term_eff = g_term_var if g_term_var < wacc_dec else max(wacc_dec - WACC_MIN_SPREAD_OVER_G, 0.010)
+    wacc_num   = safe_num(wacc_var, default=9.0)
+    wacc_dec   = (wacc_num / 100.0) if wacc_num > 1.0 else wacc_num
+    g_term_num = safe_num(g_term_var, default=0.025)
+    g_term_eff = g_term_num if g_term_num < wacc_dec else max(wacc_dec - WACC_MIN_SPREAD_OVER_G, 0.010)
 
     pv_flujos = 0.0
-    f_ps      = float(flujo_por_accion)
+    f_ps      = safe_num(flujo_por_accion, default=0.0)
+    g_1_5_val = safe_num(g_1_5, default=0.08)
     for t in range(1, 6):
-        f_ps      = f_ps * (1.0 + g_1_5)
+        f_ps      = f_ps * (1.0 + g_1_5_val)
         factor_my = (1.0 + wacc_dec) ** (t - 0.5)
         pv_flujos += f_ps / factor_my
 
@@ -606,15 +717,20 @@ def calcular_dcf_intr_ps(
     tv             = f_term / denominador_tv
     pv_terminal    = tv / ((1.0 + wacc_dec) ** (5 - 0.5))
 
-    caja_neta_ps     = ((total_cash - total_debt) / shares_current) if shares_current > 0 else 0.0
+    p_act = safe_num(precio_actual, default=0.0)
+    t_cash = safe_num(total_cash, default=0.0)
+    t_debt = safe_num(total_debt, default=0.0)
+    sh_curr = max(safe_num(shares_current, default=1.0), 1.0)
+
+    caja_neta_ps     = ((t_cash - t_debt) / sh_curr) if sh_curr > 0 else 0.0
     valor_intrinseco = max(pv_flujos + pv_terminal + caja_neta_ps, 0.0)
 
-    es_atractivo = valor_intrinseco >= precio_actual
+    es_atractivo = valor_intrinseco >= p_act
     semaforo     = "verde" if es_atractivo else "rojo"
     status       = "\U0001f7e2" if es_atractivo else "\U0001f534"
     upside       = (
-        ((valor_intrinseco - precio_actual) / precio_actual) * 100.0
-        if precio_actual > 0 else 0.0
+        ((valor_intrinseco - p_act) / p_act) * 100.0
+        if p_act > 0 else 0.0
     )
 
     return {
@@ -653,5 +769,5 @@ def crear_calculador_dcf(
             total_debt       = total_debt,
             shares_current   = shares_current,
         )
-        return float(res["valor_intrinseco"])
+        return safe_num(res.get("valor_intrinseco"), default=0.0)
     return calculador

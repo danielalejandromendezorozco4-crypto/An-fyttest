@@ -444,9 +444,9 @@ else:
             else: col_fcfy, msg_fcfy = "🔴", f"Rendimiento Exigente ({fcf_yield:.2f}% vs FRED {tasa_libre_riesgo:.2f}%)."
             
             # --- MÓDULO 3: VALUACIÓN, FCFF Y DDM (40%) ---
-            beta = m_ttm.get("beta", 1.0)
-            rf_tnx = obtener_rf_tnx(fallback_fred=tasa_libre_riesgo)
-            erp_mercado = obtener_erp_mercado(fred_key, rf_tnx)
+            beta = safe_num(m_ttm.get("beta", 1.0), 1.0)
+            rf_tnx = safe_num(obtener_rf_tnx(fallback_fred=tasa_libre_riesgo), 4.20)
+            erp_mercado = safe_num(obtener_erp_mercado(fred_key, rf_tnx), 5.0)
 
             # Extraer partidas FCFF con dual-path (EBIT primario + OCF fallback)
             comp_fcff = extraer_fcff_desapalancado(cf, inc, bs, info)
@@ -572,18 +572,7 @@ else:
             if target <= 0.0 and precio_actual > 0:
                 try:
                     consenso_res = obtener_consenso_wall_street(ticker_input, finnhub_key)
-                    if isinstance(consenso_res, (tuple, list)) and len(consenso_res) >= 1:
-                        t_mean_fb = safe_num(consenso_res[0], 0.0)
-                    elif isinstance(consenso_res, dict):
-                        t_mean_fb = safe_num(
-                            consenso_res.get("target_mean")
-                            or consenso_res.get("target_mean_price")
-                            or consenso_res.get("targetMeanPrice"),
-                            0.0,
-                        )
-                    else:
-                        t_mean_fb = 0.0
-
+                    t_mean_fb = safe_num(consenso_res, 0.0)
                     if t_mean_fb > 0.0:
                         target = t_mean_fb
                 except Exception:

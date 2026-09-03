@@ -682,5 +682,78 @@ class TestRefactorizacionV2(unittest.TestCase):
         test_buyback_rate_normalizacion_y_limites()
 
 
+class TestDefensiveNumericUnpacking(unittest.TestCase):
+    """Pruebas para blindaje contra TypeError: float() argument must be a string or a real number, not 'tuple'."""
+
+    def test_safe_num_tupla_con_moneda_o_status(self):
+        from data.financial_fetcher import safe_num, ConsensusWallStreet
+        # Tuplas tipo (precio, moneda)
+        self.assertEqual(safe_num((150.0, "USD")), 150.0)
+        self.assertEqual(safe_num(("USD", 150.0)), 150.0)
+        self.assertEqual(safe_num(("$150.50", "USD")), 150.50)
+        # Tuplas tipo (valor, status)
+        self.assertEqual(safe_num((200.0, "OK")), 200.0)
+        self.assertEqual(safe_num((200.0, True)), 200.0)
+        self.assertEqual(safe_num((None, 42.0)), 42.0)
+        # Tupla 1-elemento
+        self.assertEqual(safe_num((550.0,)), 550.0)
+        # ConsensusWallStreet
+        cw = ConsensusWallStreet(667.30, 735.0, 550.0)
+        self.assertEqual(safe_num(cw), 667.30)
+        # pd.Series / np.ndarray
+        import numpy as np
+        self.assertEqual(safe_num(pd.Series([99.9])), 99.9)
+        self.assertEqual(safe_num(np.array([88.8])), 88.8)
+        # Fallbacks seguros en multi-elemento
+        self.assertEqual(safe_num([1, 2, 3], default=0.0), 0.0)
+        self.assertEqual(safe_num({"dict": 1}, default=0.0), 0.0)
+
+    def test_calcular_wacc_con_tuplas(self):
+        # Asegurar que calcular_wacc nunca falle si se le pasan tuplas
+        res = calcular_wacc(
+            tasa_libre_riesgo=(4.20, "USD"),
+            beta=(1.10, "5Y"),
+            mcap=(500_000_000.0, "USD"),
+            total_debt=(100_000_000.0, "USD"),
+            int_exp=(5_000_000.0, "USD"),
+            tax_rate=(0.21, "statutory"),
+            erp=(5.0,),
+        )
+        self.assertIsInstance(res["wacc"], float)
+        self.assertGreater(res["wacc"], 0.0)
+
+    def test_calcular_fcff_valuation_con_tuplas(self):
+        # Simular entradas con tuplas para verificar ausencia total de TypeError
+        res = calcular_fcff_valuation(
+            ocf_hist=[100_000_000.0],
+            capex_hist=[20_000_000.0],
+            interest_hist=[5_000_000.0],
+            pretax_hist=[50_000_000.0],
+            taxprov_hist=[10_000_000.0],
+            total_debt=(50_000_000.0, "USD"),
+            total_cash=(30_000_000.0, "USD"),
+            shares_diluted=(10_000_000.0,),
+            mcap=(800_000_000.0, "USD"),
+            beta=(1.10,),
+            rf=(4.20,),
+            precio_actual=(80.0, "$"),
+            erp=(5.0,),
+            buyback_rate=(0.01,),
+            g_term_override=(0.025,),
+        )
+        self.assertIsInstance(res["valor_intrinseco"], float)
+        self.assertGreater(res["valor_intrinseco"], 0.0)
+
+    def test_calcular_ddm_con_tuplas(self):
+        res = calcular_ddm(
+            div_rate=(2.50, "USD"),
+            ke=(8.5, "%"),
+            g_div=(0.025,),
+            precio_actual=(100.0,),
+        )
+        self.assertIsInstance(res["valor_intrinseco_ddm"], float)
+        self.assertGreater(res["valor_intrinseco_ddm"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
