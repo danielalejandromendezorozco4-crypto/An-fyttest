@@ -1580,11 +1580,9 @@ def extraer_fcff_desapalancado(
     """
     ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
     fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
-    # CapEx TTM auditable: OCF - FCF respeta convención contable y escala exacta
-    if ocf_ttm > 0 and fcf_ttm > 0 and ocf_ttm >= fcf_ttm:
+    capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0), 0.0))
+    if capex_ttm == 0.0 and ocf_ttm > 0 and fcf_ttm > 0 and ocf_ttm >= fcf_ttm:
         capex_ttm = ocf_ttm - fcf_ttm
-    else:
-        capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0), 0.0))
 
     ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
 
@@ -1596,23 +1594,16 @@ def extraer_fcff_desapalancado(
     ])
     capex_hist = obtener_capex_historico(cf)
 
-    # Actualizar período más reciente si capex_ttm es coherente con el orden anual
-    if not capex_hist:
-        capex_hist = [capex_ttm] if capex_ttm > 0 else [0.0]
-    elif capex_ttm > 0 and "TTM" in cf.columns:
-        capex_hist[0] = capex_ttm
-    elif capex_ttm > 0 and abs(capex_hist[0] - capex_ttm) > 1000:
-        # Solo prepender si capex_ttm representa un período anual completo (no un trimestre)
-        if capex_ttm >= capex_hist[0] * 0.6:
-            capex_hist = [capex_ttm] + capex_hist
-
+    # Si cf carece de datos históricos, usar TTM como fallback
     if not ocf_hist:
         ocf_hist = [ocf_ttm] if ocf_ttm > 0 else [0.0]
     elif ocf_ttm > 0 and "TTM" in cf.columns:
         ocf_hist[0] = ocf_ttm
-    elif ocf_ttm > 0 and abs(ocf_hist[0] - ocf_ttm) > 1000:
-        if ocf_ttm >= ocf_hist[0] * 0.6:
-            ocf_hist = [ocf_ttm] + ocf_hist
+
+    if not capex_hist:
+        capex_hist = [capex_ttm] if capex_ttm > 0 else [0.0]
+    elif capex_ttm > 0 and "TTM" in cf.columns:
+        capex_hist[0] = capex_ttm
 
     # Alinear longitud de series para consistencia período a período
     if ocf_hist and capex_hist:
@@ -2062,15 +2053,20 @@ def extraer_metricas_ttm(
         "gross_profit_ttm": gross_profit_ttm,
         "operating_income_ttm": operating_income_ttm,
         "ebitda_ttm": ebitda_ttm,
+        "ebitda": ebitda_ttm,
         "net_income_ttm": net_income_ttm,
         "eps_diluted_ttm": eps_diluted_ttm,
+        "eps_ttm": eps_diluted_ttm,
+        "eps": eps_diluted_ttm,
         "forward_eps": forward_eps,
         "pretax_income_ttm": pretax_income_ttm,
         "tax_provision_ttm": tax_provision_ttm,
         "interest_expense_ttm": interest_expense_ttm,
         "ocf_ttm": ocf_ttm,
+        "operating_cashflow": ocf_ttm,
         "capex_ttm": capex_ttm,
         "fcf_ttm": fcf_ttm,
+        "free_cashflow": fcf_ttm,
         "total_debt": total_debt,
         "total_cash": total_cash,
         "net_debt": total_debt - total_cash,

@@ -910,6 +910,61 @@ class TestRecalibracionFCFFYSupuestosAvanzados(unittest.TestCase):
         self.assertGreater(comp["capex_hist"][0], 1.0e9)
         self.assertEqual(len(comp["ocf_hist"]), len(comp["capex_hist"]))
 
+    def test_multiplos_calibrados_sin_na(self):
+        """Verifica que los 5 múltiplos de valuación se calculen correctamente sin 'N/A'."""
+        from engine.metrics import calcular_multiplos_valuacion, calcular_buyback_yield
+        import pandas as pd
+
+        # Simular métricas para Mastercard (MA)
+        res_m = calcular_multiplos_valuacion(
+            precio_actual=588.0,
+            mcap=511e9,
+            eps_ttm=18.41,
+            forward_eps=23.03,
+            fcf_ttm=16.22e9,
+            ebitda_ttm=22.20e9,
+            total_debt=24.64e9,
+            total_cash=11.61e9,
+            revenue_ttm=28.0e9,
+            total_equity=6.5e9,
+            peg_info=1.52,
+            earnings_growth=0.15,
+            buyback_yield=2.2,
+        )
+        self.assertNotEqual(res_m["pe_str"], "N/A")
+        self.assertNotEqual(res_m["p_fcf_str"], "N/A")
+        self.assertNotEqual(res_m["peg_str"], "N/A")
+        self.assertNotEqual(res_m["ev_ebitda_str"], "N/A")
+        self.assertEqual(res_m["buyback_yield_str"], "2.2%")
+
+        self.assertAlmostEqual(res_m["pe"], 588.0 / 18.41, delta=0.2)
+        self.assertAlmostEqual(res_m["p_fcf"], 511e9 / 16.22e9, delta=0.5)
+        self.assertEqual(res_m["peg"], 1.52)
+        self.assertAlmostEqual(res_m["ev_ebitda"], (511e9 + 24.64e9 - 11.61e9) / 22.20e9, delta=0.5)
+
+    def test_reactividad_sliders_supuestos_avanzados(self):
+        """Verifica que los sliders de supuestos avanzados (fade, recompra, g) reaccionen armónicamente en tiempo real."""
+        # Base
+        res_base = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.025)
+        # Slider Fade: 1 a 5 años
+        res_fade_min = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=1, g_term_override=0.025)
+        res_fade_max = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=5, g_term_override=0.025)
+        self.assertLess(res_fade_min["valor_intrinseco"], res_fade_max["valor_intrinseco"])
+
+        # Slider Recompra: 0% a 3%
+        res_bb_0 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.025)
+        res_bb_3 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.03, fade_years=3, g_term_override=0.025)
+        self.assertLess(res_bb_0["valor_intrinseco"], res_bb_3["valor_intrinseco"])
+        self.assertGreater(res_bb_0["shares_efectivas"], res_bb_3["shares_efectivas"])
+
+        # Slider Tasa Terminal g: 1.5% a 3.0%
+        res_g_low = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.015)
+        res_g_high = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.030)
+        self.assertLess(res_g_low["valor_intrinseco"], res_g_high["valor_intrinseco"])
+
+        # Precio Máximo de Compra siempre aplica el margen de descuento proporcional
+        self.assertAlmostEqual(res_base["precio_max_compra"], round(res_base["valor_intrinseco"] * 0.90, 2), delta=0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

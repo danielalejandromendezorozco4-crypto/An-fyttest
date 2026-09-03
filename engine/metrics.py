@@ -210,11 +210,13 @@ def calcular_buyback_yield(
         col_by, msg_by = "🔴", f"Dilución de Accionistas: Incrementa flotante en {abs(buyback_yield):.1f}%."
 
     buyback_yield_str = f"{buyback_yield:.1f}%"
+    semaforo = "verde" if buyback_yield >= 1.5 else ("amarillo" if buyback_yield >= 0.0 else "rojo")
 
     return {
         "buyback_yield": round(buyback_yield, 2),
         "buyback_yield_str": buyback_yield_str,
         "col_by": col_by,
+        "semaforo": semaforo,
         "msg_by": msg_by,
         "repurchase_val": repurchase_val,
         "sh_prev": sh_prev,

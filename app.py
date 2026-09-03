@@ -891,7 +891,7 @@ else:
                 row2_c2.metric(f"{col_pfcf} P/FCF", p_fcf_str, help=h_pfcf)
                 row2_c3.metric(f"{col_peg} PEG Forward", peg_str, help=h_peg)
                 row2_c4.metric(f"{col_ev} EV / EBITDA", ev_ebitda_str, help=h_ev)
-                row2_c5.metric("Recompra Acciones", buyback_yield_str, help=h_by_m3)
+                row2_c5.metric(f"{col_by} Recompra Acciones", buyback_yield_str, help=h_by_m3)
 
                 if mostrar_ddm:
                     explicacion_modelo = (
@@ -902,8 +902,8 @@ else:
                     )
                 else:
                     explicacion_modelo = (
-                        f"💡 **Criterio de Valuación Seleccionado (FCFF):**\n\n"
-                        f"Para **{nombre}**, el **Modelo de Flujo de Caja Libre para la Firma (FCFF)** descuenta los flujos de caja operativos netos de CapEx con convención de medio año al WACC empírico ({wacc:.2f}%), incorporando el valor terminal de Gordon Shapiro ($g_{{term}} = {g_term*100:.1f}\%$) y reconciliando mediante el puente Enterprise Value → Equity Value por acción."
+                        fr"💡 **Criterio de Valuación Seleccionado (FCFF):**" + "\n\n"
+                        fr"Para **{nombre}**, el **Modelo de Flujo de Caja Libre para la Firma (FCFF)** descuenta los flujos de caja operativos netos de CapEx con convención de medio año al WACC empírico ({wacc:.2f}%), incorporando el valor terminal de Gordon Shapiro ($g_{{term}} = {g_term*100:.1f}\%$) y reconciliando mediante el puente Enterprise Value → Equity Value por acción."
                     )
                 st.info(explicacion_modelo)
                 st.markdown("### 🛡️ Módulo 4: Capa de Riesgos y Salud Contable (15%)")
