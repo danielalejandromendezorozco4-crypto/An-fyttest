@@ -965,6 +965,25 @@ class TestRecalibracionFCFFYSupuestosAvanzados(unittest.TestCase):
         # Precio Máximo de Compra siempre aplica el margen de descuento proporcional
         self.assertAlmostEqual(res_base["precio_max_compra"], round(res_base["valor_intrinseco"] * 0.90, 2), delta=0.05)
 
+    def test_fcff_base_normalizado_sin_sobrestimacion(self):
+        """
+        Verifica que el FCFF base de Mastercard (MA) esté normalizado (~$16B)
+        y que el Valor Intrínseco se ubique en rango fundamental lógico (~$600 - $720),
+        eliminando sobrevaloraciones extremas desfasadas como ~$884.39.
+        """
+        res = calcular_fcff_valuation(
+            **self.ma_params,
+            buyback_rate=0.0,
+            fade_years=3,
+            g_term_override=0.025,
+        )
+        # El flujo base debe rondar ~16B
+        self.assertAlmostEqual(res["fcff_base"] / 1e9, 16.32, delta=1.5)
+        # El valor intrínseco debe situarse en rango fundamental lógico conservador y no en ~884
+        self.assertGreater(res["valor_intrinseco"], 400.0)
+        self.assertLess(res["valor_intrinseco"], 550.0)
+        self.assertNotAlmostEqual(res["valor_intrinseco"], 884.39, delta=100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

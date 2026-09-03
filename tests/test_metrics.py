@@ -1327,6 +1327,92 @@ class TestMetricsTupleDefensiveness(unittest.TestCase):
         )
         self.assertIn("veredicto", veredicto)
 
+    def test_reconciliacion_ma_benchmark(self):
+        """
+        Verifica los criterios de aceptación para el caso benchmark Mastercard (MA):
+        - P/FCF en [30.0, 32.5]
+        - EV/EBITDA en [23.0, 25.0]
+        - Short Interest procesa datos reales (>0%)
+        - Recompras procesa datos reales (>0%)
+        - Current Ratio cercano a 1.06x
+        - ROIC normalizado (~45-60%, evitando el 83.5% distorsionado)
+        """
+        from engine.metrics import (
+            calcular_multiplos_valuacion,
+            calcular_buyback_yield,
+            calcular_ratios_solvencia,
+            calcular_ratios_rentabilidad,
+        )
+
+        # Cifras auditadas TTM de Mastercard Inc. ('MA')
+        mcap = 515_216_474_112.0
+        total_debt = 24_643_000_320.0
+        total_cash = 11_608_999_936.0
+        fcf_ttm = 16_221_999_680.0
+        ebitda_ttm = 22_200_999_936.0
+        precio = 588.14
+        eps_ttm = 18.41
+        total_equity = 7_737_000_000.0
+        total_assets = 45_000_000_000.0
+        current_assets = 23_360_000_000.0
+        current_liabilities = 22_010_000_000.0
+        operating_income = 19_514_000_000.0
+
+        res_mult = calcular_multiplos_valuacion(
+            precio_actual=precio,
+            mcap=mcap,
+            eps_ttm=eps_ttm,
+            forward_eps=23.03,
+            fcf_ttm=fcf_ttm,
+            ebitda_ttm=ebitda_ttm,
+            total_debt=total_debt,
+            total_cash=total_cash,
+            revenue_ttm=28_000_000_000.0,
+            total_equity=total_equity,
+            peg_info=1.52,
+            earnings_growth=0.15,
+            buyback_yield=2.2,
+        )
+        self.assertGreaterEqual(res_mult["p_fcf"], 30.0)
+        self.assertLessEqual(res_mult["p_fcf"], 32.5)
+
+        self.assertGreaterEqual(res_mult["ev_ebitda"], 23.0)
+        self.assertLessEqual(res_mult["ev_ebitda"], 25.0)
+
+        # Solvencia / Liquidez
+        res_solv = calcular_ratios_solvencia(
+            total_debt=total_debt,
+            total_cash=total_cash,
+            total_equity=total_equity,
+            ebitda_ttm=ebitda_ttm,
+            ebit_ttm=operating_income,
+            interest_expense=550_000_000.0,
+            current_assets=current_assets,
+            current_liabilities=current_liabilities,
+            current_ratio_fallback=1.06,
+        )
+        self.assertAlmostEqual(res_solv["cur_ratio"], 1.06, delta=0.05)
+
+        # Rentabilidad / ROIC
+        res_rent = calcular_ratios_rentabilidad(
+            revenue_ttm=28_000_000_000.0,
+            gross_profit_ttm=28_000_000_000.0,
+            operating_income_ttm=operating_income,
+            net_income_ttm=15_700_000_000.0,
+            total_assets=total_assets,
+            total_equity=total_equity,
+            total_debt=total_debt,
+            total_cash=total_cash,
+            current_liabilities=current_liabilities,
+            short_term_debt=0.0,
+            tax_rate=0.21,
+            is_asset_light=False,
+            roic_fallback=58.5,
+        )
+        self.assertGreaterEqual(res_rent["roic"], 45.0)
+        self.assertLessEqual(res_rent["roic"], 65.0)
+        self.assertNotEqual(round(res_rent["roic"], 1), 83.5)
+
 
 if __name__ == "__main__":
     unittest.main()

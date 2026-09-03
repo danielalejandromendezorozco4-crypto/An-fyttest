@@ -620,11 +620,11 @@ def calcular_ratios_solvencia(
         else:
             col_cob, msg_cob = "🔴", "Peligro: El flujo operativo apenas cubre los intereses."
 
-    # 3. Razón Corriente (Current Ratio - MRQ Standard)
-    if current_liabilities > 0 and current_assets > 0:
-        cur_ratio = current_assets / current_liabilities
-    elif current_ratio_fallback > 0:
+    # 3. Razón Corriente (Current Ratio - MRQ Standard Finviz)
+    if current_ratio_fallback > 0:
         cur_ratio = current_ratio_fallback
+    elif current_liabilities > 0 and current_assets > 0:
+        cur_ratio = current_assets / current_liabilities
     else:
         cur_ratio = 1.2
 

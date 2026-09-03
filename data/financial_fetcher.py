@@ -765,6 +765,7 @@ def fetch_datos_fundamentales(
     # 3. Procesamiento de Métricas Básicas (/stock/metric) y Precio Objetivo
     metrics_dict = metric_data.get("metric", {}) if isinstance(metric_data, dict) else {}
     series_dict = metric_data.get("series", {}).get("annual", {}) if isinstance(metric_data, dict) else {}
+    yf_short = safe_num(metrics_dict.get("shortPercentOfFloat"), 0.0)
 
     # Extracción jerárquica robusta de Consenso de Wall Street (Finnhub + Fallback yfinance)
     target_mean_price, target_high_price, target_low_price = obtener_consenso_wall_street(
@@ -1151,6 +1152,10 @@ def fetch_datos_fundamentales(
                     if roa_val <= 0.0 or roa_val > 45.0 or abs(roa_val - raw_roa_pct) > 15.0:
                         roa_val = raw_roa_pct
 
+                yf_roic = safe_num(yf_info.get("roic"), 0.0)
+                if yf_roic > 0.0:
+                    roic_val = yf_roic * 100.0 if yf_roic <= 1.0 else yf_roic
+
                 if total_assets_val <= 0.0:
                     total_assets_val = safe_num(yf_info.get("totalAssets"), 0.0)
                 if total_debt_val <= 0.0:
@@ -1161,18 +1166,29 @@ def fetch_datos_fundamentales(
                     bv = safe_num(yf_info.get("bookValue"), 0.0)
                     total_equity_val = (bv * shares_outstanding) if (bv > 0 and shares_outstanding > 0) else safe_num(yf_info.get("totalStockholderEquity"), 0.0)
 
-                if ebitda_val <= 0.0:
-                    ebitda_val = safe_num(yf_info.get("ebitda"), 0.0)
-                if ocf_val <= 0.0:
-                    ocf_val = safe_num(yf_info.get("operatingCashflow"), 0.0)
-                if fcf_val <= 0.0:
-                    fcf_val = safe_num(yf_info.get("freeCashflow"), 0.0)
+                yf_ebitda = safe_num(yf_info.get("ebitda"), 0.0)
+                if ebitda_val <= 0.0 and yf_ebitda > 0.0:
+                    ebitda_val = yf_ebitda
+
+                yf_ocf = safe_num(yf_info.get("operatingCashflow"), 0.0)
+                if ocf_val <= 0.0 and yf_ocf > 0.0:
+                    ocf_val = yf_ocf
+
+                yf_fcf = safe_num(yf_info.get("freeCashflow"), 0.0)
+                if fcf_val <= 0.0 and yf_fcf > 0.0:
+                    fcf_val = yf_fcf
+
                 if rev_val <= 0.0:
                     rev_val = safe_num(yf_info.get("totalRevenue"), 0.0)
                 if net_income_val == 0.0:
                     net_income_val = safe_num(yf_info.get("netIncomeToCommon") or yf_info.get("netIncome"), 0.0)
                 if ebit_val <= 0.0:
                     ebit_val = safe_num(yf_info.get("operatingIncome"), ebitda_val * 0.85 if ebitda_val > 0 else 0.0)
+
+                if roic_val <= 0.0 and total_equity_val > 0 and total_debt_val >= 0 and ebit_val > 0:
+                    inv_c = total_equity_val + total_debt_val
+                    if inv_c > 0:
+                        roic_val = (ebit_val * (1.0 - 0.21) / inv_c) * 100.0
 
                 yf_eg = safe_num(yf_info.get("earningsGrowth"), safe_num(yf_info.get("earningsQuarterlyGrowth"), 0.0))
                 if yf_eg != 0.0 and (eps_growth == 0.0 or (abs(eps_growth) > 1.0 and abs(yf_eg) < 1.0)):
@@ -1193,6 +1209,13 @@ def fetch_datos_fundamentales(
                         target_mean_price = t_mean_yf
                         target_high_price = t_high_yf
                         target_low_price = t_low_yf
+
+                yf_short = safe_num(
+                    yf_info.get("shortPercentOfFloat")
+                    or yf_info.get("sharesPercentSharesOut")
+                    or yf_info.get("shortPercentOfSharesOutstanding"),
+                    0.0
+                )
 
             # Enriquecer DataFrames si están vacíos
             if inc.empty:
@@ -1318,7 +1341,7 @@ def fetch_datos_fundamentales(
         "targetMeanPrice": target_mean_price,
         "targetHighPrice": target_high_price,
         "targetLowPrice": target_low_price,
-        "shortPercentOfFloat": 0.0,
+        "shortPercentOfFloat": yf_short if yf_short > 0 else safe_num(metrics_dict.get("shortPercentOfFloat"), 0.0),
     })
 
     claves_criticas = [
@@ -1860,8 +1883,11 @@ def extraer_metricas_ttm(
         capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0), 0.0))
 
     fcf_ttm = ocf_ttm - capex_ttm
-    if fcf_ttm == 0.0 and ocf_ttm == 0.0:
-        fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
+    fcf_info = safe_num(info.get("freeCashflow", 0.0), 0.0)
+    if fcf_info > 0.0 and (fcf_ttm <= 0.0 or abs(fcf_ttm - fcf_info) > fcf_info * 0.35):
+        fcf_ttm = fcf_info
+    elif fcf_ttm == 0.0:
+        fcf_ttm = fcf_info
 
     total_debt = safe_num(info.get("totalDebt", 0.0), 0.0)
     if total_debt == 0.0:
@@ -1920,6 +1946,12 @@ def extraer_metricas_ttm(
         roa_info = (net_income_ttm / total_assets) * 100.0
 
     roic_info = safe_num(info.get("roic", 0.0), 0.0)
+    if roic_info <= 0.0 and total_equity > 0 and total_debt >= 0 and operating_income_ttm > 0:
+        inv_cap_std = total_equity + total_debt
+        if inv_cap_std > 0:
+            nopat_calc = operating_income_ttm * (1.0 - 0.21)
+            roic_info = (nopat_calc / inv_cap_std) * 100.0
+
     current_ratio_info = safe_num(info.get("currentRatio", 0.0), 0.0)
     if current_ratio_info <= 0.0 and current_assets > 0 and current_liabilities > 0:
         current_ratio_info = current_assets / current_liabilities
@@ -2025,7 +2057,12 @@ def extraer_metricas_ttm(
             peg_ratio_info = (pe_calc / g_pct) if g_pct > 0 else 0.0
 
     beta = safe_num(info.get("beta", 1.0), 1.0)
-    short_percent_of_float = safe_num(info.get("shortPercentOfFloat", 0.0), 0.0)
+    short_percent_of_float = safe_num(
+        info.get("shortPercentOfFloat")
+        or info.get("short_percent_of_float")
+        or info.get("sharesPercentSharesOut"),
+        0.0
+    )
     target_mean_price = safe_num(
         info.get("targetMeanPrice")
         or info.get("target_mean_price")
