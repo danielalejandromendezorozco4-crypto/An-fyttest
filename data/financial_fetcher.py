@@ -215,7 +215,7 @@ def _extraer_val_df(df: Any, posibles_filas: List[str], default: float = 0.0) ->
                             return val
                 except Exception:
                     pass
-    return float(default)
+    return safe_num(default, 0.0)
 
 
 def _extraer_serie(

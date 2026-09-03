@@ -1252,6 +1252,82 @@ class TestWallStreetConsensus(unittest.TestCase):
             self.assertEqual(low, 0.0)
 
 
+class TestMetricsTupleDefensiveness(unittest.TestCase):
+    """Verifica que las funciones de métricas toleren argumentos tipo tupla sin TypeError."""
+
+    def test_multiplos_valuacion_con_tuplas(self):
+        from engine.metrics import calcular_multiplos_valuacion
+        res = calcular_multiplos_valuacion(
+            precio_actual=(550.0, "USD"),
+            mcap=(500_000_000_000.0, "USD"),
+            eps_ttm=(14.20, "USD"),
+            forward_eps=(16.50,),
+            fcf_ttm=(11_000_000_000.0,),
+            ebitda_ttm=(15_000_000_000.0,),
+            total_debt=(15_000_000_000.0,),
+            total_cash=(8_000_000_000.0,),
+            revenue_ttm=(25_000_000_000.0,),
+            total_equity=(6_000_000_000.0,),
+            peg_info=(1.8, "ratio"),
+            earnings_growth=(0.12,),
+            buyback_yield=(0.015,),
+        )
+        self.assertIsInstance(res["pe"], float)
+        self.assertGreater(res["pe"], 0.0)
+
+    def test_ratios_solvencia_con_tuplas(self):
+        from engine.metrics import calcular_ratios_solvencia
+        res = calcular_ratios_solvencia(
+            total_debt=(15_000_000_000.0, "USD"),
+            total_cash=(8_000_000_000.0, "USD"),
+            total_equity=(6_000_000_000.0,),
+            ebitda_ttm=(15_000_000_000.0,),
+            ebit_ttm=(13_500_000_000.0,),
+            interest_expense=(500_000_000.0,),
+            current_assets=(12_000_000_000.0,),
+            current_liabilities=(9_000_000_000.0,),
+            fcf_ttm=(10_000_000_000.0,),
+            shares_current=(930_000_000.0,),
+        )
+        self.assertIsInstance(res["net_debt"], float)
+        self.assertIsInstance(res["cur_ratio"], float)
+
+    def test_ratios_rentabilidad_con_tuplas(self):
+        from engine.metrics import calcular_ratios_rentabilidad
+        res = calcular_ratios_rentabilidad(
+            revenue_ttm=(25_000_000_000.0, "USD"),
+            gross_profit_ttm=(18_000_000_000.0,),
+            operating_income_ttm=(14_000_000_000.0,),
+            net_income_ttm=(12_000_000_000.0,),
+            total_assets=(40_000_000_000.0,),
+            total_equity=(6_000_000_000.0,),
+            total_debt=(15_000_000_000.0,),
+            total_cash=(8_000_000_000.0,),
+            current_liabilities=(9_000_000_000.0,),
+            short_term_debt=(1_000_000_000.0,),
+            tax_rate=(0.21,),
+        )
+        self.assertIsInstance(res["roic"], float)
+        self.assertIsInstance(res["roe"], float)
+
+    def test_altman_zscore_y_scoring_con_tuplas(self):
+        from engine.metrics import calcular_altman_zscore, calcular_scoring, evaluar_veredicto
+        res_z = calcular_altman_zscore(debt_eq=(2.5, "ratio"), roa=(15.0, "%"))
+        self.assertIn("z_score", res_z)
+
+        score = calcular_scoring(
+            "🟢", "🟢", "🟢", "🟢", "🟢", (55.0, "%"), "🟢", "🟢", "🟢",
+            (450.0, "USD"), (500.0, "$"), (35.0, "x"), "🟢", "🟢", "🟢",
+            res_z["status"], "🟢", "🟢", (15.0,)
+        )
+        self.assertIsInstance(score["pts_total"], (int, float))
+
+        veredicto = evaluar_veredicto(
+            score["pts_total"], (3.5,), (0.5,), False, (20.0,), 500, (45.0,)
+        )
+        self.assertIn("veredicto", veredicto)
+
+
 if __name__ == "__main__":
     unittest.main()
 
