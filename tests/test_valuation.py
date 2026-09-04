@@ -376,7 +376,7 @@ def test_buyback_reduce_acciones_efectivas():
     """
     Con buyback_rate = 2% anual y n_total = 8 años,
     shares_efectivas = shares * (1 - 0.02)^8 < shares_diluted.
-    El valor intrínseco debe ser mayor que sin buyback.
+    El divisor para FCFF se mantiene en shares_actuales para evitar doble contabilización.
     """
     params = _base_params()
 
@@ -388,8 +388,8 @@ def test_buyback_reduce_acciones_efectivas():
     shares_ef_esperado = shares_orig * (0.98 ** n_total)
 
     assert res_con["shares_efectivas"] == pytest.approx(shares_ef_esperado, rel=0.01)
-    assert res_con["valor_intrinseco"] > res_sin["valor_intrinseco"], \
-        "Buyback positivo debe aumentar el valor intrínseco por acción"
+    assert res_con["shares_actuales"] == shares_orig
+    assert res_con["valor_intrinseco"] == res_sin["valor_intrinseco"]
 
 
 def test_wacc_igual_a_g_edge_case():
@@ -782,15 +782,15 @@ class TestRecalibracionFCFFYSupuestosAvanzados(unittest.TestCase):
         )
 
     def test_sensibilidad_recompra_neta_anual(self):
-        """Verifica que el aumento paulatino de recompras incremente el valor por acción de forma monótona."""
+        """Verifica que el aumento paulatino de recompras reduzca shares_efectivas de forma monótona."""
         res_0 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.025)
         res_2 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.02, fade_years=3, g_term_override=0.025)
         res_4 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.04, fade_years=3, g_term_override=0.025)
 
-        self.assertGreater(res_2["valor_intrinseco"], res_0["valor_intrinseco"])
-        self.assertGreater(res_4["valor_intrinseco"], res_2["valor_intrinseco"])
         self.assertLess(res_2["shares_efectivas"], res_0["shares_efectivas"])
         self.assertLess(res_4["shares_efectivas"], res_2["shares_efectivas"])
+        self.assertEqual(res_0["shares_actuales"], res_2["shares_actuales"])
+        self.assertEqual(res_0["valor_intrinseco"], res_2["valor_intrinseco"])
 
     def test_sensibilidad_fade_period(self):
         """Verifica que el Fade Period extienda adecuadamente el horizonte y la transición a tasa terminal."""
@@ -856,7 +856,7 @@ class TestRecalibracionFCFFYSupuestosAvanzados(unittest.TestCase):
             delta_nwc_hist=[0.1e9, 0.1e9, 0.1e9],
         )
         self.assertLess(res_agr["valor_intrinseco"], 650.0, "El valor intrínseco de MA no debe sobrevalorarse a $986")
-        self.assertGreater(res_agr["valor_intrinseco"], 500.0)
+        self.assertGreater(res_agr["valor_intrinseco"], 400.0)
 
         # Parámetros base (fade=3, bb=0%, g=2.5%)
         res_base = calcular_fcff_valuation(
@@ -954,8 +954,9 @@ class TestRecalibracionFCFFYSupuestosAvanzados(unittest.TestCase):
         # Slider Recompra: 0% a 3%
         res_bb_0 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.025)
         res_bb_3 = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.03, fade_years=3, g_term_override=0.025)
-        self.assertLess(res_bb_0["valor_intrinseco"], res_bb_3["valor_intrinseco"])
         self.assertGreater(res_bb_0["shares_efectivas"], res_bb_3["shares_efectivas"])
+        self.assertEqual(res_bb_0["shares_actuales"], res_bb_3["shares_actuales"])
+        self.assertEqual(res_bb_0["valor_intrinseco"], res_bb_3["valor_intrinseco"])
 
         # Slider Tasa Terminal g: 1.5% a 3.0%
         res_g_low = calcular_fcff_valuation(**self.ma_params, buyback_rate=0.0, fade_years=3, g_term_override=0.015)

@@ -17,14 +17,17 @@ from config.settings import (
     FINNHUB_CACHE_TTL_METRICS,
     FINNHUB_CACHE_TTL_NEWS,
     FINNHUB_CACHE_TTL_QUOTE,
+    FMP_BASE_URL,
+    FMP_CACHE_TTL,
     FRED_CACHE_TTL,
     safe_get,
 )
+from engine.metrics import calcular_altman_zscore, calcular_piotroski_fscore
 
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. CLIENTE Y SESIÓN HTTP DEFENSIVA PARA FINNHUB API
+# 1. CLIENTES Y SESIONES HTTP DEFENSIVAS (FINNHUB Y FMP API)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def obtener_session_finnhub(api_key: str = "") -> requests.Session:
@@ -54,11 +57,23 @@ def _finnhub_get(
     """
     url = f"{FINNHUB_BASE_URL}/{endpoint.lstrip('/')}"
     query_params = dict(params or {})
-    if api_key and "token" not in query_params:
-        query_params["token"] = api_key.strip()
+    key_to_use = str(api_key or "").strip()
+    if not key_to_use:
+        try:
+            if hasattr(st, "secrets") and "FINNHUB_API_KEY" in st.secrets:
+                key_to_use = str(st.secrets["FINNHUB_API_KEY"]).strip()
+            elif hasattr(st, "secrets") and "FINNHUB_KEY" in st.secrets:
+                key_to_use = str(st.secrets["FINNHUB_KEY"]).strip()
+        except Exception:
+            pass
+        if not key_to_use:
+            key_to_use = (os.getenv("FINNHUB_API_KEY") or os.getenv("FINNHUB_KEY") or "").strip()
+
+    if key_to_use and "token" not in query_params:
+        query_params["token"] = key_to_use
 
     try:
-        session = obtener_session_finnhub(api_key=api_key)
+        session = obtener_session_finnhub(api_key=key_to_use)
         response = session.get(url, params=query_params, timeout=timeout)
 
         if response.status_code == 200:
@@ -78,6 +93,230 @@ def _finnhub_get(
     except (requests.RequestException, Exception) as exc:
         logger.debug("Excepción durante petición GET a Finnhub [%s]: %s", endpoint, exc)
         return None
+
+
+class FinnhubClient:
+    """
+    Cliente oficial y defensivo para Finnhub API v1.
+    Soporta company_peers, price_target, recommendation_trends, quote, etc.
+    """
+    def __init__(self, api_key: str = ""):
+        self.api_key = str(api_key or "").strip()
+        if not self.api_key:
+            try:
+                if hasattr(st, "secrets") and "FINNHUB_API_KEY" in st.secrets:
+                    self.api_key = str(st.secrets["FINNHUB_API_KEY"]).strip()
+                elif hasattr(st, "secrets") and "FINNHUB_KEY" in st.secrets:
+                    self.api_key = str(st.secrets["FINNHUB_KEY"]).strip()
+            except Exception:
+                pass
+            if not self.api_key:
+                self.api_key = (os.getenv("FINNHUB_API_KEY") or os.getenv("FINNHUB_KEY") or "").strip()
+
+    def company_peers(self, symbol: str) -> List[str]:
+        data = _finnhub_get("stock/peers", params={"symbol": symbol}, api_key=self.api_key)
+        if isinstance(data, list):
+            return [str(p).strip().upper() for p in data if p and str(p).strip().upper() != str(symbol).strip().upper()]
+        return []
+
+    def price_target(self, symbol: str) -> Dict[str, Any]:
+        data = _finnhub_get("stock/price-target", params={"symbol": symbol}, api_key=self.api_key)
+        res = data[0] if (isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict)) else (data if isinstance(data, dict) else {})
+        return {
+            "targetMean": safe_num(res.get("targetMean") or res.get("target_mean")),
+            "targetHigh": safe_num(res.get("targetHigh") or res.get("target_high")),
+            "targetLow": safe_num(res.get("targetLow") or res.get("target_low")),
+            "targetMedian": safe_num(res.get("targetMedian") or res.get("target_median")),
+            "numberAnalysts": int(safe_num(res.get("numberAnalysts") or res.get("numberOfAnalysts"), 0)),
+            "lastUpdated": res.get("lastUpdated", ""),
+            "symbol": res.get("symbol", symbol),
+        }
+
+    def recommendation_trends(self, symbol: str) -> List[Dict[str, Any]]:
+        data = _finnhub_get("stock/recommendation-trends", params={"symbol": symbol}, api_key=self.api_key)
+        if not data:
+            data = _finnhub_get("stock/recommendation", params={"symbol": symbol}, api_key=self.api_key)
+        if isinstance(data, list):
+            trends = []
+            for item in data:
+                if isinstance(item, dict):
+                    trends.append({
+                        "period": item.get("period", ""),
+                        "strongBuy": int(safe_num(item.get("strongBuy"), 0)),
+                        "buy": int(safe_num(item.get("buy"), 0)),
+                        "hold": int(safe_num(item.get("hold"), 0)),
+                        "sell": int(safe_num(item.get("sell"), 0)),
+                        "strongSell": int(safe_num(item.get("strongSell"), 0)),
+                    })
+            return trends
+        return []
+
+    def quote(self, symbol: str) -> Dict[str, Any]:
+        data = _finnhub_get("quote", params={"symbol": symbol}, api_key=self.api_key)
+        return data if isinstance(data, dict) else {}
+
+    def stock_candles(self, symbol: str, resolution: str, _from: int, to: int) -> Dict[str, Any]:
+        data = _finnhub_get("stock/candle", params={"symbol": symbol, "resolution": resolution, "from": _from, "to": to}, api_key=self.api_key)
+        return data if isinstance(data, dict) else {}
+
+    def company_news(self, symbol: str, _from: str, to: str) -> List[Dict[str, Any]]:
+        data = _finnhub_get("company-news", params={"symbol": symbol, "from": _from, "to": to}, api_key=self.api_key)
+        return data if isinstance(data, list) else []
+
+
+def obtener_finnhub_client(api_key: str = "") -> FinnhubClient:
+    """Retorna una instancia configurada de FinnhubClient."""
+    return FinnhubClient(api_key=api_key)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1.B CLIENTE Y SESIÓN HTTP DEFENSIVA PARA FINANCIAL MODELING PREP (FMP API)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def obtener_session_fmp(api_key: str = "") -> requests.Session:
+    """
+    Crea y configura una sesión de requests optimizada con headers estándar
+    para Financial Modeling Prep (FMP) API.
+    """
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "An-FyT/2.0 (Institutional Equity Research & Fundamental Valuation Engine)",
+        "Accept": "application/json",
+    })
+    return session
+
+
+def _fmp_get(
+    endpoint: str,
+    params: Optional[Dict[str, Any]] = None,
+    api_key: str = "",
+    timeout: float = 8.0,
+) -> Optional[Union[Dict[str, Any], List[Any]]]:
+    """
+    Realiza una petición GET segura y resiliente a la API de Financial Modeling Prep (FMP).
+    Maneja defensivamente códigos HTTP 429 (Rate Limit), 401/403 (Auth/Forbidden) y timeouts.
+    """
+    url = f"{FMP_BASE_URL}/{endpoint.lstrip('/')}"
+    query_params = dict(params or {})
+    key_to_use = str(api_key or "").strip()
+    if not key_to_use:
+        try:
+            if hasattr(st, "secrets") and "FMP_API_KEY" in st.secrets:
+                key_to_use = str(st.secrets["FMP_API_KEY"]).strip()
+            elif hasattr(st, "secrets") and "FMP_KEY" in st.secrets:
+                key_to_use = str(st.secrets["FMP_KEY"]).strip()
+        except Exception:
+            pass
+        if not key_to_use:
+            key_to_use = (os.getenv("FMP_API_KEY") or os.getenv("FMP_KEY") or "").strip()
+
+    if key_to_use and "apikey" not in query_params:
+        query_params["apikey"] = key_to_use
+
+    try:
+        session = obtener_session_fmp(api_key=key_to_use)
+        response = session.get(url, params=query_params, timeout=timeout)
+
+        if response.status_code == 200:
+            try:
+                return response.json()
+            except Exception:
+                return None
+        elif response.status_code == 429:
+            logger.warning("FMP API Rate Limit Exceeded (HTTP 429).")
+            return None
+        elif response.status_code in (401, 403):
+            logger.warning("FMP API Key no válida o no autorizada (HTTP %s).", response.status_code)
+            return None
+        else:
+            logger.warning("FMP API respondió con código HTTP %s para %s", response.status_code, endpoint)
+            return None
+    except (requests.RequestException, Exception) as exc:
+        logger.debug("Excepción durante petición GET a FMP [%s]: %s", endpoint, exc)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1.C ENDPOINTS CON CACHÉ FMP API (ttl=3600)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=FMP_CACHE_TTL)
+def fetch_fmp_income_statement(symbol: str, api_key: str = "", limit: int = 5) -> List[Dict[str, Any]]:
+    """Income Statement (5 años / períodos) desde Financial Modeling Prep."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return []
+    res = _fmp_get(f"income-statement/{symbol}", params={"limit": limit}, api_key=api_key)
+    return res if isinstance(res, list) else []
+
+
+@st.cache_data(ttl=FMP_CACHE_TTL)
+def fetch_fmp_balance_sheet(symbol: str, api_key: str = "", limit: int = 5) -> List[Dict[str, Any]]:
+    """Balance Sheet (5 años / períodos) desde Financial Modeling Prep."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return []
+    res = _fmp_get(f"balance-sheet-statement/{symbol}", params={"limit": limit}, api_key=api_key)
+    return res if isinstance(res, list) else []
+
+
+@st.cache_data(ttl=FMP_CACHE_TTL)
+def fetch_fmp_cash_flow(symbol: str, api_key: str = "", limit: int = 5) -> List[Dict[str, Any]]:
+    """Cash Flow Statement (5 años / períodos) desde Financial Modeling Prep."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return []
+    res = _fmp_get(f"cash-flow-statement/{symbol}", params={"limit": limit}, api_key=api_key)
+    return res if isinstance(res, list) else []
+
+
+@st.cache_data(ttl=FMP_CACHE_TTL)
+def fetch_fmp_ratios_ttm(symbol: str, api_key: str = "") -> Dict[str, Any]:
+    """Ratios TTM desde Financial Modeling Prep."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return {}
+    res = _fmp_get(f"ratios-ttm/{symbol}", api_key=api_key)
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+        return res[0]
+    return res if isinstance(res, dict) else {}
+
+
+@st.cache_data(ttl=FMP_CACHE_TTL)
+def fetch_fmp_key_metrics_ttm(symbol: str, api_key: str = "") -> Dict[str, Any]:
+    """Key Metrics TTM desde Financial Modeling Prep."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return {}
+    res = _fmp_get(f"key-metrics-ttm/{symbol}", api_key=api_key)
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+        return res[0]
+    return res if isinstance(res, dict) else {}
+
+
+@st.cache_data(ttl=FMP_CACHE_TTL)
+def fetch_fmp_financial_score(symbol: str, api_key: str = "") -> Dict[str, Any]:
+    """Scores de Solvencia y Salud Contable (Altman Z y Piotroski) desde FMP."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return {}
+    res = _fmp_get(f"financial-score/{symbol}", api_key=api_key)
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+        return res[0]
+    return res if isinstance(res, dict) else {}
+
+
+@st.cache_data(ttl=FMP_CACHE_TTL)
+def fetch_fmp_enterprise_values(symbol: str, api_key: str = "", limit: int = 1) -> Dict[str, Any]:
+    """Enterprise Values, market cap, acciones y stock price desde FMP."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return {}
+    res = _fmp_get(f"enterprise-values/{symbol}", params={"limit": limit}, api_key=api_key)
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+        return res[0]
+    return res if isinstance(res, dict) else {}
+
 
 
 def safe_num(val: Any, default: float = 0.0) -> float:
@@ -339,20 +578,18 @@ def fetch_cotizacion_intradia(ticker: str, finnhub_api_key: str = "") -> Tuple[f
         except Exception as e:
             logger.debug("Error procesando velas Finnhub para %s: %s", ticker, e)
 
-    # CAPA 3 (Fallback yfinance): Si Finnhub no devolvió cotización o velas
+    # CAPA 3 (Fallback FMP): Si Finnhub no devolvió cotización o velas
     if precio_actual == 0.0 or hist.empty:
         try:
-            import yfinance as yf
-            ticker_yf = yf.Ticker(ticker)
-            df_yf = ticker_yf.history(period="5y")
-            if df_yf is not None and not df_yf.empty:
-                hist = df_yf[["Open", "High", "Low", "Close", "Volume"]].copy()
+            fmp_quote = _fmp_get(f"quote/{ticker}")
+            if isinstance(fmp_quote, list) and len(fmp_quote) > 0 and isinstance(fmp_quote[0], dict):
+                fq = fmp_quote[0]
                 if precio_actual == 0.0:
-                    precio_actual = safe_num(hist["Close"].iloc[-1], 0.0)
+                    precio_actual = safe_num(fq.get("price", 0.0))
                 if prev_close == 0.0:
-                    prev_close = safe_num(hist["Close"].iloc[-2], 0.0) if len(hist) > 1 else precio_actual
-        except Exception as e_yf:
-            logger.debug("yfinance history fallback error para %s: %s", ticker, e_yf)
+                    prev_close = safe_num(fq.get("previousClose", 0.0))
+        except Exception as e_fmp:
+            logger.debug("FMP quote fallback error para %s: %s", ticker, e_fmp)
 
     return precio_actual, prev_close, hist
 
@@ -482,23 +719,16 @@ def obtener_consenso_wall_street(
     metrics_dict: Optional[Dict[str, Any]] = None,
     _yf_info: Optional[Dict[str, Any]] = None,
     yf_info: Optional[Dict[str, Any]] = None,
+    finnhub_client: Optional[Any] = None,
+    fmp_api_key: str = "",
 ) -> ConsensusWallStreet:
     """
-    Extrae el precio objetivo del consenso de analistas de Wall Street
-    exclusivamente desde los datos de Yahoo Finance (yfinance), con respaldo
-    defensivo ante activos sin cobertura o fallos de conexión.
+    Extrae el precio objetivo y desglose del consenso de analistas de Wall Street
+    utilizando Finnhub API v1 como fuente primaria (price_target y recommendation_trends),
+    con respaldo institucional a FMP API (price-target-consensus), asegurando que activos
+    con cobertura muestren su valor medio real en 'Consenso W.St' sin fallbacks vacíos ('N/D').
 
-    Jerarquía de extracción Yahoo Finance (yfinance):
-    1. Objeto `_yf_info` o `yf_info` pre-cargado si es provisto (máxima velocidad sin latencia).
-    2. Atributo `ticker_yf.analyst_price_targets` ('mean', 'median', 'high', 'low').
-    3. Diccionario `ticker_yf.info` ('targetMeanPrice', 'targetMedianPrice', 'targetHighPrice', etc.).
-    4. DataFrame `ticker_yf.recommendations_summary` (estimaciones agregadas).
-    5. Fallback secundario controlado si el activo carece de cobertura en Yahoo Finance.
-
-    Returns:
-        ConsensusWallStreet: Estructura híbrida compatible con tupla de 3 elementos (mean, high, low)
-        y con acceso tipo diccionario (res['target_mean'], res.get('recommendation'), res.to_dict()).
-        Si el activo no tiene cobertura, retorna (0.0, 0.0, 0.0).
+    Zero llamadas a yfinance.
     """
     ticker = str(ticker).upper().strip()
     if not ticker:
@@ -507,37 +737,13 @@ def obtener_consenso_wall_street(
     target_mean_price = 0.0
     target_high_price = 0.0
     target_low_price = 0.0
+    target_median_price = 0.0
     recommendation: Optional[str] = None
     num_analysts: Optional[int] = None
     raw_payload: Dict[str, Any] = {}
 
-    info_dict = _yf_info or yf_info
-
-    # ── CAPA 1: Insumos directos provistos por el llamador ──
-    # 1.1 Intentar con yf_info pre-cargado si existe
-    if isinstance(info_dict, dict) and info_dict:
-        mean_c = safe_num(
-            info_dict.get("targetMeanPrice")
-            or info_dict.get("targetMedianPrice")
-            or info_dict.get("targetPrice")
-            or info_dict.get("target_mean_price"),
-            0.0
-        )
-        if mean_c > 0.0:
-            target_mean_price = mean_c
-            target_high_price = safe_num(info_dict.get("targetHighPrice") or info_dict.get("target_high_price"), 0.0)
-            target_low_price = safe_num(info_dict.get("targetLowPrice") or info_dict.get("target_low_price"), 0.0)
-            n_opinions = info_dict.get("numberOfAnalystOpinions") or info_dict.get("num_analysts")
-            if n_opinions is not None:
-                try:
-                    num_analysts = int(n_opinions)
-                except (ValueError, TypeError):
-                    pass
-            recommendation = info_dict.get("recommendationKey") or info_dict.get("recommendation")
-            raw_payload["source"] = "yf_info_cache"
-
-    # 1.2 Si se proveyó target_data explícito (ej. pruebas o endpoint previo)
-    if target_mean_price <= 0.0 and target_data:
+    # 1. Si se proveyó target_data explícito (ej. pruebas unitarias o ThreadPool)
+    if target_data:
         target_info = target_data[0] if (isinstance(target_data, list) and len(target_data) > 0 and isinstance(target_data[0], dict)) else (target_data if isinstance(target_data, dict) else {})
         raw_payload["price_target_data"] = target_info
         target_mean_val = (
@@ -553,16 +759,15 @@ def obtener_consenso_wall_street(
         target_mean_price = safe_num(target_mean_val, 0.0)
         target_high_price = safe_num(target_info.get("targetHigh", target_info.get("target_high", 0.0)))
         target_low_price = safe_num(target_info.get("targetLow", target_info.get("target_low", 0.0)))
+        target_median_price = safe_num(target_info.get("targetMedian", target_info.get("target_median", 0.0)))
         n_an = target_info.get("numberAnalysts") or target_info.get("numberOfAnalysts")
         if n_an is not None:
             try:
                 num_analysts = int(n_an)
             except (ValueError, TypeError):
                 pass
-        if target_mean_price <= 0.0 and target_high_price > 0.0 and target_low_price > 0.0:
-            target_mean_price = round((target_high_price + target_low_price) / 2.0, 2)
 
-    # 1.3 Si se proveyó metrics_dict explícito
+    # 2. Si se proveyó metrics_dict explícito
     if target_mean_price <= 0.0 and metrics_dict:
         raw_payload["metrics_dict"] = metrics_dict
         target_mean_price = safe_num(
@@ -583,97 +788,94 @@ def obtener_consenso_wall_street(
                 except (ValueError, TypeError):
                     pass
 
-    # ── CAPA 2: yfinance en vivo (Fuente Primaria Exclusiva de Mercado) ──
+    # 3. Si se proveyó dict previo (_yf_info o yf_info) para retrocompatibilidad
+    info_dict = _yf_info or yf_info
+    if target_mean_price <= 0.0 and isinstance(info_dict, dict) and info_dict:
+        mean_c = safe_num(
+            info_dict.get("targetMeanPrice")
+            or info_dict.get("targetMedianPrice")
+            or info_dict.get("targetPrice")
+            or info_dict.get("targetMean")
+            or info_dict.get("target_mean_price"),
+            0.0
+        )
+        if mean_c > 0.0:
+            target_mean_price = mean_c
+            target_high_price = safe_num(info_dict.get("targetHighPrice") or info_dict.get("targetHigh") or info_dict.get("target_high_price"), 0.0)
+            target_low_price = safe_num(info_dict.get("targetLowPrice") or info_dict.get("targetLow") or info_dict.get("target_low_price"), 0.0)
+            n_opinions = info_dict.get("numberOfAnalystOpinions") or info_dict.get("num_analysts")
+            if n_opinions is not None:
+                try:
+                    num_analysts = int(n_opinions)
+                except (ValueError, TypeError):
+                    pass
+            recommendation = info_dict.get("recommendationKey") or info_dict.get("recommendation")
+
+    # 4. FINNHUB API (Fuente Primaria Oficial vía FinnhubClient)
+    client = finnhub_client or FinnhubClient(api_key=finnhub_api_key)
     if target_mean_price <= 0.0:
         try:
-            import yfinance as yf
-            ticker_yf = yf.Ticker(ticker)
-
-            # Prioridad 2.1: analyst_price_targets
-            try:
-                apt = getattr(ticker_yf, "analyst_price_targets", None)
-                if isinstance(apt, dict) and apt:
-                    raw_payload["yf_analyst_price_targets"] = apt
-                    mean_val = safe_num(apt.get("mean") or apt.get("median") or apt.get("current"), 0.0)
-                    if mean_val > 0.0:
-                        target_mean_price = mean_val
-                    if target_high_price <= 0.0:
-                        target_high_price = safe_num(apt.get("high"), 0.0)
-                    if target_low_price <= 0.0:
-                        target_low_price = safe_num(apt.get("low"), 0.0)
-            except Exception as e_apt:
-                logger.debug("yfinance analyst_price_targets no disponible para %s: %s", ticker, e_apt)
-
-            # Prioridad 2.2: info de yfinance
-            try:
-                live_info = getattr(ticker_yf, "info", None) or {}
-                if isinstance(live_info, dict) and live_info:
-                    raw_payload["yf_info"] = {
-                        k: live_info[k] for k in ["targetMeanPrice", "targetMedianPrice", "targetHighPrice", "targetLowPrice", "numberOfAnalystOpinions", "recommendationKey"] if k in live_info
-                    }
-                    if target_mean_price <= 0.0:
-                        mean_val = safe_num(
-                            live_info.get("targetMeanPrice")
-                            or live_info.get("targetMedianPrice")
-                            or live_info.get("targetPrice")
-                            or live_info.get("target_mean_price"),
-                            0.0
-                        )
-                        if mean_val > 0.0:
-                            target_mean_price = mean_val
-                    if target_high_price <= 0.0:
-                        target_high_price = safe_num(live_info.get("targetHighPrice"), 0.0)
-                    if target_low_price <= 0.0:
-                        target_low_price = safe_num(live_info.get("targetLowPrice"), 0.0)
-
-                    if num_analysts is None and "numberOfAnalystOpinions" in live_info:
-                        try:
-                            num_analysts = int(live_info["numberOfAnalystOpinions"])
-                        except (ValueError, TypeError):
-                            pass
-
-                    if recommendation is None and "recommendationKey" in live_info:
-                        recommendation = str(live_info["recommendationKey"])
-            except Exception as e_info:
-                logger.debug("yfinance info targetMeanPrice no disponible para %s: %s", ticker, e_info)
-
-            # Prioridad 2.3: recommendations_summary
-            if target_mean_price <= 0.0:
-                try:
-                    rec_sum = getattr(ticker_yf, "recommendations_summary", None)
-                    if isinstance(rec_sum, pd.DataFrame) and not rec_sum.empty:
-                        for col in ["targetMeanPrice", "targetMedianPrice", "mean", "targetPrice", "target"]:
-                            if col in rec_sum.columns:
-                                val = safe_num(rec_sum[col].iloc[0], 0.0)
-                                if val > 0.0:
-                                    target_mean_price = val
-                                    break
-                except Exception as e_rec:
-                    logger.debug("yfinance recommendations_summary no disponible para %s: %s", ticker, e_rec)
-        except Exception as e_yf:
-            logger.debug("Consulta yfinance falló para %s: %s", ticker, e_yf)
-
-    # ── CAPA 3: Fallback Finnhub remoto solo si finnhub_api_key presente y no se obtuvo nada ──
-    if target_mean_price <= 0.0 and finnhub_api_key and target_data is None:
-        try:
-            fh_data = _finnhub_get("stock/price-target", {"symbol": ticker}, api_key=finnhub_api_key)
-            if fh_data:
-                target_info = fh_data[0] if (isinstance(fh_data, list) and len(fh_data) > 0 and isinstance(fh_data[0], dict)) else (fh_data if isinstance(fh_data, dict) else {})
-                target_mean_val = (
-                    target_info.get("targetMean")
-                    or target_info.get("targetMedian")
-                    or target_info.get("targetMeanPrice")
-                    or target_info.get("targetMedianPrice")
-                    or target_info.get("priceTarget")
-                )
-                target_mean_price = safe_num(target_mean_val, 0.0)
+            pt = client.price_target(ticker)
+            if isinstance(pt, dict) and pt:
+                raw_payload["finnhub_price_target"] = pt
+                mean_val = safe_num(pt.get("targetMean") or pt.get("targetMedian"), 0.0)
+                if mean_val > 0.0:
+                    target_mean_price = mean_val
+                    target_median_price = safe_num(pt.get("targetMedian"), 0.0)
                 if target_high_price <= 0.0:
-                    target_high_price = safe_num(target_info.get("targetHigh", 0.0))
+                    target_high_price = safe_num(pt.get("targetHigh"), 0.0)
                 if target_low_price <= 0.0:
-                    target_low_price = safe_num(target_info.get("targetLow", 0.0))
-        except Exception:
-            pass
+                    target_low_price = safe_num(pt.get("targetLow"), 0.0)
+                if num_analysts is None or num_analysts <= 0:
+                    num_analysts = int(safe_num(pt.get("numberAnalysts"), 0))
+        except Exception as e_pt:
+            logger.debug("Finnhub price_target falló para %s: %s", ticker, e_pt)
 
+    # 5. Finnhub Recommendation Trends (strongBuy, buy, hold, sell, strongSell)
+    try:
+        trends = client.recommendation_trends(ticker)
+        if isinstance(trends, list) and len(trends) > 0:
+            raw_payload["finnhub_recommendation_trends"] = trends
+            latest_trend = trends[0] if isinstance(trends[0], dict) else {}
+            s_buy = int(safe_num(latest_trend.get("strongBuy"), 0))
+            buy = int(safe_num(latest_trend.get("buy"), 0))
+            hold = int(safe_num(latest_trend.get("hold"), 0))
+            sell = int(safe_num(latest_trend.get("sell"), 0))
+            s_sell = int(safe_num(latest_trend.get("strongSell"), 0))
+            total_trend_analysts = s_buy + buy + hold + sell + s_sell
+            if num_analysts is None or num_analysts <= 0:
+                num_analysts = total_trend_analysts
+
+            if not recommendation and total_trend_analysts > 0:
+                if (s_buy + buy) > (hold + sell + s_sell):
+                    recommendation = "strong_buy" if s_buy >= buy else "buy"
+                elif (sell + s_sell) > (hold + buy + s_buy):
+                    recommendation = "strong_sell" if s_sell >= sell else "sell"
+                elif hold > 0:
+                    recommendation = "hold"
+                else:
+                    recommendation = "neutral"
+    except Exception as e_trend:
+        logger.debug("Finnhub recommendation_trends falló para %s: %s", ticker, e_trend)
+
+    # 6. Fallback a FMP API (price-target-consensus / price-target-summary)
+    if target_mean_price <= 0.0:
+        try:
+            fmp_k = fmp_api_key or os.getenv("FMP_API_KEY") or (st.secrets.get("FMP_API_KEY", "") if hasattr(st, "secrets") else "")
+            if fmp_k:
+                fmp_pt = _fmp_get("price-target-consensus", {"symbol": ticker}, api_key=fmp_k)
+                if isinstance(fmp_pt, list) and len(fmp_pt) > 0 and isinstance(fmp_pt[0], dict):
+                    item = fmp_pt[0]
+                    target_mean_price = safe_num(item.get("targetConsensus") or item.get("targetMedian"), 0.0)
+                    if target_high_price <= 0.0:
+                        target_high_price = safe_num(item.get("targetHigh"), 0.0)
+                    if target_low_price <= 0.0:
+                        target_low_price = safe_num(item.get("targetLow"), 0.0)
+                    raw_payload["fmp_price_target"] = item
+        except Exception as e_fmp:
+            logger.debug("FMP price-target falló para %s: %s", ticker, e_fmp)
+
+    # Fallback defensivo: Promedio de High y Low si Mean no vino explícito
     if target_mean_price <= 0.0 and target_high_price > 0.0 and target_low_price > 0.0:
         target_mean_price = round((target_high_price + target_low_price) / 2.0, 2)
 
@@ -689,16 +891,18 @@ def obtener_consenso_wall_street(
 
 @st.cache_data(ttl=FINNHUB_CACHE_TTL_METRICS)
 def fetch_datos_fundamentales(
-    ticker: str, finnhub_api_key: str = ""
+    ticker: str,
+    finnhub_api_key: str = "",
+    fmp_api_key: str = "",
+    **kwargs: Any,
 ) -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Extrae, homogeneiza y estructura el perfil corporativo, múltiplos clave y estados financieros
-    históricos y más recientes (MRQ / TTM) a partir de Finnhub API y fallbacks institucionales.
-
-    Endpoints consumidos:
-    - `/stock/profile2`: Perfil, market cap en millones, shares outstanding en millones.
-    - `/stock/metric?metric=all`: Ratios financieros TTM y series históricas anuales.
-    - `/stock/financials-reported`: Estados financieros as-reported SEC (10-K y 10-Q).
+    Extrae, homogeneiza y estructura el perfil corporativo, múltiplos clave, scores contables
+    y estados financieros históricos a 5 años y TTM/MRQ combinando:
+    1. Financial Modeling Prep (FMP API) como motor contable, de ratios y valuación primaria.
+    2. Finnhub API como motor de consenso de Wall Street, perfil y métricas de mercado.
+    
+    Zero dependencias de yfinance.
     """
     ticker = str(ticker).upper().strip()
     info: Dict[str, Any] = {}
@@ -709,23 +913,48 @@ def fetch_datos_fundamentales(
     if not ticker:
         return info, inc, bs, cf
 
-    # 1. Consultas concurrentes a Finnhub
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        f_prof = executor.submit(
-            _finnhub_get, "stock/profile2", {"symbol": ticker}, finnhub_api_key
-        )
-        f_metric = executor.submit(
-            _finnhub_get, "stock/metric", {"symbol": ticker, "metric": "all"}, finnhub_api_key
-        )
-        f_rep_a = executor.submit(
-            _finnhub_get, "stock/financials-reported", {"symbol": ticker, "freq": "annual"}, finnhub_api_key
-        )
-        f_rep_q = executor.submit(
-            _finnhub_get, "stock/financials-reported", {"symbol": ticker, "freq": "quarterly"}, finnhub_api_key
-        )
-        f_target = executor.submit(
-            _finnhub_get, "stock/price-target", {"symbol": ticker}, finnhub_api_key
-        )
+    # Resolver API Keys
+    fmp_key = fmp_api_key or kwargs.get("fmp_key", "")
+    if not fmp_key:
+        try:
+            if hasattr(st, "secrets") and "FMP_API_KEY" in st.secrets:
+                fmp_key = str(st.secrets["FMP_API_KEY"]).strip()
+            elif hasattr(st, "secrets") and "FMP_KEY" in st.secrets:
+                fmp_key = str(st.secrets["FMP_KEY"]).strip()
+        except Exception:
+            pass
+        if not fmp_key:
+            fmp_key = (os.getenv("FMP_API_KEY") or os.getenv("FMP_KEY") or "").strip()
+
+    finnhub_key = finnhub_api_key or kwargs.get("finnhub_key", "")
+    if not finnhub_key:
+        try:
+            if hasattr(st, "secrets") and "FINNHUB_API_KEY" in st.secrets:
+                finnhub_key = str(st.secrets["FINNHUB_API_KEY"]).strip()
+            elif hasattr(st, "secrets") and "FINNHUB_KEY" in st.secrets:
+                finnhub_key = str(st.secrets["FINNHUB_KEY"]).strip()
+        except Exception:
+            pass
+        if not finnhub_key:
+            finnhub_key = (os.getenv("FINNHUB_API_KEY") or os.getenv("FINNHUB_KEY") or "").strip()
+
+    finnhub_client = FinnhubClient(api_key=finnhub_key)
+
+    # 1. Consultas concurrentes a FMP y Finnhub
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        # Finnhub
+        f_prof = executor.submit(_finnhub_get, "stock/profile2", {"symbol": ticker}, finnhub_key)
+        f_metric = executor.submit(_finnhub_get, "stock/metric", {"symbol": ticker, "metric": "all"}, finnhub_key)
+        f_target = executor.submit(finnhub_client.price_target, ticker)
+        f_trends = executor.submit(finnhub_client.recommendation_trends, ticker)
+        # FMP
+        f_fmp_inc = executor.submit(fetch_fmp_income_statement, ticker, fmp_key, 5)
+        f_fmp_bs = executor.submit(fetch_fmp_balance_sheet, ticker, fmp_key, 5)
+        f_fmp_cf = executor.submit(fetch_fmp_cash_flow, ticker, fmp_key, 5)
+        f_fmp_ratios = executor.submit(fetch_fmp_ratios_ttm, ticker, fmp_key)
+        f_fmp_metrics = executor.submit(fetch_fmp_key_metrics_ttm, ticker, fmp_key)
+        f_fmp_score = executor.submit(fetch_fmp_financial_score, ticker, fmp_key)
+        f_fmp_ev = executor.submit(fetch_fmp_enterprise_values, ticker, fmp_key, 1)
 
         try:
             prof_data = f_prof.result(timeout=10.0) or {}
@@ -733,312 +962,359 @@ def fetch_datos_fundamentales(
             prof_data = {}
 
         try:
-            metric_data = f_metric.result(timeout=12.0) or {}
+            metric_data = f_metric.result(timeout=10.0) or {}
         except Exception:
             metric_data = {}
-
-        try:
-            rep_data_a = f_rep_a.result(timeout=12.0) or {}
-        except Exception:
-            rep_data_a = {}
-
-        try:
-            rep_data_q = f_rep_q.result(timeout=12.0) or {}
-        except Exception:
-            rep_data_q = {}
 
         try:
             target_data = f_target.result(timeout=8.0) or {}
         except Exception:
             target_data = {}
 
-    # 2. Procesamiento de Perfil (/stock/profile2)
+        try:
+            trends_data = f_trends.result(timeout=8.0) or []
+        except Exception:
+            trends_data = []
+
+        try:
+            fmp_inc_list = f_fmp_inc.result(timeout=12.0) or []
+        except Exception:
+            fmp_inc_list = []
+
+        try:
+            fmp_bs_list = f_fmp_bs.result(timeout=12.0) or []
+        except Exception:
+            fmp_bs_list = []
+
+        try:
+            fmp_cf_list = f_fmp_cf.result(timeout=12.0) or []
+        except Exception:
+            fmp_cf_list = []
+
+        try:
+            fmp_ratios_data = f_fmp_ratios.result(timeout=10.0) or []
+        except Exception:
+            fmp_ratios_data = []
+
+        try:
+            fmp_metrics_data = f_fmp_metrics.result(timeout=10.0) or []
+        except Exception:
+            fmp_metrics_data = []
+
+        try:
+            fmp_score_data = f_fmp_score.result(timeout=10.0) or []
+        except Exception:
+            fmp_score_data = []
+
+        try:
+            fmp_ev_list = f_fmp_ev.result(timeout=10.0) or []
+        except Exception:
+            fmp_ev_list = []
+
+    # 2. Procesamiento de Perfil y Acciones (Finnhub + FMP EV)
     mcap_m = safe_num(prof_data.get("marketCapitalization", 0.0))
     shares_m = safe_num(prof_data.get("shareOutstanding", 0.0))
 
     mcap = mcap_m * 1e6 if mcap_m > 0 else 0.0
     shares_outstanding = shares_m * 1e6 if shares_m > 0 else 0.0
+
+    if isinstance(fmp_ev_list, list) and len(fmp_ev_list) > 0 and isinstance(fmp_ev_list[0], dict):
+        ev_item = fmp_ev_list[0]
+        if shares_outstanding <= 0:
+            shares_outstanding = safe_num(ev_item.get("numberOfShares"), 0.0)
+        if mcap <= 0:
+            mcap = safe_num(ev_item.get("marketCapitalization"), 0.0)
+
     long_name = prof_data.get("name", ticker)
     industry_raw = prof_data.get("finnhubIndustry", "General")
     sector_std = _map_gics_sector(industry_raw)
 
-    # 3. Procesamiento de Métricas Básicas (/stock/metric) y Precio Objetivo
     metrics_dict = metric_data.get("metric", {}) if isinstance(metric_data, dict) else {}
     series_dict = metric_data.get("series", {}).get("annual", {}) if isinstance(metric_data, dict) else {}
     yf_short = safe_num(metrics_dict.get("shortPercentOfFloat"), 0.0)
 
-    # Extracción jerárquica robusta de Consenso de Wall Street (Finnhub + Fallback yfinance)
-    target_mean_price, target_high_price, target_low_price = obtener_consenso_wall_street(
-        ticker=ticker,
-        finnhub_api_key=finnhub_api_key,
-        target_data=target_data,
-        metrics_dict=metrics_dict,
-    )
-
-    beta = safe_num(metrics_dict.get("beta", 1.0), default=1.0)
-    eps_ttm = safe_num(metrics_dict.get("epsTTM", metrics_dict.get("epsNormalizedAnnual", 0.0)))
-    pe_ttm = safe_num(metrics_dict.get("peTTM", metrics_dict.get("peAnnual", 0.0)))
-    forward_eps = safe_num(metrics_dict.get("epsForward", 0.0))
-    pe_fwd = safe_num(metrics_dict.get("peForward", metrics_dict.get("forwardPE", 0.0)))
-    peg_val = safe_num(metrics_dict.get("pegTTM", metrics_dict.get("pegAnnual", metrics_dict.get("pegNormalizedAnnual", 0.0))))
-    div_rate = safe_num(metrics_dict.get("dividendPerShareTTM", metrics_dict.get("dividendPerShareAnnual", 0.0)))
-    div_yield_ind = safe_num(metrics_dict.get("dividendYieldIndicatedAnnual", metrics_dict.get("dividendYieldTTM", 0.0)))
-    current_ratio = safe_num(metrics_dict.get("currentRatioQuarterly", metrics_dict.get("currentRatioAnnual", 0.0)), default=0.0)
-    debt_to_equity = safe_num(metrics_dict.get("totalDebt/totalEquityQuarterly", metrics_dict.get("totalDebt/totalEquityAnnual", 0.0)))
-    roe_val = safe_num(metrics_dict.get("roeTTM", metrics_dict.get("roeAnnual", metrics_dict.get("roeRfy", 0.0))))
-    roa_val = safe_num(metrics_dict.get("roaTTM", metrics_dict.get("roaAnnual", metrics_dict.get("roaRfy", 0.0))))
-    roic_val = safe_num(metrics_dict.get("roicTTM", metrics_dict.get("roicAnnual", metrics_dict.get("roicRfy", 0.0))))
-    cash_per_share_metric = safe_num(metrics_dict.get("cashPerSharePerShareQuarterly", metrics_dict.get("cashPerSharePerShareAnnual", 0.0)))
-
-    op_margins_raw = safe_num(metrics_dict.get("operatingMarginTTM", metrics_dict.get("operatingMarginAnnual", 0.0)))
-    op_margins = op_margins_raw / 100.0 if op_margins_raw > 1.0 else op_margins_raw
-    rev_growth_raw = safe_num(metrics_dict.get("revenueGrowthTTMYoy", metrics_dict.get("revenueGrowthQuarterlyYoy", metrics_dict.get("revenueGrowth3Y", 0.0))))
-    rev_growth = rev_growth_raw / 100.0 if abs(rev_growth_raw) > 1.0 else rev_growth_raw
-    eps_growth_raw = safe_num(metrics_dict.get("epsGrowthTTMYoy", metrics_dict.get("epsGrowthQuarterlyYoy", metrics_dict.get("epsGrowthAnnual", metrics_dict.get("epsGrowth3Y", 0.0)))))
-    eps_growth = eps_growth_raw / 100.0 if abs(eps_growth_raw) > 1.0 else eps_growth_raw
-
-    # 4. Funciones auxiliares de parseo XBRL
-    def _get_val(concepts: List[str], label_kw: List[str], source_map: Dict[str, float], label_map: Dict[str, float]) -> float:
-        for c in concepts:
-            if c in source_map and source_map[c] != 0.0:
-                return source_map[c]
-        for kw in label_kw:
-            kw_clean = kw.lower().replace("'", "").replace("’", "").replace(" ", "").strip()
-            for l_key, val in label_map.items():
-                l_clean = l_key.lower().replace("'", "").replace("’", "").replace(" ", "").strip()
-                if kw_clean in l_clean and val != 0.0:
-                    return val
-        return 0.0
-
-    def _get_total_cash_and_investments(bs_map: Dict[str, float], bs_labels: Dict[str, float]) -> float:
-        comb_val = _get_val(
-            ["CashCashEquivalentsAndShortTermInvestments", "CashAndShortTermInvestments", "CashCashEquivalentsAndMarketableSecurities"],
-            ["cash, cash equivalents and short-term investments", "cash and short term investments", "cash and short-term investments"],
-            bs_map, bs_labels
-        )
-        if comb_val > 0:
-            return comb_val
-        cash_pure = _get_val(
-            ["CashAndCashEquivalentsAtCarryingValue", "CashAndCashEquivalents", "Cash", "CashEquivalentsAtCarryingValue"],
-            ["cash and cash equivalents", "cash & cash equivalents", "cash"],
-            bs_map, bs_labels
-        )
-        st_inv = _get_val(
-            ["MarketableSecuritiesCurrent", "ShortTermInvestments", "AvailableForSaleSecuritiesCurrent", "OtherShortTermInvestments", "MarketableSecurities"],
-            ["marketable securities", "short-term investments", "short term investments", "short-term marketable securities"],
-            bs_map, bs_labels
-        )
-        return cash_pure + st_inv
-
-    def _parse_filing_report(filing: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
-        report_items = filing.get("report", {})
-        # ic
-        ic_items = report_items.get("ic", [])
-        ic_map = {item.get("concept", ""): safe_num(item.get("value")) for item in ic_items if "concept" in item}
-        ic_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in ic_items if "label" in item}
-
-        rev = _get_val(
-            ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet", "Revenue", "TotalRevenue"],
-            ["total net sales", "revenue", "total revenue", "sales"],
-            ic_map, ic_labels
-        )
-        gross_p = _get_val(["GrossProfit"], ["gross profit"], ic_map, ic_labels) or rev
-        op_inc = _get_val(["OperatingIncomeLoss", "OperatingProfit", "OperatingIncome"], ["operating income", "operating profit"], ic_map, ic_labels)
-        net_inc = _get_val(["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncome"], ["net income", "net loss", "net income available to common"], ic_map, ic_labels)
-        int_exp = abs(_get_val(["InterestExpense", "InterestExpenseNonoperating", "InterestAndDebtExpense"], ["interest expense"], ic_map, ic_labels))
-        pretax_inc = _get_val(["IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments", "PretaxIncome"], ["income before tax", "pretax income"], ic_map, ic_labels)
-        tax_prov = _get_val(["IncomeTaxExpenseBenefit", "IncomeTaxExpense"], ["income tax"], ic_map, ic_labels)
-        shares_dil = _get_val(["WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingDiluted"], ["diluted shares", "shares diluted"], ic_map, ic_labels)
-        eps_dil = _get_val(
-            ["EarningsPerShareDiluted", "DilutedEarningsPerShareBasicAndDiluted", "DilutedEPS", "EarningsPerShareBasic", "BasicEPS"],
-            ["diluted earnings per share", "diluted eps", "basic eps", "earnings per share"],
-            ic_map, ic_labels
-        )
-        if eps_dil == 0.0 and net_inc != 0.0 and (shares_dil or shares_outstanding) > 0:
-            eps_dil = net_inc / (shares_dil or shares_outstanding)
-
-        inc_d = {
-            "Total Revenue": rev,
-            "Gross Profit": gross_p,
-            "Operating Income": op_inc,
-            "Net Income": net_inc,
-            "Interest Expense": int_exp,
-            "Pretax Income": pretax_inc,
-            "Tax Provision": tax_prov,
-            "Diluted EPS": eps_dil,
-            "Diluted Average Shares": shares_dil or shares_outstanding,
-            "Basic Average Shares": shares_dil or shares_outstanding,
-        }
-
-        # bs
-        bs_items = report_items.get("bs", [])
-        bs_map = {item.get("concept", ""): safe_num(item.get("value")) for item in bs_items if "concept" in item}
-        bs_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in bs_items if "label" in item}
-
-        t_assets = _get_val(["Assets", "TotalAssets"], ["total assets"], bs_map, bs_labels)
-        c_assets = _get_val(["AssetsCurrent", "TotalAssetsCurrent"], ["total current assets", "current assets"], bs_map, bs_labels)
-        c_liab = _get_val(["LiabilitiesCurrent", "TotalLiabilitiesCurrent"], ["total current liabilities", "current liabilities"], bs_map, bs_labels)
-        t_equity = _get_val(
-            [
-                "StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
-                "CommonStockholdersEquity", "TotalStockholdersEquity", "TotalEquity", "CommonEquity", "TotalStockholderEquity"
-            ],
-            [
-                "total stockholders equity", "total shareholders equity", "total equity",
-                "stockholders equity", "shareholders equity", "total shareowners equity", "common stock equity"
-            ],
-            bs_map, bs_labels
-        )
-        l_debt = _get_val(
-            [
-                "LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations", "LongTermDebt",
-                "LongTermDebtCurrent", "DebtLongtermAndShorttermCombinedTotal"
-            ],
-            ["long-term debt", "long term debt", "total debt"],
-            bs_map, bs_labels
-        )
-        s_debt = _get_val(
-            ["ShortTermBorrowings", "CurrentDebt", "DebtCurrent", "CommercialPaper"],
-            ["short-term debt", "current portion of long-term debt", "commercial paper"],
-            bs_map, bs_labels
-        )
-        tot_cash_inv = _get_total_cash_and_investments(bs_map, bs_labels)
-
-        bs_d = {
-            "Total Assets": t_assets,
-            "Current Assets": c_assets,
-            "Current Liabilities": c_liab,
-            "Total Stockholder Equity": t_equity,
-            "Total Debt": l_debt + s_debt,
-            "Long Term Debt": l_debt,
-            "Current Debt": s_debt,
-            "Cash And Cash Equivalents": tot_cash_inv,
-        }
-
-        # cf
-        cf_items = report_items.get("cf", [])
-        cf_map = {item.get("concept", ""): safe_num(item.get("value")) for item in cf_items if "concept" in item}
-        cf_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in cf_items if "label" in item}
-
-        ocf = _get_val(["NetCashProvidedByUsedInOperatingActivities"], ["operating activities", "operating cash flow"], cf_map, cf_labels)
-        capex = abs(_get_val(["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"], ["capital expenditure", "property, plant and equipment", "additions to property"], cf_map, cf_labels))
-        repurchase = abs(_get_val(
-            ["PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfStock", "PaymentsForRepurchaseOfEquity", "PaymentsForRepurchaseOfPreferredStockAndPreferenceStock"],
-            ["repurchase of common stock", "repurchases of stock", "common stock repurchased"],
-            cf_map, cf_labels
-        ))
-        da_val = abs(_get_val(
-            ["DepreciationDepletionAndAmortization", "DepreciationAndAmortization", "Depreciation", "AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment"],
-            ["depreciation and amortization", "depreciation", "amortization"],
-            cf_map, cf_labels
-        ))
-        fcf = ocf - capex
-
-        cf_d = {
-            "Operating Cash Flow": ocf,
-            "Capital Expenditure": capex,
-            "Free Cash Flow": fcf,
-            "Repurchase Of Capital Stock": repurchase,
-            "Depreciation & Amortization": da_val,
-        }
-
-        return inc_d, bs_d, cf_d
-
-    # 5. Procesamiento de Filings SEC Anuales y Trimestrales (MRQ / TTM)
+    # 3. Construcción de Estados Financieros (FMP Primario con fallback SEC de Finnhub)
     dict_inc: Dict[str, Dict[str, float]] = {}
     dict_bs: Dict[str, Dict[str, float]] = {}
     dict_cf: Dict[str, Dict[str, float]] = {}
 
-    rep_list_a = rep_data_a.get("data", []) if isinstance(rep_data_a, dict) else []
-    rep_list_q = rep_data_q.get("data", []) if isinstance(rep_data_q, dict) else []
+    tiene_fmp_estados = (
+        isinstance(fmp_inc_list, list) and len(fmp_inc_list) > 0
+        or (isinstance(fmp_bs_list, list) and len(fmp_bs_list) > 0)
+        or (isinstance(fmp_cf_list, list) and len(fmp_cf_list) > 0)
+    )
 
-    # Variables MRQ y TTM derivadas
-    mrq_bs_d: Dict[str, float] = {}
-    ttm_inc_d: Dict[str, float] = {}
-    ttm_cf_d: Dict[str, float] = {}
+    if tiene_fmp_estados:
+        # 3.1 Income Statement FMP
+        if isinstance(fmp_inc_list, list):
+            for item in fmp_inc_list:
+                if not isinstance(item, dict):
+                    continue
+                col_y = str(item.get("calendarYear") or item.get("date", "")[:4])
+                if not col_y or not col_y.isdigit():
+                    continue
+                rev = safe_num(item.get("revenue"))
+                gp = safe_num(item.get("grossProfit")) or rev
+                op_inc = safe_num(item.get("operatingIncome"))
+                net_inc = safe_num(item.get("netIncome"))
+                int_exp = abs(safe_num(item.get("interestExpense")))
+                pretax = safe_num(item.get("incomeBeforeTax"))
+                tax_p = safe_num(item.get("incomeTaxExpense"))
+                eps_d = safe_num(item.get("epsdiluted") or item.get("eps"))
+                eps_b = safe_num(item.get("eps"))
+                sh_d = safe_num(item.get("weightedAverageShsOutDil") or item.get("weightedAverageShsOut"))
+                sh_b = safe_num(item.get("weightedAverageShsOut"))
 
-    # Procesar MRQ (Quarterly más reciente)
-    if isinstance(rep_list_q, list) and len(rep_list_q) > 0:
-        latest_q = rep_list_q[0]
-        _, q_bs, _ = _parse_filing_report(latest_q)
-        if q_bs.get("Total Assets", 0) > 0 or q_bs.get("Current Assets", 0) > 0:
-            mrq_bs_d = q_bs
-
-        # Calcular TTM a partir de los 4 trimestres más recientes
-        if len(rep_list_q) >= 4:
-            q_inc_list = []
-            q_cf_list = []
-            for filing_q in rep_list_q[:4]:
-                qi, _, qc = _parse_filing_report(filing_q)
-                q_inc_list.append(qi)
-                q_cf_list.append(qc)
-
-            ttm_rev = sum(q.get("Total Revenue", 0.0) for q in q_inc_list)
-            ttm_gp = sum(q.get("Gross Profit", 0.0) for q in q_inc_list)
-            ttm_op = sum(q.get("Operating Income", 0.0) for q in q_inc_list)
-            ttm_ni = sum(q.get("Net Income", 0.0) for q in q_inc_list)
-            ttm_int = sum(q.get("Interest Expense", 0.0) for q in q_inc_list)
-            ttm_pretax = sum(q.get("Pretax Income", 0.0) for q in q_inc_list)
-            ttm_tax = sum(q.get("Tax Provision", 0.0) for q in q_inc_list)
-            ttm_ocf = sum(q.get("Operating Cash Flow", 0.0) for q in q_cf_list)
-            ttm_capex = sum(q.get("Capital Expenditure", 0.0) for q in q_cf_list)
-
-            if ttm_rev > 0 or ttm_ni != 0:
-                ttm_inc_d = {
-                    "Total Revenue": ttm_rev,
-                    "Gross Profit": ttm_gp or ttm_rev,
-                    "Operating Income": ttm_op,
-                    "Net Income": ttm_ni,
-                    "Interest Expense": ttm_int,
-                    "Pretax Income": ttm_pretax,
-                    "Tax Provision": ttm_tax,
-                    "Diluted Average Shares": shares_outstanding,
-                    "Basic Average Shares": shares_outstanding,
+                dict_inc[col_y] = {
+                    "Total Revenue": rev,
+                    "Revenue": rev,
+                    "revenue": rev,
+                    "Gross Profit": gp,
+                    "grossProfit": gp,
+                    "Operating Income": op_inc,
+                    "Operating Profit": op_inc,
+                    "EBIT": op_inc,
+                    "operatingIncome": op_inc,
+                    "Net Income": net_inc,
+                    "Net Income Common Stockholders": net_inc,
+                    "netIncome": net_inc,
+                    "netIncomeToCommon": net_inc,
+                    "Interest Expense": int_exp,
+                    "interestExpense": int_exp,
+                    "Pretax Income": pretax,
+                    "Income Before Tax": pretax,
+                    "incomeBeforeTax": pretax,
+                    "Tax Provision": tax_p,
+                    "Income Tax Expense": tax_p,
+                    "incomeTaxExpense": tax_p,
+                    "Diluted EPS": eps_d,
+                    "Basic EPS": eps_b,
+                    "Diluted Average Shares": sh_d or shares_outstanding,
+                    "Basic Average Shares": sh_b or shares_outstanding,
                 }
-                ttm_cf_d = {
-                    "Operating Cash Flow": ttm_ocf,
-                    "Capital Expenditure": ttm_capex,
-                    "Free Cash Flow": ttm_ocf - ttm_capex,
-                    "Repurchase Of Capital Stock": sum(q.get("Repurchase Of Capital Stock", 0.0) for q in q_cf_list),
+            if dict_inc:
+                primer_anio = list(dict_inc.keys())[0]
+                dict_inc["TTM"] = dict_inc[primer_anio]
+
+        # 3.2 Balance Sheet FMP
+        if isinstance(fmp_bs_list, list):
+            for item in fmp_bs_list:
+                if not isinstance(item, dict):
+                    continue
+                col_y = str(item.get("calendarYear") or item.get("date", "")[:4])
+                if not col_y or not col_y.isdigit():
+                    continue
+                t_assets = safe_num(item.get("totalAssets"))
+                c_assets = safe_num(item.get("totalCurrentAssets"))
+                c_liab = safe_num(item.get("totalCurrentLiabilities"))
+                t_equity = safe_num(item.get("totalStockholdersEquity") or item.get("totalEquity"))
+                s_debt = safe_num(item.get("shortTermDebt"))
+                l_debt = safe_num(item.get("longTermDebt"))
+                t_debt = safe_num(item.get("totalDebt")) or (s_debt + l_debt)
+                cash_val = safe_num(item.get("cashAndShortTermInvestments") or item.get("cashAndCashEquivalents"))
+                c_stock = safe_num(item.get("commonStock"))
+                ret_earn = safe_num(item.get("retainedEarnings"))
+
+                dict_bs[col_y] = {
+                    "Total Assets": t_assets,
+                    "totalAssets": t_assets,
+                    "Current Assets": c_assets,
+                    "Total Current Assets": c_assets,
+                    "totalCurrentAssets": c_assets,
+                    "Current Liabilities": c_liab,
+                    "Total Current Liabilities": c_liab,
+                    "totalCurrentLiabilities": c_liab,
+                    "Total Stockholder Equity": t_equity,
+                    "Stockholders Equity": t_equity,
+                    "Total Equity": t_equity,
+                    "totalStockholdersEquity": t_equity,
+                    "totalEquity": t_equity,
+                    "Total Debt": t_debt,
+                    "totalDebt": t_debt,
+                    "Long Term Debt": l_debt,
+                    "longTermDebt": l_debt,
+                    "Current Debt": s_debt,
+                    "Short Term Debt": s_debt,
+                    "shortTermDebt": s_debt,
+                    "Cash And Cash Equivalents": cash_val,
+                    "Cash": cash_val,
+                    "cashAndCashEquivalents": cash_val,
+                    "cashAndShortTermInvestments": cash_val,
+                    "Common Stock": c_stock,
+                    "Retained Earnings": ret_earn,
+                    "Net Debt": safe_num(item.get("netDebt")),
                 }
+            if dict_bs:
+                primer_anio_bs = list(dict_bs.keys())[0]
+                dict_bs["MRQ"] = dict_bs[primer_anio_bs]
 
-            # Calcular EPS YoY y Revenue YoY interanual comparando 4Q actuales vs 4Q anteriores o t vs t-4
-            if len(rep_list_q) >= 8:
-                q_inc_prev = [_parse_filing_report(fq)[0] for fq in rep_list_q[4:8]]
-                prev_ttm_ni = sum(q.get("Net Income", 0.0) for q in q_inc_prev)
-                prev_ttm_rev = sum(q.get("Total Revenue", 0.0) for q in q_inc_prev)
-                if prev_ttm_ni > 0 and ttm_ni > 0 and eps_growth == 0.0:
-                    eps_growth = (ttm_ni - prev_ttm_ni) / prev_ttm_ni
-                if prev_ttm_rev > 0 and ttm_rev > 0 and rev_growth == 0.0:
-                    rev_growth = (ttm_rev - prev_ttm_rev) / prev_ttm_rev
-            elif len(rep_list_q) >= 5 and eps_growth == 0.0:
-                q_curr_ic = _parse_filing_report(rep_list_q[0])[0]
-                q_prev_ic = _parse_filing_report(rep_list_q[4])[0]
-                q_curr_eps = q_curr_ic.get("Diluted EPS", 0.0) or (q_curr_ic.get("Net Income", 0.0) / shares_outstanding if shares_outstanding > 0 else 0.0)
-                q_prev_eps = q_prev_ic.get("Diluted EPS", 0.0) or (q_prev_ic.get("Net Income", 0.0) / shares_outstanding if shares_outstanding > 0 else 0.0)
-                if q_curr_eps > 0 and q_prev_eps > 0:
-                    eps_growth = (q_curr_eps - q_prev_eps) / q_prev_eps
+        # 3.3 Cash Flow Statement FMP (Diferenciando estrictamente OCF, CapEx y FCF)
+        if isinstance(fmp_cf_list, list):
+            for item in fmp_cf_list:
+                if not isinstance(item, dict):
+                    continue
+                col_y = str(item.get("calendarYear") or item.get("date", "")[:4])
+                if not col_y or not col_y.isdigit():
+                    continue
+                ocf_val = safe_num(item.get("operatingCashFlow") or item.get("netCashProvidedByOperatingActivities"))
+                # CapEx estricto en valor absoluto positivo para fórmulas y gráficos
+                capex_val = abs(safe_num(item.get("capitalExpenditure") or item.get("investmentsInPropertyPlantAndEquipment")))
+                fcf_raw = safe_num(item.get("freeCashFlow"))
+                fcf_val = fcf_raw if fcf_raw != 0.0 else (ocf_val - capex_val)
+                repurchase_val = abs(safe_num(item.get("commonStockRepurchased") or item.get("paymentsForRepurchaseOfCommonStock") or item.get("paymentsForRepurchaseOfStock")))
+                da_val = abs(safe_num(item.get("depreciationAndAmortization")))
+                divs_paid = abs(safe_num(item.get("dividendsPaid")))
 
-    # Procesar serie anual (hasta 6 años para garantizar al menos 5 períodos completos)
-    if isinstance(rep_list_a, list) and len(rep_list_a) > 0:
-        for filing in rep_list_a[:6]:
-            year_val = filing.get("year") or filing.get("endDate", "")[:4]
-            if not year_val:
-                continue
-            period_label = str(year_val)
-            inc_item, bs_item, cf_item = _parse_filing_report(filing)
-            dict_inc[period_label] = inc_item
-            dict_bs[period_label] = bs_item
-            dict_cf[period_label] = cf_item
+                dict_cf[col_y] = {
+                    "Operating Cash Flow": ocf_val,
+                    "OperatingCashFlow": ocf_val,
+                    "operatingCashFlow": ocf_val,
+                    "netCashProvidedByOperatingActivities": ocf_val,
+                    "Capital Expenditure": capex_val,
+                    "CapitalExpenditure": capex_val,
+                    "capitalExpenditure": capex_val,
+                    "investmentsInPropertyPlantAndEquipment": capex_val,
+                    "Free Cash Flow": fcf_val,
+                    "FreeCashFlow": fcf_val,
+                    "freeCashFlow": fcf_val,
+                    "Repurchase Of Capital Stock": repurchase_val,
+                    "commonStockRepurchased": repurchase_val,
+                    "Depreciation & Amortization": da_val,
+                    "Depreciation And Amortization": da_val,
+                    "depreciationAndAmortization": da_val,
+                    "Dividends Paid": divs_paid,
+                    "dividendsPaid": divs_paid,
+                }
+            if dict_cf:
+                primer_anio_cf = list(dict_cf.keys())[0]
+                dict_cf["TTM"] = dict_cf[primer_anio_cf]
 
-    # Si tenemos balance MRQ y TTM, agregarlos a los diccionarios
-    if mrq_bs_d:
-        dict_bs["MRQ"] = mrq_bs_d
+    # 3.4 Fallback secundario a Finnhub SEC Filings si FMP no retornó estados
+    if not dict_inc or not dict_bs or not dict_cf:
+        try:
+            rep_data_a = _finnhub_get("stock/financials-reported", {"symbol": ticker, "freq": "annual"}, finnhub_key) or {}
+            rep_data_q = _finnhub_get("stock/financials-reported", {"symbol": ticker, "freq": "quarterly"}, finnhub_key) or {}
+            rep_list_a = rep_data_a.get("data", []) if isinstance(rep_data_a, dict) else []
+            rep_list_q = rep_data_q.get("data", []) if isinstance(rep_data_q, dict) else []
 
-    if ttm_inc_d:
-        dict_inc["TTM"] = ttm_inc_d
-    if ttm_cf_d:
-        dict_cf["TTM"] = ttm_cf_d
+            def _get_val_fb(concepts: List[str], label_kw: List[str], source_map: Dict[str, float], label_map: Dict[str, float]) -> float:
+                for c in concepts:
+                    if c in source_map and source_map[c] != 0.0:
+                        return source_map[c]
+                for kw in label_kw:
+                    kw_clean = kw.lower().replace("'", "").replace("’", "").replace(" ", "").strip()
+                    for l_key, val in label_map.items():
+                        l_clean = l_key.lower().replace("'", "").replace("’", "").replace(" ", "").strip()
+                        if kw_clean in l_clean and val != 0.0:
+                            return val
+                return 0.0
+
+            def _parse_filing_fb(filing: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+                report_items = filing.get("report", {})
+                ic_items = report_items.get("ic", [])
+                ic_map = {item.get("concept", ""): safe_num(item.get("value")) for item in ic_items if "concept" in item}
+                ic_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in ic_items if "label" in item}
+
+                rev_fb = _get_val_fb(["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet", "TotalRevenue"], ["revenue", "total net sales"], ic_map, ic_labels)
+                gp_fb = _get_val_fb(["GrossProfit"], ["gross profit"], ic_map, ic_labels) or rev_fb
+                op_fb = _get_val_fb(["OperatingIncomeLoss", "OperatingProfit", "OperatingIncome"], ["operating income"], ic_map, ic_labels)
+                ni_fb = _get_val_fb(["NetIncomeLoss", "ProfitLoss", "NetIncome"], ["net income"], ic_map, ic_labels)
+                int_fb = abs(_get_val_fb(["InterestExpense", "InterestExpenseNonoperating"], ["interest expense"], ic_map, ic_labels))
+                pt_fb = _get_val_fb(["IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments", "PretaxIncome"], ["income before tax"], ic_map, ic_labels)
+                tx_fb = _get_val_fb(["IncomeTaxExpenseBenefit", "IncomeTaxExpense"], ["income tax"], ic_map, ic_labels)
+                sh_fb = _get_val_fb(["WeightedAverageNumberOfDilutedSharesOutstanding"], ["diluted shares"], ic_map, ic_labels) or shares_outstanding
+                eps_fb = _get_val_fb(["EarningsPerShareDiluted", "DilutedEPS"], ["diluted earnings per share"], ic_map, ic_labels)
+
+                bs_items = report_items.get("bs", [])
+                bs_map = {item.get("concept", ""): safe_num(item.get("value")) for item in bs_items if "concept" in item}
+                bs_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in bs_items if "label" in item}
+
+                ta_fb = _get_val_fb(["Assets", "TotalAssets"], ["total assets"], bs_map, bs_labels)
+                ca_fb = _get_val_fb(["AssetsCurrent", "TotalAssetsCurrent"], ["current assets"], bs_map, bs_labels)
+                cl_fb = _get_val_fb(["LiabilitiesCurrent", "TotalLiabilitiesCurrent"], ["current liabilities"], bs_map, bs_labels)
+                te_fb = _get_val_fb(["StockholdersEquity", "TotalStockholdersEquity", "CommonStockholdersEquity"], ["stockholders equity"], bs_map, bs_labels)
+                ld_fb = _get_val_fb(["LongTermDebtNoncurrent", "LongTermDebt"], ["long-term debt"], bs_map, bs_labels)
+                sd_fb = _get_val_fb(["ShortTermBorrowings", "CurrentDebt"], ["short-term debt"], bs_map, bs_labels)
+                cash_fb = _get_val_fb(["CashAndCashEquivalentsAtCarryingValue", "CashAndCashEquivalents"], ["cash and cash equivalents"], bs_map, bs_labels)
+
+                cf_items = report_items.get("cf", [])
+                cf_map = {item.get("concept", ""): safe_num(item.get("value")) for item in cf_items if "concept" in item}
+                cf_labels = {item.get("label", "").lower(): safe_num(item.get("value")) for item in cf_items if "label" in item}
+
+                ocf_fb = _get_val_fb(["NetCashProvidedByUsedInOperatingActivities"], ["operating activities"], cf_map, cf_labels)
+                capex_fb = abs(_get_val_fb(["PaymentsToAcquirePropertyPlantAndEquipment"], ["capital expenditure"], cf_map, cf_labels))
+                rep_fb = abs(_get_val_fb(["PaymentsForRepurchaseOfCommonStock"], ["repurchase of common stock"], cf_map, cf_labels))
+                da_fb = abs(_get_val_fb(["DepreciationDepletionAndAmortization", "Depreciation"], ["depreciation"], cf_map, cf_labels))
+
+                inc_r = {
+                    "Total Revenue": rev_fb, "Revenue": rev_fb, "Gross Profit": gp_fb,
+                    "Operating Income": op_fb, "Operating Profit": op_fb, "EBIT": op_fb,
+                    "Net Income": ni_fb, "Net Income Common Stockholders": ni_fb, "netIncomeToCommon": ni_fb,
+                    "Interest Expense": int_fb, "Pretax Income": pt_fb, "Tax Provision": tx_fb,
+                    "Diluted EPS": eps_fb, "Basic EPS": eps_fb,
+                    "Diluted Average Shares": sh_fb, "Basic Average Shares": sh_fb,
+                }
+                bs_r = {
+                    "Total Assets": ta_fb, "totalAssets": ta_fb, "Current Assets": ca_fb, "Total Current Assets": ca_fb,
+                    "Current Liabilities": cl_fb, "Total Current Liabilities": cl_fb,
+                    "Total Stockholder Equity": te_fb, "Stockholders Equity": te_fb,
+                    "Total Debt": ld_fb + sd_fb, "totalDebt": ld_fb + sd_fb, "Long Term Debt": ld_fb, "Current Debt": sd_fb,
+                    "Cash And Cash Equivalents": cash_fb, "Cash": cash_fb,
+                }
+                cf_r = {
+                    "Operating Cash Flow": ocf_fb, "OperatingCashFlow": ocf_fb,
+                    "Capital Expenditure": capex_fb, "CapitalExpenditure": capex_fb,
+                    "Free Cash Flow": ocf_fb - capex_fb, "FreeCashFlow": ocf_fb - capex_fb,
+                    "Repurchase Of Capital Stock": rep_fb, "Depreciation & Amortization": da_fb,
+                }
+                return inc_r, bs_r, cf_r
+
+            if isinstance(rep_list_q, list) and len(rep_list_q) > 0:
+                _, q_bs_0, _ = _parse_filing_fb(rep_list_q[0])
+                if q_bs_0.get("Total Assets", 0) > 0 and not dict_bs.get("MRQ"):
+                    dict_bs["MRQ"] = q_bs_0
+
+            if isinstance(rep_list_a, list) and len(rep_list_a) > 0:
+                for filing_fb in rep_list_a[:6]:
+                    yr_val = filing_fb.get("year") or filing_fb.get("endDate", "")[:4]
+                    if not yr_val:
+                        continue
+                    p_label = str(yr_val)
+                    if p_label not in dict_inc:
+                        i_item, b_item, c_item = _parse_filing_fb(filing_fb)
+                        dict_inc[p_label] = i_item
+                        dict_bs[p_label] = b_item
+                        dict_cf[p_label] = c_item
+
+        except Exception as e_fb:
+            logger.debug("Fallback SEC Finnhub falló para %s: %s", ticker, e_fb)
+
+    # 3.5 Fallback Sintético si no hay filings SEC ni FMP
+    if not dict_inc and "series" in metric_data:
+        try:
+            ebitda_s = series_dict.get("ebitda", [])
+            eps_s = series_dict.get("eps", [])
+            years_s = [str(item.get("period", ""))[:4] for item in ebitda_s if "period" in item]
+            if years_s:
+                for idx_y, y_str in enumerate(years_s):
+                    ebitda_val = safe_num(ebitda_s[idx_y].get("v", 0.0)) if idx_y < len(ebitda_s) else 0.0
+                    eps_val = safe_num(eps_s[idx_y].get("v", 0.0)) if idx_y < len(eps_s) else 0.0
+                    est_rev = ebitda_val / 0.20 if ebitda_val > 0 else 0.0
+                    est_ni = eps_val * shares_outstanding if (eps_val > 0 and shares_outstanding > 0) else ebitda_val * 0.70
+
+                    dict_inc[y_str] = {
+                        "Total Revenue": est_rev, "Revenue": est_rev, "Gross Profit": est_rev,
+                        "Operating Income": ebitda_val * 0.85, "EBIT": ebitda_val * 0.85,
+                        "Net Income": est_ni, "netIncomeToCommon": est_ni, "Interest Expense": 0.0,
+                        "Diluted Average Shares": shares_outstanding,
+                    }
+                    dict_cf[y_str] = {
+                        "Operating Cash Flow": est_ni * 1.1,
+                        "Capital Expenditure": est_rev * 0.04,
+                        "Free Cash Flow": (est_ni * 1.1) - (est_rev * 0.04),
+                    }
+        except Exception:
+            pass
 
     if dict_inc:
         inc = pd.DataFrame(dict_inc)
@@ -1047,225 +1323,149 @@ def fetch_datos_fundamentales(
     if dict_cf:
         cf = pd.DataFrame(dict_cf)
 
-    # 6. Fallback de Series Históricas si filings SEC están vacíos
-    if inc.empty and "series" in metric_data:
-        try:
-            ebitda_series = series_dict.get("ebitda", [])
-            eps_series = series_dict.get("eps", [])
-            years_s = [str(item.get("period", ""))[:4] for item in ebitda_series if "period" in item]
-            if years_s:
-                dict_synth_inc = {}
-                dict_synth_cf = {}
-                for idx_y, y_str in enumerate(years_s):
-                    ebitda_val = safe_num(ebitda_series[idx_y].get("v", 0.0)) if idx_y < len(ebitda_series) else 0.0
-                    eps_val = safe_num(eps_series[idx_y].get("v", 0.0)) if idx_y < len(eps_series) else 0.0
-                    est_rev = ebitda_val / max(op_margins, 0.15) if ebitda_val > 0 else 0.0
-                    est_ni = eps_val * shares_outstanding if (eps_val > 0 and shares_outstanding > 0) else ebitda_val * 0.7
+    # 4. Consenso de Wall Street (Finnhub Oficial + Fallback FMP)
+    consenso = obtener_consenso_wall_street(
+        ticker=ticker,
+        finnhub_api_key=finnhub_key,
+        target_data=target_data,
+        metrics_dict=metrics_dict,
+        finnhub_client=finnhub_client,
+        fmp_api_key=fmp_key,
+    )
+    target_mean_price = consenso.target_mean
+    target_high_price = consenso.target_high
+    target_low_price = consenso.target_low
 
-                    dict_synth_inc[y_str] = {
-                        "Total Revenue": est_rev,
-                        "Gross Profit": est_rev,
-                        "Operating Income": ebitda_val * 0.85,
-                        "Net Income": est_ni,
-                        "Interest Expense": 0.0,
-                        "Diluted Average Shares": shares_outstanding,
-                    }
-                    dict_synth_cf[y_str] = {
-                        "Operating Cash Flow": est_ni * 1.1,
-                        "Capital Expenditure": est_rev * 0.04,
-                        "Free Cash Flow": (est_ni * 1.1) - (est_rev * 0.04),
-                    }
-                inc = pd.DataFrame(dict_synth_inc)
-                cf = pd.DataFrame(dict_synth_cf)
-        except Exception:
-            pass
+    # 5. Integración de Ratios TTM y Key Metrics TTM (FMP primario, Finnhub fallback)
+    fmp_r = fmp_ratios_data[0] if (isinstance(fmp_ratios_data, list) and len(fmp_ratios_data) > 0 and isinstance(fmp_ratios_data[0], dict)) else (fmp_ratios_data if isinstance(fmp_ratios_data, dict) else {})
+    fmp_m = fmp_metrics_data[0] if (isinstance(fmp_metrics_data, list) and len(fmp_metrics_data) > 0 and isinstance(fmp_metrics_data[0], dict)) else (fmp_metrics_data if isinstance(fmp_metrics_data, dict) else {})
 
-    # 7. Inyección y calibración de valores consolidados a info (TTM + MRQ)
-    total_assets_val = mrq_bs_d.get("Total Assets", 0.0) or _extraer_val_df(bs, ["Total Assets", "totalAssets"])
-    total_debt_val = mrq_bs_d.get("Total Debt", 0.0) or _extraer_val_df(bs, ["Total Debt", "totalDebt", "Long Term Debt"]) or safe_num(metrics_dict.get("totalDebtQuarterly", metrics_dict.get("netDebtAnnual", 0.0)))
-    total_cash_val = mrq_bs_d.get("Cash And Cash Equivalents", 0.0) or _extraer_val_df(bs, ["Cash And Cash Equivalents", "Cash"])
-    total_equity_val = mrq_bs_d.get("Total Stockholder Equity", 0.0) or _extraer_val_df(bs, ["Total Stockholder Equity", "Stockholders Equity"])
-    cur_assets_val = mrq_bs_d.get("Current Assets", 0.0) or _extraer_val_df(bs, ["Total Current Assets", "Current Assets"])
-    cur_liab_val = mrq_bs_d.get("Current Liabilities", 0.0) or _extraer_val_df(bs, ["Total Current Liabilities", "Current Liabilities"])
+    beta = safe_num(metrics_dict.get("beta", 1.0), default=1.0)
+    eps_ttm = safe_num(
+        metrics_dict.get("epsTTM")
+        or metrics_dict.get("epsNormalizedAnnual")
+        or _extraer_val_df(inc, ["Diluted EPS", "Basic EPS"]),
+        0.0
+    )
+    pe_ttm = safe_num(
+        fmp_r.get("peRatioTTM")
+        or metrics_dict.get("peTTM")
+        or metrics_dict.get("peAnnual"),
+        0.0
+    )
+    forward_eps = safe_num(metrics_dict.get("epsForward"), 0.0)
+    pe_fwd = safe_num(metrics_dict.get("peForward") or metrics_dict.get("forwardPE"), 0.0)
+    peg_val = safe_num(
+        fmp_r.get("priceEarningsToGrowthRatioTTM")
+        or metrics_dict.get("pegTTM")
+        or metrics_dict.get("pegAnnual"),
+        0.0
+    )
+    div_rate = safe_num(
+        fmp_r.get("dividendPerShareTTM")
+        or metrics_dict.get("dividendPerShareTTM")
+        or metrics_dict.get("dividendPerShareAnnual"),
+        0.0
+    )
+    raw_div_yield = safe_num(
+        fmp_r.get("dividendYieldTTM")
+        or metrics_dict.get("dividendYieldIndicatedAnnual")
+        or metrics_dict.get("dividendYieldTTM"),
+        0.0
+    )
+    div_yield_ind = raw_div_yield * 100.0 if 0 < raw_div_yield <= 0.30 else raw_div_yield
+
+    current_ratio = safe_num(
+        fmp_r.get("currentRatioTTM")
+        or metrics_dict.get("currentRatioQuarterly")
+        or metrics_dict.get("currentRatioAnnual"),
+        default=0.0
+    )
+    debt_to_equity = safe_num(
+        fmp_r.get("debtEquityRatioTTM")
+        or metrics_dict.get("totalDebt/totalEquityQuarterly")
+        or metrics_dict.get("totalDebt/totalEquityAnnual"),
+        0.0
+    )
+
+    raw_roe = safe_num(fmp_r.get("returnOnEquityTTM") or metrics_dict.get("roeTTM") or metrics_dict.get("roeAnnual"), 0.0)
+    roe_val = raw_roe * 100.0 if 0 < abs(raw_roe) <= 3.0 else raw_roe
+
+    raw_roa = safe_num(fmp_r.get("returnOnAssetsTTM") or metrics_dict.get("roaTTM") or metrics_dict.get("roaAnnual"), 0.0)
+    roa_val = raw_roa * 100.0 if 0 < abs(raw_roa) <= 1.0 else raw_roa
+
+    raw_roic = safe_num(fmp_m.get("roicTTM") or metrics_dict.get("roicTTM") or metrics_dict.get("roicAnnual"), 0.0)
+    roic_val = raw_roic * 100.0 if 0 < abs(raw_roic) <= 1.0 else raw_roic
+
+    cash_per_share_metric = safe_num(
+        fmp_m.get("cashPerShareTTM")
+        or metrics_dict.get("cashPerSharePerShareQuarterly")
+        or metrics_dict.get("cashPerSharePerShareAnnual"),
+        0.0
+    )
+
+    op_margins_raw = safe_num(
+        fmp_r.get("operatingProfitMarginTTM")
+        or metrics_dict.get("operatingMarginTTM")
+        or metrics_dict.get("operatingMarginAnnual"),
+        0.0
+    )
+    op_margins = op_margins_raw / 100.0 if op_margins_raw > 1.0 else op_margins_raw
+
+    rev_growth_raw = safe_num(metrics_dict.get("revenueGrowthTTMYoy", metrics_dict.get("revenueGrowthQuarterlyYoy", metrics_dict.get("revenueGrowth3Y", 0.0))))
+    rev_growth = rev_growth_raw / 100.0 if abs(rev_growth_raw) > 1.0 else rev_growth_raw
+
+    eps_growth_raw = safe_num(metrics_dict.get("epsGrowthTTMYoy", metrics_dict.get("epsGrowthQuarterlyYoy", metrics_dict.get("epsGrowthAnnual", metrics_dict.get("epsGrowth3Y", 0.0)))))
+    eps_growth = eps_growth_raw / 100.0 if abs(eps_growth_raw) > 1.0 else eps_growth_raw
+
+    # 6. Partidas de Balance y Flujos Consolidados (TTM y MRQ)
+    mrq_bs = dict_bs.get("MRQ", {}) if isinstance(dict_bs, dict) else {}
+    ttm_inc = dict_inc.get("TTM", {}) if isinstance(dict_inc, dict) else {}
+    ttm_cf = dict_cf.get("TTM", {}) if isinstance(dict_cf, dict) else {}
+
+    total_assets_val = mrq_bs.get("Total Assets", 0.0) or _extraer_val_df(bs, ["Total Assets", "totalAssets"])
+    total_debt_val = mrq_bs.get("Total Debt", 0.0) or _extraer_val_df(bs, ["Total Debt", "totalDebt", "Long Term Debt"]) or safe_num(metrics_dict.get("totalDebtQuarterly", 0.0))
+    total_cash_val = mrq_bs.get("Cash And Cash Equivalents", 0.0) or _extraer_val_df(bs, ["Cash And Cash Equivalents", "Cash", "cashAndShortTermInvestments"])
+    total_equity_val = mrq_bs.get("Total Stockholder Equity", 0.0) or _extraer_val_df(bs, ["Total Stockholder Equity", "Stockholders Equity", "totalStockholdersEquity"])
+    cur_assets_val = mrq_bs.get("Current Assets", 0.0) or _extraer_val_df(bs, ["Total Current Assets", "Current Assets"])
+    cur_liab_val = mrq_bs.get("Current Liabilities", 0.0) or _extraer_val_df(bs, ["Total Current Liabilities", "Current Liabilities"])
+
+    ebit_val = ttm_inc.get("Operating Income", 0.0) or _extraer_val_df(inc, ["Operating Income", "Operating Profit", "EBIT"])
+    net_income_val = ttm_inc.get("Net Income", 0.0) or _extraer_val_df(inc, ["Net Income", "netIncomeToCommon"])
+    rev_val = ttm_inc.get("Total Revenue", 0.0) or _extraer_val_df(inc, ["Total Revenue", "Revenue", "revenue"])
+    gross_profit_val = ttm_inc.get("Gross Profit", 0.0) or _extraer_val_df(inc, ["Gross Profit", "grossProfit"]) or rev_val
+    ocf_val = ttm_cf.get("Operating Cash Flow", 0.0) or _extraer_val_df(cf, ["Operating Cash Flow", "OperatingCashFlow"])
+    fcf_val = ttm_cf.get("Free Cash Flow", 0.0) or _extraer_val_df(cf, ["Free Cash Flow", "FreeCashFlow"]) or safe_num(metrics_dict.get("fcfTTM", 0.0))
+    capex_val = ttm_cf.get("Capital Expenditure", 0.0) or abs(_extraer_val_df(cf, ["Capital Expenditure", "capitalExpenditure"]))
+    int_exp_val = abs(ttm_inc.get("Interest Expense", 0.0) or _extraer_val_df(inc, ["Interest Expense", "interestExpense"]))
+    pretax_val = ttm_inc.get("Pretax Income", 0.0) or _extraer_val_df(inc, ["Pretax Income", "Income Before Tax", "incomeBeforeTax"])
+    tax_prov_val = ttm_inc.get("Tax Provision", 0.0) or _extraer_val_df(inc, ["Tax Provision", "incomeTaxExpense"])
+    ebitda_val = safe_num(metrics_dict.get("ebitdaTTM", metrics_dict.get("ebitdaAnnual", 0.0))) or (ebit_val * 1.15 if ebit_val > 0 else 0.0)
+
+    # 7. Scores de Salud Contable (FMP /financial-score con Fallback Resiliente a Balances)
+    fmp_s = fmp_score_data[0] if (isinstance(fmp_score_data, list) and len(fmp_score_data) > 0 and isinstance(fmp_score_data[0], dict)) else (fmp_score_data if isinstance(fmp_score_data, dict) else {})
     
-    ebit_val = ttm_inc_d.get("Operating Income", 0.0) or _extraer_val_df(inc, ["Operating Income", "Operating Profit", "EBIT"])
-    net_income_val = ttm_inc_d.get("Net Income", 0.0) or _extraer_val_df(inc, ["Net Income"])
-    rev_val = ttm_inc_d.get("Total Revenue", 0.0) or _extraer_val_df(inc, ["Total Revenue", "Revenue"])
-    gross_profit_val = ttm_inc_d.get("Gross Profit", 0.0) or _extraer_val_df(inc, ["Gross Profit"]) or rev_val
-    ocf_val = ttm_cf_d.get("Operating Cash Flow", 0.0) or _extraer_val_df(cf, ["Operating Cash Flow"])
-    fcf_val = ttm_cf_d.get("Free Cash Flow", 0.0) or _extraer_val_df(cf, ["Free Cash Flow"]) or safe_num(metrics_dict.get("fcfTTM", metrics_dict.get("fcfAnnual", 0.0)))
-    int_exp_val = abs(ttm_inc_d.get("Interest Expense", 0.0) or _extraer_val_df(inc, ["Interest Expense"]))
-    pretax_val = ttm_inc_d.get("Pretax Income", 0.0) or _extraer_val_df(inc, ["Pretax Income"])
-    tax_prov_val = ttm_inc_d.get("Tax Provision", 0.0) or _extraer_val_df(inc, ["Tax Provision"])
-    ebitda_val = safe_num(metrics_dict.get("ebitdaTTM", metrics_dict.get("ebitdaAnnual", 0.0))) or (ebit_val * 1.15)
+    altman_z_fmp = safe_num(fmp_s.get("altmanZScore"), 0.0)
+    if altman_z_fmp > 0.0:
+        altman_z_val = altman_z_fmp
+    else:
+        # Fallback resiliente: cálculo matemático manual con los balances de FMP
+        roa_para_z = (net_income_val / total_assets_val * 100.0) if total_assets_val > 0 else roa_val
+        de_para_z = (total_debt_val / total_equity_val) if total_equity_val > 0 else debt_to_equity
+        res_z_manual = calcular_altman_zscore(debt_eq=de_para_z, roa=roa_para_z)
+        altman_z_val = res_z_manual["z_score"]
 
-    # ── CAPA 4 (Enriquecimiento y Fallback Institucional con yfinance) ──
-    if (mcap <= 0.0 or inc.empty or bs.empty or cf.empty or ebitda_val <= 0.0 or roe_val <= 0.0 or eps_ttm <= 0.0 or rev_val <= 0.0):
-        try:
-            import yfinance as yf
-            ticker_yf = yf.Ticker(ticker)
-            yf_info = getattr(ticker_yf, "info", None) or {}
+    piotroski_fmp = fmp_s.get("piotroskiScore")
+    if piotroski_fmp is not None:
+        piotroski_val = int(safe_num(piotroski_fmp, 0))
+    else:
+        # Fallback resiliente: auditoría de los 9 criterios de Piotroski con balances de FMP
+        res_fs_manual = calcular_piotroski_fscore(inc, bs, cf, info)
+        piotroski_val = res_fs_manual["f_score"]
 
-            if isinstance(yf_info, dict) and yf_info:
-                if mcap <= 0.0:
-                    mcap = safe_num(yf_info.get("marketCap"), 0.0)
-                if shares_outstanding <= 0.0:
-                    shares_outstanding = safe_num(yf_info.get("sharesOutstanding"), 0.0)
-                if not long_name or long_name == ticker:
-                    long_name = yf_info.get("longName") or yf_info.get("shortName") or ticker
-                if not sector_std or sector_std == "General":
-                    sector_std = _map_gics_sector(yf_info.get("sector") or yf_info.get("industry") or "")
-                    industry_raw = yf_info.get("industry") or industry_raw
-
-                if beta == 1.0 or beta <= 0.0:
-                    beta = safe_num(yf_info.get("beta"), 1.0)
-                if eps_ttm <= 0.0:
-                    eps_ttm = safe_num(yf_info.get("trailingEps"), 0.0)
-                if forward_eps <= 0.0:
-                    forward_eps = safe_num(yf_info.get("forwardEps"), 0.0)
-                if pe_ttm <= 0.0:
-                    pe_ttm = safe_num(yf_info.get("trailingPE"), 0.0)
-                if pe_fwd <= 0.0:
-                    pe_fwd = safe_num(yf_info.get("forwardPE"), 0.0)
-                if div_rate <= 0.0:
-                    div_rate = safe_num(yf_info.get("dividendRate"), 0.0)
-                if div_yield_ind <= 0.0:
-                    div_yield_ind = safe_num(yf_info.get("dividendYield"), 0.0)
-                if debt_to_equity <= 0.0:
-                    debt_to_equity = safe_num(yf_info.get("debtToEquity"), 0.0)
-
-                # Current Ratio Finviz/MRQ
-                yf_cr = safe_num(yf_info.get("currentRatio"), 0.0)
-                if yf_cr > 0.0:
-                    current_ratio = yf_cr
-
-                # ROE / ROA (yfinance viene en decimales, ej. 2.412 = 241.2%)
-                raw_roe = safe_num(yf_info.get("returnOnEquity"), 0.0)
-                if raw_roe > 0.0:
-                    raw_roe_pct = raw_roe * 100.0 if raw_roe <= 10.0 else raw_roe
-                    if roe_val <= 0.0 or roe_val > 300.0 or abs(roe_val - raw_roe_pct) > 50.0:
-                        roe_val = raw_roe_pct
-
-                raw_roa = safe_num(yf_info.get("returnOnAssets"), 0.0)
-                if raw_roa > 0.0:
-                    raw_roa_pct = raw_roa * 100.0 if raw_roa <= 10.0 else raw_roa
-                    if roa_val <= 0.0 or roa_val > 45.0 or abs(roa_val - raw_roa_pct) > 15.0:
-                        roa_val = raw_roa_pct
-
-                yf_roic = safe_num(yf_info.get("roic"), 0.0)
-                if yf_roic > 0.0:
-                    roic_val = yf_roic * 100.0 if yf_roic <= 1.0 else yf_roic
-
-                if total_assets_val <= 0.0:
-                    total_assets_val = safe_num(yf_info.get("totalAssets"), 0.0)
-                if total_debt_val <= 0.0:
-                    total_debt_val = safe_num(yf_info.get("totalDebt"), 0.0)
-                if total_cash_val <= 0.0:
-                    total_cash_val = safe_num(yf_info.get("totalCash"), 0.0)
-                if total_equity_val <= 0.0:
-                    bv = safe_num(yf_info.get("bookValue"), 0.0)
-                    total_equity_val = (bv * shares_outstanding) if (bv > 0 and shares_outstanding > 0) else safe_num(yf_info.get("totalStockholderEquity"), 0.0)
-
-                yf_ebitda = safe_num(yf_info.get("ebitda"), 0.0)
-                if ebitda_val <= 0.0 and yf_ebitda > 0.0:
-                    ebitda_val = yf_ebitda
-
-                yf_ocf = safe_num(yf_info.get("operatingCashflow"), 0.0)
-                if ocf_val <= 0.0 and yf_ocf > 0.0:
-                    ocf_val = yf_ocf
-
-                yf_fcf = safe_num(yf_info.get("freeCashflow"), 0.0)
-                if fcf_val <= 0.0 and yf_fcf > 0.0:
-                    fcf_val = yf_fcf
-
-                if rev_val <= 0.0:
-                    rev_val = safe_num(yf_info.get("totalRevenue"), 0.0)
-                if net_income_val == 0.0:
-                    net_income_val = safe_num(yf_info.get("netIncomeToCommon") or yf_info.get("netIncome"), 0.0)
-                if ebit_val <= 0.0:
-                    ebit_val = safe_num(yf_info.get("operatingIncome"), ebitda_val * 0.85 if ebitda_val > 0 else 0.0)
-
-                if roic_val <= 0.0 and total_equity_val > 0 and total_debt_val >= 0 and ebit_val > 0:
-                    inv_c = total_equity_val + total_debt_val
-                    if inv_c > 0:
-                        roic_val = (ebit_val * (1.0 - 0.21) / inv_c) * 100.0
-
-                yf_eg = safe_num(yf_info.get("earningsGrowth"), safe_num(yf_info.get("earningsQuarterlyGrowth"), 0.0))
-                if yf_eg != 0.0 and (eps_growth == 0.0 or (abs(eps_growth) > 1.0 and abs(yf_eg) < 1.0)):
-                    eps_growth = yf_eg
-
-                yf_rg = safe_num(yf_info.get("revenueGrowth"), safe_num(yf_info.get("revenueQuarterlyGrowth"), 0.0))
-                if yf_rg != 0.0 and rev_growth == 0.0:
-                    rev_growth = yf_rg
-
-                yf_peg = safe_num(yf_info.get("pegRatio"), 0.0)
-                if yf_peg > 0.0 and peg_val <= 0.0:
-                    peg_val = yf_peg
-
-                # Target Price
-                if target_mean_price <= 0.0:
-                    t_mean_yf, t_high_yf, t_low_yf = obtener_consenso_wall_street(ticker)
-                    if t_mean_yf > 0.0:
-                        target_mean_price = t_mean_yf
-                        target_high_price = t_high_yf
-                        target_low_price = t_low_yf
-
-                yf_short = safe_num(
-                    yf_info.get("shortPercentOfFloat")
-                    or yf_info.get("sharesPercentSharesOut")
-                    or yf_info.get("shortPercentOfSharesOutstanding"),
-                    0.0
-                )
-
-            # Enriquecer DataFrames si están vacíos
-            if inc.empty:
-                yf_inc = getattr(ticker_yf, "financials", None)
-                if yf_inc is None or (isinstance(yf_inc, pd.DataFrame) and yf_inc.empty):
-                    yf_inc = getattr(ticker_yf, "income_stmt", None)
-                if isinstance(yf_inc, pd.DataFrame) and not yf_inc.empty:
-                    inc = yf_inc.copy()
-                    inc.columns = [str(c)[:4] for c in inc.columns]
-
-            if bs.empty:
-                yf_bs = getattr(ticker_yf, "balance_sheet", None)
-                if isinstance(yf_bs, pd.DataFrame) and not yf_bs.empty:
-                    bs = yf_bs.copy()
-                    bs.columns = [str(c)[:4] for c in bs.columns]
-                yf_q_bs = getattr(ticker_yf, "quarterly_balance_sheet", None)
-                if isinstance(yf_q_bs, pd.DataFrame) and not yf_q_bs.empty:
-                    bs["MRQ"] = yf_q_bs.iloc[:, 0]
-
-            if cf.empty:
-                yf_cf = getattr(ticker_yf, "cashflow", None)
-                if isinstance(yf_cf, pd.DataFrame) and not yf_cf.empty:
-                    cf = yf_cf.copy()
-                    cf.columns = [str(c)[:4] for c in cf.columns]
-                yf_q_cf = getattr(ticker_yf, "quarterly_cashflow", None)
-                if isinstance(yf_q_cf, pd.DataFrame) and not yf_q_cf.empty and len(yf_q_cf.columns) >= 4:
-                    cf["TTM"] = yf_q_cf.iloc[:, :4].sum(axis=1)
-
-        except Exception as e_enrich:
-            logger.debug("Error en enriquecimiento yfinance para %s: %s", ticker, e_enrich)
-
-    # Garantizar extracción de Target Price de Consenso Wall Street desde yfinance
-    if target_mean_price <= 0.0:
-        try:
-            cw_fund = obtener_consenso_wall_street(ticker)
-            if cw_fund.target_mean > 0:
-                target_mean_price = cw_fund.target_mean
-                target_high_price = cw_fund.target_high
-                target_low_price = cw_fund.target_low
-        except Exception as e_cw:
-            logger.debug("Error extrayendo consenso en fetch_datos_fundamentales para %s: %s", ticker, e_cw)
-
-    # Calibración de métricas de mercado (Finviz Standards)
+    # 8. Calibración de métricas de mercado (Finviz Standards)
     if current_ratio <= 0.0 and cur_assets_val > 0 and cur_liab_val > 0:
         current_ratio = cur_assets_val / cur_liab_val
-
-    if cur_assets_val > 0 and cur_liab_val > 0:
-        cr_calculated = cur_assets_val / cur_liab_val
-        if current_ratio <= 0.0 or abs(cr_calculated - current_ratio) < 0.5:
-            current_ratio = cr_calculated
 
     if roe_val <= 0.0 and total_equity_val > 0 and net_income_val != 0.0:
         roe_val = (net_income_val / total_equity_val) * 100.0
@@ -1273,13 +1473,9 @@ def fetch_datos_fundamentales(
     if roa_val <= 0.0 and total_assets_val > 0 and net_income_val != 0.0:
         roa_val = (net_income_val / total_assets_val) * 100.0
 
-    if total_equity_val <= 0.0 and roe_val > 0.0 and net_income_val > 0.0:
-        total_equity_val = net_income_val / (roe_val / 100.0)
-
     if forward_eps <= 0.0 and eps_ttm > 0:
         forward_eps = eps_ttm * (1.0 + max(eps_growth if eps_growth > 0 else 0.08, 0.05))
 
-    # Cálculo defensivo de PEG Forward si no vino directo de API
     if peg_val <= 0.0:
         fwd_growth_calc = ((forward_eps - eps_ttm) / eps_ttm) if (forward_eps > eps_ttm and eps_ttm > 0) else (eps_growth if eps_growth > 0 else 0.0)
         if pe_fwd > 0 and fwd_growth_calc > 0:
@@ -1291,10 +1487,10 @@ def fetch_datos_fundamentales(
             if g_pct_ttm > 0:
                 peg_val = pe_ttm / g_pct_ttm
 
-    # Caja por acción y Caja Neta por acción
     cash_per_share = (total_cash_val / shares_outstanding) if shares_outstanding > 0 else cash_per_share_metric
     net_cash_per_share = ((total_cash_val - total_debt_val) / shares_outstanding) if shares_outstanding > 0 else 0.0
 
+    # 9. Consolidación de diccionario de perfil y métricas
     info.update({
         "symbol": ticker,
         "longName": long_name,
@@ -1333,6 +1529,8 @@ def fetch_datos_fundamentales(
         "grossProfits": gross_profit_val,
         "operatingCashflow": ocf_val,
         "freeCashflow": fcf_val,
+        "capitalExpenditures": capex_val,
+        "capitalExpenditure": capex_val,
         "interestExpense": int_exp_val,
         "pretaxIncome": pretax_val,
         "taxProvision": tax_prov_val,
@@ -1342,14 +1540,18 @@ def fetch_datos_fundamentales(
         "targetHighPrice": target_high_price,
         "targetLowPrice": target_low_price,
         "shortPercentOfFloat": yf_short if yf_short > 0 else safe_num(metrics_dict.get("shortPercentOfFloat"), 0.0),
+        "altmanZScore": altman_z_val,
+        "piotroskiScore": piotroski_val,
+        "fmp_financial_score": fmp_s,
     })
 
     claves_criticas = [
         "marketCap", "sharesOutstanding", "totalDebt", "totalCash", "ebitda",
         "operatingIncome", "netIncomeToCommon", "freeCashflow", "operatingCashflow",
-        "interestExpense", "totalAssets", "totalStockholderEquity", "totalCurrentAssets",
-        "totalCurrentLiabilities", "currentRatio", "debtToEquity", "returnOnEquity",
-        "returnOnAssets", "operatingMargins", "pretaxIncome", "taxProvision", "beta"
+        "capitalExpenditures", "capitalExpenditure", "interestExpense", "totalAssets",
+        "totalStockholderEquity", "totalCurrentAssets", "totalCurrentLiabilities",
+        "currentRatio", "debtToEquity", "returnOnEquity", "returnOnAssets",
+        "operatingMargins", "pretaxIncome", "taxProvision", "beta"
     ]
     for k in claves_criticas:
         info[k] = safe_num(info.get(k), default=0.0)
@@ -1517,19 +1719,19 @@ def obtener_datos_dividendos(
 
 @st.cache_data(ttl=FINNHUB_CACHE_TTL_QUOTE)
 def fetch_datos_concurrente(
-    ticker: str, finnhub_key: str = "", fred_key: str = ""
+    ticker: str, finnhub_key: str = "", fred_key: str = "", fmp_key: str = ""
 ) -> Dict[str, Any]:
     """
     Función concurrente maestra que dispara simultáneamente:
-    - Cotización intradía y velas 5Y (Finnhub)
-    - Datos fundamentales, métricas y estados financieros (Finnhub)
+    - Cotización intradía y velas 5Y (Finnhub / FMP Quote)
+    - Datos fundamentales, métricas y estados financieros (FMP + Finnhub)
     - Tasa de bono FRED
     - Feed de noticias (Finnhub)
     vía ThreadPoolExecutor para máxima velocidad de respuesta en UI.
     """
     with ThreadPoolExecutor(max_workers=4) as executor:
-        f_quote = executor.submit(fetch_cotizacion_intradia, ticker, finnhub_key)
-        f_funda = executor.submit(fetch_datos_fundamentales, ticker, finnhub_key)
+        f_quote = executor.submit(fetch_cotizacion_intradia, ticker, finnhub_key, fmp_key=fmp_key)
+        f_funda = executor.submit(fetch_datos_fundamentales, ticker, finnhub_key, fmp_key=fmp_key)
         f_fred = executor.submit(obtener_tasa_fred, fred_key)
         f_news = executor.submit(obtener_noticias_financieras, ticker, finnhub_key)
 
@@ -1579,6 +1781,8 @@ def obtener_capex_historico(cf: pd.DataFrame) -> List[float]:
     posibles_filas = [
         "Capital Expenditure",
         "CapitalExpenditure",
+        "capitalExpenditure",
+        "investmentsInPropertyPlantAndEquipment",
         "Capital Expenditures",
         "Purchase Of Property Plant And Equipment",
         "Purchases Of Property, Plant And Equipment",
@@ -1610,7 +1814,10 @@ def extraer_fcff_desapalancado(
     ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
 
     ocf_hist = _extraer_serie(cf, [
-        "Operating Cash Flow", "OperatingCashFlow",
+        "Operating Cash Flow",
+        "OperatingCashFlow",
+        "operatingCashFlow",
+        "netCashProvidedByOperatingActivities",
         "Cash Flow From Continuing Operating Activities",
         "Total Cash From Operating Activities",
         "Net Cash Provided By Operating Activities"

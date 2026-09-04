@@ -11,13 +11,22 @@ import pytest
 import requests
 
 from data.financial_fetcher import (
+    FinnhubClient,
     _finnhub_get,
+    _fmp_get,
     _map_gics_sector,
     extraer_fcff_desapalancado,
     extraer_metricas_ttm,
     fetch_cotizacion_intradia,
     fetch_datos_concurrente,
     fetch_datos_fundamentales,
+    fetch_fmp_balance_sheet,
+    fetch_fmp_cash_flow,
+    fetch_fmp_enterprise_values,
+    fetch_fmp_financial_score,
+    fetch_fmp_income_statement,
+    fetch_fmp_key_metrics_ttm,
+    fetch_fmp_ratios_ttm,
     obtener_capex_historico,
     obtener_datos_dividendos,
     obtener_kd_finnhub_fred,
@@ -434,79 +443,85 @@ class TestFinnhubConsensusPriceTarget:
         m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual=50.0)
         assert m_ttm["target_mean_price"] == 0.0
 
-    @patch("yfinance.Ticker")
-    def test_obtener_consenso_wall_street_yfinance_analyst_price_targets(self, mock_yf_ticker):
-        """Verifica fallback a yfinance.Ticker.analyst_price_targets para tickers como MA."""
-        mock_instance = MagicMock()
-        mock_instance.analyst_price_targets = {
-            "current": 598.47,
-            "high": 735.0,
-            "low": 550.0,
-            "mean": 667.30,
-            "median": 668.0,
+    def test_obtener_consenso_wall_street_finnhub_client(self):
+        """Verifica extracción directa de consenso vía FinnhubClient para tickers como MA."""
+        mock_client = MagicMock()
+        mock_client.price_target.return_value = {
+            "targetMean": 667.30,
+            "targetHigh": 735.0,
+            "targetLow": 550.0,
+            "targetMedian": 668.0,
+            "numberAnalysts": 35,
         }
-        mock_instance.info = {}
-        mock_yf_ticker.return_value = mock_instance
+        mock_client.recommendation_trends.return_value = [
+            {"strongBuy": 20, "buy": 12, "hold": 3, "sell": 0, "strongSell": 0}
+        ]
 
-        mean, high, low = obtener_consenso_wall_street("MA")
+        res = obtener_consenso_wall_street("MA", finnhub_client=mock_client)
+        mean, high, low = res
         assert mean == 667.30
         assert high == 735.0
         assert low == 550.0
+        assert res.num_analysts == 35
+        assert res.recommendation == "strong_buy"
 
-    @patch("yfinance.Ticker")
-    def test_obtener_consenso_wall_street_yfinance_info_fallback(self, mock_yf_ticker):
-        """Verifica fallback a yfinance.Ticker.info cuando analyst_price_targets está vacío."""
-        mock_instance = MagicMock()
-        mock_instance.analyst_price_targets = None
-        mock_instance.info = {
-            "targetMeanPrice": 305.80,
-            "targetHighPrice": 500.0,
-            "targetLowPrice": 180.0,
-        }
-        mock_yf_ticker.return_value = mock_instance
+    @patch("data.financial_fetcher._fmp_get")
+    def test_obtener_consenso_wall_street_fmp_fallback(self, mock_fmp_get):
+        """Verifica fallback a FMP API (price-target-consensus) cuando Finnhub no tiene target."""
+        mock_client = MagicMock()
+        mock_client.price_target.return_value = {}
+        mock_client.recommendation_trends.return_value = []
+        mock_fmp_get.return_value = [
+            {
+                "symbol": "NVDA",
+                "targetConsensus": 305.80,
+                "targetHigh": 500.0,
+                "targetLow": 180.0,
+            }
+        ]
 
-        mean, high, low = obtener_consenso_wall_street("NVDA")
+        res = obtener_consenso_wall_street("NVDA", finnhub_client=mock_client, fmp_api_key="fmp_test_key")
+        mean, high, low = res
         assert mean == 305.80
         assert high == 500.0
         assert low == 180.0
 
-    @patch("yfinance.Ticker")
-    def test_obtener_consenso_wall_street_sin_cobertura_etf(self, mock_yf_ticker):
+    def test_obtener_consenso_wall_street_sin_cobertura_etf(self):
         """Verifica que para activos como VOO sin analistas, retorne (0.0, 0.0, 0.0)."""
-        mock_instance = MagicMock()
-        mock_instance.analyst_price_targets = {}
-        mock_instance.info = {}
-        mock_yf_ticker.return_value = mock_instance
+        mock_client = MagicMock()
+        mock_client.price_target.return_value = {}
+        mock_client.recommendation_trends.return_value = []
 
-        mean, high, low = obtener_consenso_wall_street("VOO")
+        res = obtener_consenso_wall_street("VOO", finnhub_client=mock_client, fmp_api_key="")
+        mean, high, low = res
         assert mean == 0.0
         assert high == 0.0
         assert low == 0.0
 
-    @patch("yfinance.Ticker")
+    @patch("data.financial_fetcher._fmp_get")
     @patch("data.financial_fetcher._finnhub_get")
-    def test_fetch_datos_fundamentales_yfinance_integration(self, mock_finnhub_get, mock_yf_ticker):
-        """Verifica integración completa cuando Finnhub no tiene target y se recurre a yfinance."""
+    def test_fetch_datos_fundamentales_fmp_consensus_integration(self, mock_finnhub_get, mock_fmp_get):
+        """Verifica integración completa cuando Finnhub no tiene target y se recurre a FMP."""
         def finnhub_side_effect(endpoint, params=None, api_key="", timeout=8.0):
             if endpoint == "stock/profile2":
                 return {"name": "Mastercard Inc", "ticker": "MA", "finnhubIndustry": "Credit Services", "marketCapitalization": 500000.0, "shareOutstanding": 930.0}
             if endpoint == "stock/metric":
                 return {"metric": {}}
             if endpoint == "stock/price-target":
-                return {}  # Finnhub sin target
+                return {}
             return None
 
         mock_finnhub_get.side_effect = finnhub_side_effect
+        mock_fmp_get.return_value = [
+            {
+                "symbol": "MA",
+                "targetConsensus": 667.30,
+                "targetHigh": 735.0,
+                "targetLow": 550.0,
+            }
+        ]
 
-        mock_instance = MagicMock()
-        mock_instance.analyst_price_targets = {
-            "mean": 667.30,
-            "high": 735.0,
-            "low": 550.0,
-        }
-        mock_yf_ticker.return_value = mock_instance
-
-        info, inc, bs, cf = fetch_datos_fundamentales("MA", "key_test")
+        info, inc, bs, cf = fetch_datos_fundamentales("MA", finnhub_api_key="key_test", fmp_api_key="fmp_key")
 
         assert info["targetMeanPrice"] == 667.30
         assert info["targetHighPrice"] == 735.0
@@ -639,6 +654,115 @@ class TestFinnhubStandardMetricsAndFallbacks:
         # P/FCF = 2T / 80B = 25.0x
         assert res["p_fcf"] == pytest.approx(25.0, abs=0.1)
         assert res["peg"] == pytest.approx(1.95, abs=0.05)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. PRUEBAS DE FMP API, ENDPOINTS CON CACHÉ Y CLIENTE FINNHUB
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFMPAccountingEngineAndEndpoints:
+    @patch("data.financial_fetcher._fmp_get")
+    def test_fmp_cached_endpoints_calls(self, mock_fmp_get):
+        mock_fmp_get.return_value = [{"symbol": "AAPL", "revenue": 383285000000}]
+        inc = fetch_fmp_income_statement("AAPL", "test_key", limit=5)
+        assert len(inc) == 1
+        assert inc[0]["revenue"] == 383285000000
+
+        mock_fmp_get.return_value = [{"symbol": "AAPL", "totalAssets": 352583000000}]
+        bs = fetch_fmp_balance_sheet("AAPL", "test_key", limit=5)
+        assert len(bs) == 1
+        assert bs[0]["totalAssets"] == 352583000000
+
+        mock_fmp_get.return_value = [{"symbol": "AAPL", "operatingCashFlow": 110543000000, "capitalExpenditure": 10959000000}]
+        cf = fetch_fmp_cash_flow("AAPL", "test_key", limit=5)
+        assert len(cf) == 1
+        assert cf[0]["operatingCashFlow"] == 110543000000
+
+        mock_fmp_get.return_value = [{"peRatioTTM": 28.5, "priceEarningsToGrowthRatioTTM": 1.6}]
+        ratios = fetch_fmp_ratios_ttm("AAPL", "test_key")
+        assert ratios["peRatioTTM"] == 28.5
+
+        mock_fmp_get.return_value = [{"roicTTM": 0.45, "evToOperatingCashFlowTTM": 25.0}]
+        metrics = fetch_fmp_key_metrics_ttm("AAPL", "test_key")
+        assert metrics["roicTTM"] == 0.45
+
+        mock_fmp_get.return_value = [{"altmanZScore": 8.5, "piotroskiScore": 7}]
+        score = fetch_fmp_financial_score("AAPL", "test_key")
+        assert score["altmanZScore"] == 8.5
+        assert score["piotroskiScore"] == 7
+
+        mock_fmp_get.return_value = [{"numberOfShares": 15500000000, "marketCapitalization": 2800000000000}]
+        ev = fetch_fmp_enterprise_values("AAPL", "test_key", limit=1)
+        assert ev["numberOfShares"] == 15500000000
+        assert ev["marketCapitalization"] == 2800000000000
+
+    @patch("data.financial_fetcher._finnhub_get")
+    def test_finnhub_client_methods(self, mock_fh_get):
+        client = FinnhubClient(api_key="test_key")
+
+        mock_fh_get.return_value = ["V", "AXP", "DFS"]
+        peers = client.company_peers("MA")
+        assert "V" in peers
+        assert "AXP" in peers
+        assert "MA" not in peers
+
+        mock_fh_get.return_value = {
+            "symbol": "MA",
+            "targetMean": 667.30,
+            "targetHigh": 735.0,
+            "targetLow": 550.0,
+            "targetMedian": 668.0,
+            "numberAnalysts": 35,
+        }
+        pt = client.price_target("MA")
+        assert pt["targetMean"] == 667.30
+        assert pt["targetHigh"] == 735.0
+        assert pt["numberAnalysts"] == 35
+
+        mock_fh_get.return_value = [
+            {"period": "2024-01-01", "strongBuy": 20, "buy": 12, "hold": 3, "sell": 0, "strongSell": 0}
+        ]
+        trends = client.recommendation_trends("MA")
+        assert len(trends) == 1
+        assert trends[0]["strongBuy"] == 20
+        assert trends[0]["buy"] == 12
+
+    @patch("data.financial_fetcher._finnhub_get")
+    @patch("data.financial_fetcher._fmp_get")
+    def test_fmp_financial_score_resilient_fallback(self, mock_fmp_get, mock_fh_get):
+        """Verifica que si FMP /financial-score retorna 403 o None, se calcula Altman Z y Piotroski con balances."""
+        def fh_side_effect(endpoint, params=None, api_key="", timeout=8.0):
+            if endpoint == "stock/profile2":
+                return {"name": "Test Co", "ticker": "TEST", "finnhubIndustry": "Technology", "marketCapitalization": 10000.0, "shareOutstanding": 100.0}
+            if endpoint == "stock/metric":
+                return {"metric": {"beta": 1.1}}
+            if endpoint == "stock/price-target":
+                return {"targetMean": 120.0}
+            return None
+
+        mock_fh_get.side_effect = fh_side_effect
+
+        def fmp_side_effect(endpoint, params=None, api_key="", timeout=12.0):
+            if "income-statement" in endpoint:
+                return [{"date": "2023-12-31", "calendarYear": "2023", "revenue": 1000.0, "netIncome": 150.0, "operatingIncome": 200.0}]
+            if "balance-sheet" in endpoint:
+                return [{"date": "2023-12-31", "calendarYear": "2023", "totalAssets": 1000.0, "totalStockholdersEquity": 600.0, "totalDebt": 200.0, "totalCurrentAssets": 400.0, "totalCurrentLiabilities": 200.0}]
+            if "cash-flow" in endpoint:
+                return [{"date": "2023-12-31", "calendarYear": "2023", "operatingCashFlow": 220.0, "capitalExpenditure": 50.0, "freeCashFlow": 170.0}]
+            if "financial-score" in endpoint:
+                return None  # Simula 403 Forbidden o vacío
+            return []
+
+        mock_fmp_get.side_effect = fmp_side_effect
+
+        info, inc, bs, cf = fetch_datos_fundamentales("TEST", "test_key", "fmp_key")
+
+        # Debe contener Altman Z y Piotroski calculados manualmente
+        assert "altmanZScore" in info
+        assert info["altmanZScore"] > 0.0
+        assert "piotroskiScore" in info
+        assert 0 <= info["piotroskiScore"] <= 9
+
 
 
 

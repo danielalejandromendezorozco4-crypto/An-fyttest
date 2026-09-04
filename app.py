@@ -23,6 +23,7 @@ from engine.valuation import (
     crear_calculador_dcf,
 )
 from data.financial_fetcher import (
+    FinnhubClient,
     fetch_datos_concurrente,
     obtener_datos_dividendos,
     obtener_noticias_financieras,
@@ -64,7 +65,8 @@ def seleccionar_ticker(t):
 inyectar_estilos()
 
 # --- AUTENTICACIÓN SECRETS ---
-gemini_key, fred_key, finnhub_key = cargar_secrets()
+gemini_key, fred_key, finnhub_key, fmp_key = cargar_secrets()
+finnhub_client = FinnhubClient(api_key=finnhub_key)
 
 # --- BÚSQUEDA DE LOGO Y RENDERIZADO SIDEBAR ---
 ruta_logo_detectada = obtener_ruta_logo()
@@ -94,7 +96,7 @@ if limpiar_btn:
 
 # INYECCIÓN DE TICKERS RELACIONADOS (PEERS)
 if ticker_input:
-    peers_list = obtener_peers(ticker_input, max_peers=3)
+    peers_list = obtener_peers(ticker_input, max_peers=3, finnhub_client=finnhub_client)
     if peers_list:
         st.sidebar.caption("🏢 Empresas relacionadas:")
         cols_peers = st.sidebar.columns(len(peers_list))
@@ -211,8 +213,15 @@ else:
     st.markdown('<h1 style="color: #0A192F;">📈 Sistema Avanzado de Análisis Fundamental Top-Down</h1>', unsafe_allow_html=True)
     with st.spinner(f"📡 Compilando métricas y evaluando macroeconomía para {ticker_input}..."):
         try:
-            # Extracción concurrente optimizada
-            datos_mercado = fetch_datos_concurrente(ticker_input, finnhub_key, fred_key)
+            # Extracción concurrente optimizada con caché en sesión para evitar llamadas al mover sliders
+            session_cache_key = f"market_data_{ticker_input}"
+            if session_cache_key in st.session_state and st.session_state.get("active_ticker") == ticker_input:
+                datos_mercado = st.session_state[session_cache_key]
+            else:
+                datos_mercado = fetch_datos_concurrente(ticker_input, finnhub_key, fred_key, fmp_key=fmp_key)
+                st.session_state[session_cache_key] = datos_mercado
+                st.session_state["active_ticker"] = ticker_input
+
             precio_actual = datos_mercado["precio_actual"]
             prev_close = datos_mercado["prev_close"]
             hist = datos_mercado["hist"]
@@ -567,9 +576,10 @@ else:
             msg_peg = res_mult["msg_peg"]
 
             p_s = res_mult["p_s"]
-            # --- CONSENSO DE WALL STREET (Exclusivo Yahoo Finance) ---
+            # --- CONSENSO DE WALL STREET (Finnhub Oficial + Fallback FMP) ---
             target = safe_num(
                 info.get("targetMeanPrice")
+                or info.get("targetMean")
                 or info.get("targetMedianPrice")
                 or info.get("targetPrice")
                 or m_ttm.get("target_mean_price", 0.0),
@@ -577,10 +587,15 @@ else:
             )
             if target <= 0.0:
                 try:
-                    consenso_res = obtener_consenso_wall_street(ticker_input, _yf_info=info)
+                    consenso_res = obtener_consenso_wall_street(
+                        ticker_input,
+                        finnhub_api_key=finnhub_key,
+                        finnhub_client=finnhub_client,
+                        fmp_api_key=fmp_key
+                    )
                     target = safe_num(consenso_res.target_mean, 0.0)
                 except Exception as e_ws:
-                    logger.debug("Error extrayendo consenso yfinance para %s: %s", ticker_input, e_ws)
+                    logger.debug("Error extrayendo consenso para %s: %s", ticker_input, e_ws)
                     target = 0.0
 
             if target > 0 and precio_actual > 0:
@@ -596,15 +611,39 @@ else:
             col_vintr = "🟢" if v_intr_dcf >= precio_actual else "🔴"
             
             # --- MÓDULO 4: RIESGOS Y SALUD CONTABLE (15%) ---
-            res_z = calcular_altman_zscore(debt_eq, roa)
-            z_score, col_z, msg_z = res_z["z_score"], res_z["status"], res_z["msg_z"]
+            # Altman Z-Score: FMP /financial-score con fallback resiliente al cálculo manual
+            altman_z_fmp = safe_num(info.get("altmanZScore"), 0.0)
+            if altman_z_fmp > 0.0:
+                z_score = altman_z_fmp
+                if z_score > 2.99:
+                    col_z, msg_z = "🟢", "Riesgo de bancarrota casi nulo."
+                elif z_score >= 1.81:
+                    col_z, msg_z = "🟡", "Precaución: Zona Gris."
+                else:
+                    col_z, msg_z = "🔴", "Alto riesgo de insolvencia."
+            else:
+                res_z = calcular_altman_zscore(debt_eq, roa)
+                z_score, col_z, msg_z = res_z["z_score"], res_z["status"], res_z["msg_z"]
+
             short_int = m_ttm["short_percent_of_float"] * 100.0 if m_ttm["short_percent_of_float"] < 1.0 else m_ttm["short_percent_of_float"]
             
             col_b, msg_b = ("🟢", "Volatilidad baja (Defensiva).") if beta < 0.8 else (("🟡", "Volatilidad moderada.") if beta <= 1.4 else ("🔴", "Alta volatilidad sistémica."))
             col_s, msg_s = ("🟢", "Bajo interés en corto.") if short_int < 5 else (("🟡", "Posicionamiento en corto moderado.") if short_int <= 10 else ("🔴", "Fuerte pesimismo en corto."))
             
-            res_fs = calcular_piotroski_fscore(inc, bs, cf, info)
-            f_score, fscore_str, col_fscore, msg_fscore = res_fs["f_score"], res_fs["fscore_str"], res_fs["status"], res_fs["msg_fscore"]
+            # Piotroski F-Score: FMP con fallback resiliente al cálculo manual
+            piotroski_fmp = info.get("piotroskiScore")
+            if piotroski_fmp is not None and safe_num(piotroski_fmp, -1) >= 0:
+                f_score = int(safe_num(piotroski_fmp, 0))
+                fscore_str = f"{f_score}/9"
+                if f_score >= 7:
+                    col_fscore, msg_fscore = "🟢", "Salud contable sólida y de alta calidad."
+                elif f_score >= 4:
+                    col_fscore, msg_fscore = "🟡", "Salud contable promedio."
+                else:
+                    col_fscore, msg_fscore = "🔴", "Riesgo de deterioro contable."
+            else:
+                res_fs = calcular_piotroski_fscore(inc, bs, cf, info)
+                f_score, fscore_str, col_fscore, msg_fscore = res_fs["f_score"], res_fs["fscore_str"], res_fs["status"], res_fs["msg_fscore"]
             
             # --- EXTRACCIÓN MACROECONÓMICA Y GEOPOLÍTICA (5%) ---
             texto_ia_final, macro_score = obtener_analisis_macro_ia(ticker_input, nombre, sector, gemini_key)
@@ -814,9 +853,9 @@ else:
                         st.write("Gráfico de márgenes no disponible para este ticker.")
                 with g_col2:
                     st.write("**Comparativa de Flujos de Efectivo (5 Años - Millones USD)**")
-                    posibles_ocf = ['Operating Cash Flow', 'OperatingCashFlow', 'Cash Flow From Continuing Operating Activities', 'Total Cash From Operating Activities']
+                    posibles_ocf = ['Operating Cash Flow', 'OperatingCashFlow', 'Cash Flow From Continuing Operating Activities', 'Total Cash From Operating Activities', 'operatingCashFlow', 'netCashProvidedByOperatingActivities']
                     posibles_fcf = ['Free Cash Flow', 'FreeCashFlow', 'freeCashFlow']
-                    posibles_capex = ['Capital Expenditure', 'CapitalExpenditure', 'Capital Expenditures', 'Purchase Of Property Plant And Equipment']
+                    posibles_capex = ['Capital Expenditure', 'CapitalExpenditure', 'Capital Expenditures', 'Purchase Of Property Plant And Equipment', 'capitalExpenditure', 'investmentsInPropertyPlantAndEquipment']
 
                     row_ocf = next((r for r in posibles_ocf if r in cf.index), None)
                     row_fcf = next((r for r in posibles_fcf if r in cf.index), None)
@@ -836,24 +875,31 @@ else:
                             s_ocf = cf.loc[row_ocf, cols_anuales_cf] if row_ocf else pd.Series(0.0, index=cols_anuales_cf)
                             if isinstance(s_ocf, pd.DataFrame): s_ocf = s_ocf.iloc[0]
 
+                            if row_capex:
+                                s_capex = cf.loc[row_capex, cols_anuales_cf].abs()
+                                if isinstance(s_capex, pd.DataFrame): s_capex = s_capex.iloc[0]
+                            else:
+                                s_capex = pd.Series(0.0, index=cols_anuales_cf)
+
                             if row_fcf:
                                 s_fcf = cf.loc[row_fcf, cols_anuales_cf]
                                 if isinstance(s_fcf, pd.DataFrame): s_fcf = s_fcf.iloc[0]
+                                if not row_capex and row_ocf:
+                                    s_capex = (s_ocf.fillna(0.0) - s_fcf.fillna(0.0)).abs()
                             elif row_capex and row_ocf:
-                                s_capex = cf.loc[row_capex, cols_anuales_cf]
-                                if isinstance(s_capex, pd.DataFrame): s_capex = s_capex.iloc[0]
-                                s_fcf = s_ocf.fillna(0.0) - s_capex.abs().fillna(0.0)
+                                s_fcf = s_ocf.fillna(0.0) - s_capex.fillna(0.0)
                             else:
                                 s_fcf = s_ocf
 
                             df_cf = pd.DataFrame({
-                                "Flujo Operativo": s_ocf / 1e6,
+                                "Flujo Operativo (OCF)": s_ocf / 1e6,
+                                "CapEx (Inversión Capital)": s_capex / 1e6,
                                 "Flujo Libre (FCF)": s_fcf / 1e6
-                            }, index=cols_anuales_cf).dropna()
+                            }, index=cols_anuales_cf).dropna(how='all')
                             
                             df_cf.index = [str(x) for x in df_cf.index]
                             df_cf = df_cf.sort_index()
-                            fig_cf = px.bar(df_cf, barmode='group', text_auto=',.0f', color_discrete_sequence=['#0284C7', '#059669'])
+                            fig_cf = px.bar(df_cf, barmode='group', text_auto=',.0f', color_discrete_sequence=['#0284C7', '#F59E0B', '#059669'])
                             fig_cf.update_layout(
                                 xaxis_title="", yaxis_title="Millones USD ($)", legend_title="",
                                 font=dict(color='#0A192F', family='Trebuchet MS', size=11),

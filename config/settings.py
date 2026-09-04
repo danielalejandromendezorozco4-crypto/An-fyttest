@@ -195,7 +195,7 @@ def safe_num(val: Any, default: float = 0.0) -> float:
         return float(default) if default is not None else 0.0
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTES DE INTEGRACIÓN FINNHUB API
+# CONSTANTES DE INTEGRACIÓN FINNHUB API Y FMP API
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: URL base de la API oficial de Finnhub (v1)
@@ -210,6 +210,12 @@ FINNHUB_CACHE_TTL_METRICS: int = 43200
 #: TTL de caché para noticias corporativas recientes (segundos)
 FINNHUB_CACHE_TTL_NEWS: int = 900
 
+#: URL base de Financial Modeling Prep API (v3)
+FMP_BASE_URL: str = "https://financialmodelingprep.com/api/v3"
+
+#: TTL de caché para estados financieros, ratios y métricas de FMP (1 hora)
+FMP_CACHE_TTL: int = 3600
+
 #: TTL de caché para series macroeconómicas de FRED (segundos)
 FRED_CACHE_TTL: int = 3600
 
@@ -221,10 +227,30 @@ def obtener_ruta_logo():
             return r
     return None
 
+
+class SecretsTuple(tuple):
+    """
+    Tupla enriquecida que permite desempaquetado posicional tanto de 3 elementos
+    (gemini_key, fred_key, finnhub_key) como de 4 elementos
+    (gemini_key, fred_key, finnhub_key, fmp_key), además de acceso por atributos.
+    """
+    def __new__(cls, gemini_key: str = "", fred_key: str = "", finnhub_key: str = "", fmp_key: str = ""):
+        return super().__new__(cls, (gemini_key, fred_key, finnhub_key, fmp_key))
+
+    def __init__(self, gemini_key: str = "", fred_key: str = "", finnhub_key: str = "", fmp_key: str = ""):
+        self.gemini_key = gemini_key
+        self.fred_key = fred_key
+        self.finnhub_key = finnhub_key
+        self.fmp_key = fmp_key
+
+    def __getitem__(self, item):
+        return super().__getitem__(item)
+
+
 def cargar_secrets():
     """
     Carga las claves de API necesarias desde st.secrets o variables de entorno (os.environ).
-    Retorna: (gemini_key, fred_key, finnhub_key).
+    Retorna SecretsTuple: (gemini_key, fred_key, finnhub_key, fmp_key).
     """
     def _obtener_clave(nombres: list[str]) -> str:
         for nom in nombres:
@@ -240,16 +266,24 @@ def cargar_secrets():
 
     gemini_key = _obtener_clave(["GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
     fred_key = _obtener_clave(["FRED_KEY", "FRED_API_KEY"])
-    finnhub_key = _obtener_clave(["FINNHUB_API_KEY", "FINNHUB_KEY", "FMP_KEY"])
+    finnhub_key = _obtener_clave(["FINNHUB_API_KEY", "FINNHUB_KEY"])
+    fmp_key = _obtener_clave(["FMP_API_KEY", "FMP_KEY"])
 
-    if not gemini_key and not fred_key and not finnhub_key:
+    # Fallback cruzado si finnhub_key no está presente pero FMP_KEY fue colocada ahí antes
+    if not finnhub_key and not fmp_key:
+        fallback_key = _obtener_clave(["API_KEY", "SECRET_KEY"])
+        if fallback_key:
+            fmp_key = fallback_key
+
+    if not gemini_key and not fred_key and not finnhub_key and not fmp_key:
         try:
             st.error(
-                "⚠️ Faltan claves en la configuración. Asegúrate de configurar 'FINNHUB_API_KEY', 'GEMINI_KEY' y 'FRED_KEY' "
-                "en st.secrets o en tu archivo .env."
+                "⚠️ Faltan claves en la configuración. Asegúrate de configurar 'FMP_API_KEY', 'FINNHUB_API_KEY', "
+                "'GEMINI_KEY' y 'FRED_KEY' en st.secrets o en tu archivo .env."
             )
             st.stop()
         except Exception:
             pass
 
-    return gemini_key, fred_key, finnhub_key
+    return SecretsTuple(gemini_key, fred_key, finnhub_key, fmp_key)
+

@@ -51,21 +51,46 @@ def obtener_directorio_sp1500():
         }
         return pd.DataFrame(datos_fallback)
 
-def obtener_peers(ticker, max_peers=3):
-    """Busca competidores relacionados basándose en la Sub-Industria y Sector del S&P 1500"""
+def obtener_peers(ticker: str, max_peers: int = 3, finnhub_api_key: str = "", finnhub_client: Any = None) -> list[str]:
+    """
+    Busca competidores relacionados consumiendo finnhub_client.company_peers(symbol).
+    Si no hay respuesta de la API o ocurre un error, usa el directorio S&P 1500 como fallback defensivo.
+    """
+    ticker = str(ticker or "").upper().strip()
+    if not ticker:
+        return []
+
+    # Prioridad 1: Finnhub API vía finnhub_client.company_peers
+    try:
+        if finnhub_client is not None and hasattr(finnhub_client, "company_peers"):
+            peers_fh = finnhub_client.company_peers(ticker)
+        else:
+            from data.financial_fetcher import FinnhubClient
+            client = FinnhubClient(api_key=finnhub_api_key)
+            peers_fh = client.company_peers(ticker)
+
+        if peers_fh and isinstance(peers_fh, list):
+            clean_peers = [str(p).upper().strip() for p in peers_fh if p and str(p).upper().strip() != ticker]
+            if clean_peers:
+                return clean_peers[:max_peers]
+    except Exception:
+        pass
+
+    # Prioridad 2: Directorio S&P 1500 (Fallback)
     df_sp = obtener_directorio_sp1500()
     empresa = df_sp[df_sp['Symbol'] == ticker]
     if not empresa.empty:
         sub_ind = empresa['GICS Sub-Industry'].iloc[0]
         sector = empresa['GICS Sector'].iloc[0]
         
-        # Prioridad 1: Misma Sub-Industria
+        # Prioridad 2.1: Misma Sub-Industria
         peers = df_sp[(df_sp['GICS Sub-Industry'] == sub_ind) & (df_sp['Symbol'] != ticker)]
         
-        # Prioridad 2: Si no logramos obtener 3, rellenamos con empresas del mismo Sector general
+        # Prioridad 2.2: Si no logramos obtener 3, rellenamos con empresas del mismo Sector general
         if len(peers) < max_peers:
             peers_extra = df_sp[(df_sp['GICS Sector'] == sector) & (df_sp['Symbol'] != ticker) & (df_sp['GICS Sub-Industry'] != sub_ind)]
             peers = pd.concat([peers, peers_extra])
             
         return peers['Symbol'].head(max_peers).tolist()
     return []
+

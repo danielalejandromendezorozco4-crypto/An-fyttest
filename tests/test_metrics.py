@@ -1208,23 +1208,21 @@ class TestWallStreetConsensus(unittest.TestCase):
         self.assertIsNone(res.recommendation)
         self.assertIsNone(res.num_analysts)
 
-    @unittest.mock.patch("yfinance.Ticker")
-    def test_yfinance_rich_metadata_extraction(self, mock_yf):
-        """Verifica extracción de recomendaciones y número de analistas desde yfinance."""
+    def test_yfinance_rich_metadata_extraction(self):
+        """Verifica extracción de recomendaciones y número de analistas desde Finnhub/FMP."""
         from data.financial_fetcher import obtener_consenso_wall_street
-        mock_instance = unittest.mock.MagicMock()
-        mock_instance.analyst_price_targets = {
-            "mean": 520.0,
-            "high": 580.0,
-            "low": 470.0,
+        mock_client = unittest.mock.MagicMock()
+        mock_client.price_target.return_value = {
+            "targetMean": 520.0,
+            "targetHigh": 580.0,
+            "targetLow": 470.0,
+            "numberAnalysts": 28,
         }
-        mock_instance.info = {
-            "numberOfAnalystOpinions": 28,
-            "recommendationKey": "strong_buy",
-        }
-        mock_yf.return_value = mock_instance
+        mock_client.recommendation_trends.return_value = [
+            {"strongBuy": 15, "buy": 10, "hold": 3, "sell": 0, "strongSell": 0}
+        ]
 
-        res = obtener_consenso_wall_street("AAPL")
+        res = obtener_consenso_wall_street("AAPL", finnhub_client=mock_client)
         mean, high, low = res
         self.assertEqual(mean, 520.0)
         self.assertEqual(high, 580.0)
@@ -1238,18 +1236,11 @@ class TestWallStreetConsensus(unittest.TestCase):
         """Verifica que una falla de red o excepción en Finnhub no rompa la ejecución."""
         from data.financial_fetcher import obtener_consenso_wall_street
         mock_fh_get.side_effect = Exception("API Timeout")
-        with unittest.mock.patch("yfinance.Ticker") as mock_yf:
-            mock_inst = unittest.mock.MagicMock()
-            mock_inst.analyst_price_targets = None
-            mock_inst.info = {}
-            mock_inst.recommendations_summary = None
-            mock_yf.return_value = mock_inst
-
-            res = obtener_consenso_wall_street("FAILTICKER", finnhub_api_key="dummy_key")
-            mean, high, low = res
-            self.assertEqual(mean, 0.0)
-            self.assertEqual(high, 0.0)
-            self.assertEqual(low, 0.0)
+        res = obtener_consenso_wall_street("FAILTICKER", finnhub_api_key="dummy_key", fmp_api_key="")
+        mean, high, low = res
+        self.assertEqual(mean, 0.0)
+        self.assertEqual(high, 0.0)
+        self.assertEqual(low, 0.0)
 
 
 class TestMetricsTupleDefensiveness(unittest.TestCase):

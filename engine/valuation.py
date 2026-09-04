@@ -148,7 +148,7 @@ def calcular_wacc(
     rf       = max(safe_num(tasa_libre_riesgo, default=4.20), 0.0)
     beta_val = max(safe_num(beta, default=1.0), 0.05)
     erp_val  = max(safe_num(erp, default=5.0), 2.0)
-    t_ef     = max(min(safe_num(tax_rate, default=0.21), 0.35), 0.0)
+    t_ef     = max(min(safe_num(tax_rate, default=0.21), 0.30), 0.0)
 
     ke = rf + (beta_val * erp_val)
 
@@ -365,18 +365,22 @@ def calcular_fcff_valuation(
     da_hist_        = list(da_hist or [])
     delta_nwc_hist_ = list(delta_nwc_hist or [])
 
-    # 1. Tasa Impositiva Efectiva Real
-    tasas_impositivas: list[float] = []
-    for pt, tp in zip(pretax_hist, taxprov_hist):
-        if pt > 0 and tp >= 0:
-            t_i = tp / pt
-            if 0.0 <= t_i <= 0.60:
-                tasas_impositivas.append(t_i)
+    # 1. Tasa Impositiva Efectiva Real Blindada (entre 0% y 30%, o 21% si Pretax Income <= 0)
+    pretax_0 = pretax_hist[0] if pretax_hist else 0.0
+    if pretax_0 <= 0:
+        tax_rate_real = 0.21
+    else:
+        tasas_impositivas: list[float] = []
+        for pt, tp in zip(pretax_hist, taxprov_hist):
+            if pt > 0 and tp >= 0:
+                t_i = tp / pt
+                if 0.0 <= t_i <= 0.60:
+                    tasas_impositivas.append(t_i)
 
-    tax_rate_real: float = (
-        statistics.mean(tasas_impositivas) if tasas_impositivas else 0.21
-    )
-    tax_rate_real = max(min(tax_rate_real, 0.35), 0.0)
+        tax_rate_real = (
+            statistics.mean(tasas_impositivas) if tasas_impositivas else 0.21
+        )
+        tax_rate_real = max(min(tax_rate_real, 0.30), 0.0)
 
     # 2. WACC de mercado
     int_exp_ultimo = interest_hist[0] if interest_hist else 0.0
@@ -399,15 +403,16 @@ def calcular_fcff_valuation(
     wd           = round(res_wacc["wd"], 4)
     wacc_decimal = wacc / 100.0
 
-    # 3. Tasa Terminal y WACC clamping con invariante financiero
+    # 3. Tasa Terminal y Restricción Estricta WACC > g_terminal
     if g_term_override is not None:
         g_term = max(min(safe_num(g_term_override, default=0.025), 0.04), 0.005)
     else:
         g_term = G_TERM_DEFAULT
 
-    min_wacc_dec = g_term + WACC_MIN_SPREAD_OVER_G
-    if wacc_decimal < min_wacc_dec:
-        wacc_decimal = min_wacc_dec
+    # Restricción: Asegura que WACC > g_terminal (mínimo spread sobre g_term)
+    min_spread = max(WACC_MIN_SPREAD_OVER_G, 0.01)
+    if wacc_decimal < g_term + min_spread:
+        wacc_decimal = round(g_term + min_spread, 4)
         wacc = round(wacc_decimal * 100.0, 2)
     wacc_decimal = min(wacc_decimal, WACC_CEILING / 100.0)
 
@@ -425,13 +430,10 @@ def calcular_fcff_valuation(
 
         if ebit_i > 0 and da_i >= 0:
             nopat_i = ebit_i * (1.0 - tax_rate_real)
-            # Inversión en capital de trabajo operativo (absorción de caja dnwc >= 0)
-            # Evita que variaciones negativas o contables agreguen flujo extraordinario no recurrente
             dnwc_clamped = max(min(dnwc_i, nopat_i * 0.25), 0.0)
             fcff_ebit = nopat_i + da_i - capex_i - dnwc_clamped
             fcf_cash = ocf_i - capex_i
             escudo_i = int_i * (1.0 - tax_rate_real)
-            # Validación contable: evitar sobrestimación sobre el flujo físico de caja + escudo fiscal
             if fcf_cash > 0:
                 fcff_ebit = min(fcff_ebit, fcf_cash + escudo_i)
             if fcff_ebit > 0 and (fcf_cash <= 0 or fcff_ebit >= fcf_cash * 0.4):
@@ -440,6 +442,7 @@ def calcular_fcff_valuation(
                     fcff_method_used = "ebit"
                 continue
 
+        # FCFF_0 = Operating Cash Flow - abs(CapEx) + Interest Expense * (1 - Tax Rate)
         escudo_fiscal = int_i * (1.0 - tax_rate_real)
         fcff_historico.append(max(ocf_i + escudo_fiscal - capex_i, 0.0))
 
@@ -474,7 +477,6 @@ def calcular_fcff_valuation(
     else:
         g_1_5 = 0.08
 
-    # Para empresas de hipercrecimiento probado, permitir tasas prospectivas de hasta 40%-45% en Fase 1
     g_max_fase1 = 0.45 if (growth_rate_exp is not None or revenue_growth_api > 0.20 or cagr_revenue_hist > 0.20) else 0.25
     if mcap > 200e9 and growth_rate_exp is None:
         g_max_fase1 = min(g_max_fase1, 0.20)
@@ -497,6 +499,7 @@ def calcular_fcff_valuation(
         f_t = f_t * (1.0 + g_t)
         fcff_proyectado.append(round(f_t, 2))
 
+        # Flujos intermedios descontados con convención de medio año: PV = FCFF_t / (1 + WACC)^(t - 0.5)
         factor_descuento = (1.0 + wacc_decimal) ** (t - 0.5)
         pv_t = f_t / factor_descuento
         pv_flujos += pv_t
@@ -511,11 +514,15 @@ def calcular_fcff_valuation(
             "VP (M USD)":        round(pv_t / 1e6, 2),
         })
 
-    # 8. Valor Terminal (Mid-Year en n_total - 0.5)
+    # 8. Valor Terminal Gordon Shapiro en el año N: TV_N = FCFF_N * (1 + g_term) / (WACC - g_term)
     f_terminal     = fcff_proyectado[-1] * (1.0 + g_term)
-    denominador_tv = max(wacc_decimal - g_term, WACC_MIN_SPREAD_OVER_G)
+    denominador_tv = wacc_decimal - g_term
+    if denominador_tv <= 0:
+        denominador_tv = 0.01
     terminal_value = f_terminal / denominador_tv
-    pv_terminal    = terminal_value / ((1.0 + wacc_decimal) ** (n_total - 0.5))
+
+    # Factor de descuento del Valor Terminal: PV(TV) = TV_N / (1 + WACC)^N (sin convención de medio año)
+    pv_terminal    = terminal_value / ((1.0 + wacc_decimal) ** n_total)
 
     # 9. Puente Financiero EV -> Equity -> Por Accion
     enterprise_value = pv_flujos + pv_terminal
@@ -533,11 +540,14 @@ def calcular_fcff_valuation(
         if shares_count <= 1000 or shares_count < implied_sh * 0.01 or shares_count > implied_sh * 100:
             shares_count = implied_sh
 
+    # Shares proyectadas mantenidas para análisis informativo
     if buyback_rate_ != 0.0:
-        shares_efectivas = max(shares_count * ((1.0 - buyback_rate_) ** n_total), 1.0)
+        shares_proyectadas = max(shares_count * ((1.0 - buyback_rate_) ** n_total), 1.0)
     else:
-        shares_efectivas = max(shares_count, 1.0)
-    valor_intrinseco = max(equity_value / shares_efectivas, 0.0)
+        shares_proyectadas = shares_count
+
+    # Valor Intrínseco por acción = Equity Value / Shares_Actuales (sin reducir el divisor)
+    valor_intrinseco = max(equity_value / shares_count, 0.0)
 
     # 10. Margen de Seguridad y Precios Objetivo
     margen_seguridad  = (
@@ -578,7 +588,9 @@ def calcular_fcff_valuation(
         "total_cash":        total_cash,
         "total_debt":        total_debt,
         "shares_diluted":    shares_diluted,
-        "shares_efectivas":  round(shares_efectivas, 0),
+        "shares_actuales":   shares_count,
+        "shares_efectivas":  round(shares_proyectadas, 0),
+        "shares_proyectadas": round(shares_proyectadas, 0),
         "buyback_rate":      round(buyback_rate_, 4),
         "fade_years":        fade_years,
         "n_total":           n_total,
