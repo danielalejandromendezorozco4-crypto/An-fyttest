@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-import datetime
 import logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+import datetime
 import math
 import os
 import time
@@ -21,11 +24,11 @@ from config.settings import (
     FMP_BASE_URL,
     FMP_CACHE_TTL,
     FRED_CACHE_TTL,
+    get_secret,
     safe_get,
+    safe_num,
 )
 from engine.metrics import calcular_altman_zscore, calcular_piotroski_fscore
-
-logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REGISTRO Y DIAGNÓSTICO DEFENSIVO DE EVENTOS DE API (RATE LIMIT / ERRORES)
@@ -186,15 +189,7 @@ def _finnhub_get(
     query_params = dict(params or {})
     key_to_use = str(api_key or "").strip()
     if not key_to_use:
-        try:
-            if hasattr(st, "secrets") and "FINNHUB_API_KEY" in st.secrets:
-                key_to_use = str(st.secrets["FINNHUB_API_KEY"]).strip()
-            elif hasattr(st, "secrets") and "FINNHUB_KEY" in st.secrets:
-                key_to_use = str(st.secrets["FINNHUB_KEY"]).strip()
-        except Exception:
-            pass
-        if not key_to_use:
-            key_to_use = (os.getenv("FINNHUB_API_KEY") or os.getenv("FINNHUB_KEY") or "").strip()
+        key_to_use = get_secret("FINNHUB_KEY") or get_secret("FINNHUB_API_KEY")
 
     if key_to_use and "token" not in query_params:
         query_params["token"] = key_to_use
@@ -320,15 +315,7 @@ def _fmp_get(
     query_params = dict(params or {})
     key_to_use = str(api_key or "").strip()
     if not key_to_use:
-        try:
-            if hasattr(st, "secrets") and "FMP_API_KEY" in st.secrets:
-                key_to_use = str(st.secrets["FMP_API_KEY"]).strip()
-            elif hasattr(st, "secrets") and "FMP_KEY" in st.secrets:
-                key_to_use = str(st.secrets["FMP_KEY"]).strip()
-        except Exception:
-            pass
-        if not key_to_use:
-            key_to_use = (os.getenv("FMP_API_KEY") or os.getenv("FMP_KEY") or "").strip()
+        key_to_use = get_secret("FMP_KEY") or get_secret("FMP_API_KEY")
 
     if key_to_use and "apikey" not in query_params:
         query_params["apikey"] = key_to_use
@@ -452,6 +439,56 @@ def fetch_fmp_quote(symbol: str, api_key: str = "") -> Dict[str, Any]:
     if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
         return res[0]
     return res if isinstance(res, dict) else {}
+
+
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
+def fetch_fmp_historical_price(symbol: str, api_key: str = "", timeseries: int = 365) -> pd.DataFrame:
+    """
+    Obtiene el histórico de cotizaciones diarias (OHLCV) desde Financial Modeling Prep:
+    endpoint 'historical-price-full/{symbol}?timeseries=365'.
+    Retorna un DataFrame indexado por 'Date' con columnas ['Open', 'High', 'Low', 'Close', 'Volume'].
+    """
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return pd.DataFrame()
+    fmp_k = api_key or get_secret("FMP_KEY")
+    res = _fmp_get(f"historical-price-full/{symbol}", params={"timeseries": timeseries}, api_key=fmp_k)
+    items = []
+    if isinstance(res, dict) and "historical" in res and isinstance(res["historical"], list):
+        items = res["historical"]
+    elif isinstance(res, list):
+        items = res
+
+    if not items:
+        return pd.DataFrame()
+
+    records = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        dt_val = item.get("date")
+        if not dt_val:
+            continue
+        c = safe_num(item.get("close") or item.get("adjClose"), 0.0)
+        o = safe_num(item.get("open"), c)
+        h = safe_num(item.get("high"), max(o, c))
+        l = safe_num(item.get("low"), min(o, c))
+        v = safe_num(item.get("volume"), 0.0)
+        records.append({
+            "Date": dt_val,
+            "Open": o,
+            "High": h,
+            "Low": l,
+            "Close": c,
+            "Volume": v,
+        })
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+    return df
 
 
 
@@ -670,64 +707,63 @@ def fetch_cotizacion_intradia(ticker: str, finnhub_api_key: str = "", fmp_key: s
             diff_d = safe_num(quote_res.get("d", 0.0))
             prev_close = precio_actual - diff_d
 
-    # CAPA 2: Endpoint Stock Candle (5 Años de Velas Diarias Finnhub)
-    now_dt = datetime.datetime.now(datetime.timezone.utc)
-    to_ts = int(now_dt.timestamp())
-    from_ts = int((now_dt - datetime.timedelta(days=5 * 365 + 10)).timestamp())
+    # CAPA 2: Histórico de Precios FMP Primario (historical-price-full)
+    fmp_k = fmp_key or get_secret("FMP_KEY")
+    try:
+        df_fmp = fetch_fmp_historical_price(ticker, api_key=fmp_k, timeseries=365)
+        if isinstance(df_fmp, pd.DataFrame) and not df_fmp.empty:
+            hist = df_fmp
+            if precio_actual == 0.0 and "Close" in hist.columns:
+                precio_actual = safe_num(hist["Close"].iloc[-1], 0.0)
+            if prev_close == 0.0 and len(hist) > 1 and "Close" in hist.columns:
+                prev_close = safe_num(hist["Close"].iloc[-2], 0.0)
+    except Exception as e_fmp_hist:
+        logger.debug("FMP historical price error para %s: %s", ticker, e_fmp_hist)
 
-    candle_res = _finnhub_get(
-        "stock/candle",
-        params={
-            "symbol": ticker,
-            "resolution": "D",
-            "from": from_ts,
-            "to": to_ts,
-        },
-        api_key=finnhub_api_key,
-        timeout=10.0,
-    )
-
-    if isinstance(candle_res, dict) and candle_res.get("s") == "ok" and "t" in candle_res:
+    # CAPA 3 (Fallback Secundario): Finnhub Candle silencioso si FMP no devolvió historial
+    if hist.empty and finnhub_api_key:
         try:
-            timestamps = candle_res.get("t", [])
-            opens = candle_res.get("o", [])
-            highs = candle_res.get("h", [])
-            lows = candle_res.get("l", [])
-            closes = candle_res.get("c", [])
-            volumes = candle_res.get("v", [])
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            to_ts = int(now_dt.timestamp())
+            from_ts = int((now_dt - datetime.timedelta(days=365)).timestamp())
+            candle_res = _finnhub_get(
+                "stock/candle",
+                params={"symbol": ticker, "resolution": "D", "from": from_ts, "to": to_ts},
+                api_key=finnhub_api_key,
+                timeout=6.0,
+            )
+            if isinstance(candle_res, dict) and candle_res.get("s") == "ok" and "t" in candle_res:
+                timestamps = candle_res.get("t", [])
+                closes = candle_res.get("c", [])
+                if timestamps and closes:
+                    df_c = pd.DataFrame({
+                        "Open": [safe_num(x) for x in candle_res.get("o", [])],
+                        "High": [safe_num(x) for x in candle_res.get("h", [])],
+                        "Low": [safe_num(x) for x in candle_res.get("l", [])],
+                        "Close": [safe_num(x) for x in closes],
+                        "Volume": [safe_num(x) for x in candle_res.get("v", [])],
+                    })
+                    df_c["Date"] = pd.to_datetime(timestamps, unit="s")
+                    hist = df_c.set_index("Date").sort_index()
+                    if precio_actual == 0.0 and not hist.empty:
+                        precio_actual = safe_num(hist["Close"].iloc[-1], 0.0)
+                    if prev_close == 0.0 and len(hist) > 1:
+                        prev_close = safe_num(hist["Close"].iloc[-2], 0.0)
+        except Exception as e_c:
+            logger.debug("Finnhub candle error silencioso para %s: %s", ticker, e_c)
 
-            if timestamps and closes:
-                df_c = pd.DataFrame({
-                    "Open": [safe_num(x) for x in opens],
-                    "High": [safe_num(x) for x in highs],
-                    "Low": [safe_num(x) for x in lows],
-                    "Close": [safe_num(x) for x in closes],
-                    "Volume": [safe_num(x) for x in volumes],
-                })
-                df_c["Date"] = pd.to_datetime(timestamps, unit="s")
-                df_c = df_c.set_index("Date").sort_index()
-                hist = df_c
-
-                if precio_actual == 0.0 and not hist.empty:
-                    precio_actual = safe_num(hist["Close"].iloc[-1], 0.0)
-                if prev_close == 0.0 and len(hist) > 1:
-                    prev_close = safe_num(hist["Close"].iloc[-2], 0.0)
-        except Exception as e:
-            logger.debug("Error procesando velas Finnhub para %s: %s", ticker, e)
-
-    # CAPA 3 (Fallback FMP): Si Finnhub no devolvió cotización o velas
-    if precio_actual == 0.0 or hist.empty:
+    # CAPA 4 (Fallback FMP Quote): Si aún no hay precio actual
+    if precio_actual == 0.0:
         try:
-            fmp_quote = fetch_fmp_quote(ticker, api_key=fmp_key)
+            fmp_quote = fetch_fmp_quote(ticker, api_key=fmp_k)
             if isinstance(fmp_quote, dict) and fmp_quote:
-                if precio_actual == 0.0:
-                    precio_actual = safe_num(fmp_quote.get("price", 0.0))
+                precio_actual = safe_num(fmp_quote.get("price", 0.0))
                 if prev_close == 0.0:
                     prev_close = safe_num(fmp_quote.get("previousClose", 0.0))
         except Exception as e_fmp:
             logger.debug("FMP quote fallback error para %s: %s", ticker, e_fmp)
 
-    # CAPA 4 (Blindaje Histórico): Si tenemos precio pero hist está vacío (por limitación de velas)
+    # CAPA 5 (Blindaje y Serie Sintética): Si hay precio pero hist sigue vacío
     if precio_actual > 0.0 and hist.empty:
         today_dt = pd.to_datetime(datetime.date.today())
         hist = pd.DataFrame([{
@@ -1006,20 +1042,36 @@ def obtener_consenso_wall_street(
     except Exception as e_trend:
         logger.debug("Finnhub recommendation_trends falló para %s: %s", ticker, e_trend)
 
-    # 6. Fallback a FMP API (price-target-consensus / price-target-summary)
+    # 6. Fallback a FMP API (price-target-summary / price-target-consensus)
     if target_mean_price <= 0.0:
         try:
-            fmp_k = fmp_api_key or os.getenv("FMP_API_KEY") or (st.secrets.get("FMP_API_KEY", "") if hasattr(st, "secrets") else "")
+            fmp_k = fmp_api_key or get_secret("FMP_KEY") or get_secret("FMP_API_KEY")
             if fmp_k:
-                fmp_pt = _fmp_get("price-target-consensus", {"symbol": ticker}, api_key=fmp_k)
+                fmp_pt = _fmp_get(f"price-target-summary/{ticker}", api_key=fmp_k)
+                if not (isinstance(fmp_pt, list) and len(fmp_pt) > 0 and isinstance(fmp_pt[0], dict)):
+                    fmp_pt = _fmp_get("price-target-consensus", {"symbol": ticker}, api_key=fmp_k)
+
                 if isinstance(fmp_pt, list) and len(fmp_pt) > 0 and isinstance(fmp_pt[0], dict):
                     item = fmp_pt[0]
-                    target_mean_price = safe_num(item.get("targetConsensus") or item.get("targetMedian"), 0.0)
+                    target_mean_price = safe_num(
+                        item.get("targetConsensus") or item.get("targetMedian") or item.get("targetMean") or item.get("targetPrice"),
+                        0.0
+                    )
                     if target_high_price <= 0.0:
                         target_high_price = safe_num(item.get("targetHigh"), 0.0)
                     if target_low_price <= 0.0:
                         target_low_price = safe_num(item.get("targetLow"), 0.0)
                     raw_payload["fmp_price_target"] = item
+                elif isinstance(fmp_pt, dict) and fmp_pt:
+                    target_mean_price = safe_num(
+                        fmp_pt.get("targetConsensus") or fmp_pt.get("targetMedian") or fmp_pt.get("targetMean") or fmp_pt.get("targetPrice"),
+                        0.0
+                    )
+                    if target_high_price <= 0.0:
+                        target_high_price = safe_num(fmp_pt.get("targetHigh"), 0.0)
+                    if target_low_price <= 0.0:
+                        target_low_price = safe_num(fmp_pt.get("targetLow"), 0.0)
+                    raw_payload["fmp_price_target"] = fmp_pt
         except Exception as e_fmp:
             logger.debug("FMP price-target falló para %s: %s", ticker, e_fmp)
 
@@ -1174,13 +1226,17 @@ def fetch_datos_fundamentales(
 
     if isinstance(fmp_ev_list, list) and len(fmp_ev_list) > 0 and isinstance(fmp_ev_list[0], dict):
         ev_item = fmp_ev_list[0]
-        if shares_outstanding <= 0:
+        if shares_outstanding <= 1.0:
             shares_outstanding = safe_num(ev_item.get("numberOfShares"), 0.0)
         if mcap <= 0:
             mcap = safe_num(ev_item.get("marketCapitalization"), 0.0)
 
     if mcap <= 0 and isinstance(fmp_prof_data, dict):
         mcap = safe_num(fmp_prof_data.get("mktCap"), 0.0)
+
+    stk_p = safe_num(prof_data.get("stockPrice") or (fmp_prof_data.get("price") if isinstance(fmp_prof_data, dict) else 0.0), 0.0)
+    if shares_outstanding <= 1.0 and mcap > 0 and stk_p > 0:
+        shares_outstanding = mcap / stk_p
 
     long_name = prof_data.get("name") or (fmp_prof_data.get("companyName") if isinstance(fmp_prof_data, dict) else "") or ticker
     industry_raw = prof_data.get("finnhubIndustry") or (fmp_prof_data.get("industry") if isinstance(fmp_prof_data, dict) else "") or "General"
@@ -1645,6 +1701,25 @@ def fetch_datos_fundamentales(
             g_pct_ttm = eps_growth * 100.0 if eps_growth < 1.0 else eps_growth
             if g_pct_ttm > 0:
                 peg_val = pe_ttm / g_pct_ttm
+
+    if shares_outstanding <= 1.0:
+        stk_p = safe_num(prof_data.get("stockPrice") or (fmp_prof_data.get("price") if isinstance(fmp_prof_data, dict) else 0.0), 0.0)
+        if mcap > 0 and stk_p > 0:
+            shares_outstanding = mcap / stk_p
+        elif dict_bs:
+            mrq_data = dict_bs.get("MRQ", {})
+            for k, v in mrq_data.items():
+                if "shares" in k.lower() and safe_num(v) > 1.0:
+                    shares_outstanding = safe_num(v)
+                    break
+        if shares_outstanding <= 1.0 and not bs.empty:
+            for col in bs.columns:
+                matching = bs.loc[bs.index.str.lower().str.contains("shares", na=False), col]
+                if not matching.empty:
+                    val_c = safe_num(matching.iloc[0], 0.0)
+                    if val_c > 1.0:
+                        shares_outstanding = val_c
+                        break
 
     cash_per_share = (total_cash_val / shares_outstanding) if shares_outstanding > 0 else cash_per_share_metric
     net_cash_per_share = ((total_cash_val - total_debt_val) / shares_outstanding) if shares_outstanding > 0 else 0.0
@@ -2150,24 +2225,26 @@ def extraer_metricas_ttm(
     en base a los últimos 12 meses (TTM) y balance consolidado más reciente.
     """
     shares_diluted = safe_num(info.get("sharesOutstanding", 0.0), 0.0)
-    if shares_diluted <= 0:
+    if shares_diluted <= 1.0:
         shares_diluted = _extraer_val_df(inc, [
             "Diluted Average Shares", "Basic Average Shares", "Ordinary Shares Number",
-            "Weighted Average Shares Diluted"
+            "Weighted Average Shares Diluted", "WeightedAverageNumberOfDilutedSharesOutstanding"
         ], default=0.0)
-    if shares_diluted <= 0:
-        shares_diluted = _extraer_val_df(bs, ["Ordinary Shares Number", "Share Issued", "Common Stock"], default=0.0)
+    if shares_diluted <= 1.0:
+        shares_diluted = _extraer_val_df(bs, ["Ordinary Shares Number", "Share Issued", "Common Stock", "commonStockSharesOutstanding"], default=0.0)
 
     mcap = safe_num(info.get("marketCap", 0.0), 0.0)
     if mcap <= 0 and precio_actual > 0 and shares_diluted > 0:
         mcap = shares_diluted * precio_actual
-    if shares_diluted <= 0 and mcap > 0 and precio_actual > 0:
+    if shares_diluted <= 1.0 and mcap > 0 and precio_actual > 0:
         shares_diluted = mcap / precio_actual
 
     if mcap > 10_000_000 and precio_actual > 0:
         implied_sh = mcap / precio_actual
         if shares_diluted <= 1000 or shares_diluted < implied_sh * 0.01 or shares_diluted > implied_sh * 100:
             shares_diluted = implied_sh
+    elif shares_diluted <= 1.0 and mcap > 0 and precio_actual > 0:
+        shares_diluted = mcap / precio_actual
 
     revenue_ttm = safe_num(info.get("totalRevenue", 0.0), 0.0)
     if revenue_ttm <= 0:

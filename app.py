@@ -1,3 +1,7 @@
+import logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 import datetime
 import numpy as np
 import pandas as pd
@@ -73,10 +77,10 @@ finnhub_client = FinnhubClient(api_key=finnhub_key)
 diag_secrets = validar_secrets_configurados(secrets_actuales)
 if diag_secrets.get("errores"):
     for err in diag_secrets["errores"]:
-        st.sidebar.error(f"⚠️ {err}")
+        logger.info("Configuración de secrets: %s", err)
 if diag_secrets.get("avisos"):
     for av in diag_secrets["avisos"]:
-        st.sidebar.info(f"ℹ️ {av}")
+        logger.info("Configuración de secrets: %s", av)
 
 # --- BÚSQUEDA DE LOGO Y RENDERIZADO SIDEBAR ---
 ruta_logo_detectada = obtener_ruta_logo()
@@ -243,9 +247,9 @@ else:
             news_data_cache = datos_mercado["news_data"]
             diagnosticos_api = datos_mercado.get("diagnosticos", [])
             
-            # Avisos específicos de degradación o límites temporales de API
+            # Diagnósticos de degradación o límites temporales de API registrados silenciosamente
             for diag in diagnosticos_api:
-                st.warning(f"⚠️ {diag.get('detalle', '')}")
+                logger.info("Diagnóstico de API: %s", diag.get('detalle', ''))
 
             # Fallback defensivo para precio actual si el endpoint quote de Finnhub falló
             if precio_actual == 0.0 and isinstance(info_estatica, dict):
@@ -288,7 +292,17 @@ else:
             m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual)
             mcap = safe_num(m_ttm.get("mcap", 0.0), 0.0)
             shares_current = safe_num(m_ttm.get("shares_diluted", 0.0), 0.0)
-            if shares_current <= 0:
+            if shares_current <= 1.0:
+                shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 0.0
+            if shares_current <= 1.0 and not bs.empty:
+                for col in bs.columns:
+                    matching_rows = bs.loc[bs.index.str.lower().str.contains("shares", na=False), col]
+                    if not matching_rows.empty:
+                        candidate = safe_num(matching_rows.iloc[0], 0.0)
+                        if candidate > 1.0:
+                            shares_current = candidate
+                            break
+            if shares_current <= 1.0:
                 shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 1.0
 
             net_income_val = safe_num(m_ttm.get("net_income_ttm", 0.0), 0.0)

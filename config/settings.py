@@ -1,3 +1,7 @@
+import logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -286,55 +290,60 @@ def validar_secrets_configurados(secrets: Optional[SecretsTuple] = None) -> Dict
     }
 
 
+def get_secret(key_name: str, default: str = "") -> str:
+    """
+    Carga normalizada de credenciales y API keys buscando en st.secrets
+    y variables de entorno (os.environ), con soporte para variantes _KEY y _API_KEY.
+    """
+    # 1. Búsqueda directa en st.secrets
+    try:
+        if hasattr(st, "secrets") and key_name in st.secrets:
+            val = str(st.secrets[key_name]).strip().strip('"').strip("'")
+            if val and val.lower() not in ("none", "null", "tu_clave_aqui", "xxx"):
+                return val
+    except Exception:
+        pass
+
+    # 2. Búsqueda en variantes _KEY, _API_KEY y minúsculas
+    base = key_name.replace("_API_KEY", "").replace("_KEY", "")
+    for variant in [f"{base}_KEY", f"{base}_API_KEY", f"{base.lower()}_key", f"{base.lower()}_api_key"]:
+        try:
+            if hasattr(st, "secrets") and variant in st.secrets:
+                val = str(st.secrets[variant]).strip().strip('"').strip("'")
+                if val and val.lower() not in ("none", "null", "tu_clave_aqui", "xxx"):
+                    return val
+        except Exception:
+            pass
+
+    # 3. Fallback a os.environ
+    env_val = os.getenv(key_name, os.getenv(f"{base}_KEY", os.getenv(f"{base}_API_KEY", default)))
+    if env_val:
+        clean_env = str(env_val).strip().strip('"').strip("'")
+        if clean_env and clean_env.lower() not in ("none", "null", "tu_clave_aqui", "xxx"):
+            return clean_env
+    return default or ""
+
+
 def cargar_secrets() -> SecretsTuple:
     """
-    Carga las claves de API necesarias desde st.secrets o variables de entorno (os.environ).
-    Valida existencia y formato de FINNHUB_API_KEY y FMP_API_KEY.
-    Si una clave falta o está vacía, notifica en la interfaz con un mensaje claro
-    sin provocar excepciones no controladas (KeyError / TypeError).
+    Carga las claves de API necesarias normalizando llaves desde st.secrets y variables de entorno.
+    Opera silenciosamente sin pintar advertencias en la UI (los fallbacks operan en memoria).
     Retorna SecretsTuple: (gemini_key, fred_key, finnhub_key, fmp_key).
     """
-    def _obtener_clave(nombres: list[str]) -> str:
-        for nom in nombres:
-            try:
-                if hasattr(st, "secrets") and nom in st.secrets and st.secrets[nom]:
-                    val = str(st.secrets[nom]).strip()
-                    if val and val.lower() not in ("none", "null", "tu_clave_aqui", "xxx"):
-                        return val
-            except Exception:
-                pass
-            env_val = os.getenv(nom)
-            if env_val and env_val.strip():
-                clean_env = env_val.strip()
-                if clean_env.lower() not in ("none", "null", "tu_clave_aqui", "xxx"):
-                    return clean_env
-        return ""
+    gemini_key = get_secret("GEMINI_KEY") or get_secret("GOOGLE_API_KEY")
+    fred_key = get_secret("FRED_KEY")
+    finnhub_key = get_secret("FINNHUB_KEY")
+    fmp_key = get_secret("FMP_KEY")
 
-    gemini_key = _obtener_clave(["GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
-    fred_key = _obtener_clave(["FRED_KEY", "FRED_API_KEY"])
-    finnhub_key = _obtener_clave(["FINNHUB_API_KEY", "FINNHUB_KEY"])
-    fmp_key = _obtener_clave(["FMP_API_KEY", "FMP_KEY"])
-
-    # Fallback cruzado si finnhub_key no está presente pero FMP_KEY fue colocada ahí antes
     if not finnhub_key and not fmp_key:
-        fallback_key = _obtener_clave(["API_KEY", "SECRET_KEY"])
+        fallback_key = get_secret("API_KEY") or get_secret("SECRET_KEY")
         if fallback_key:
             fmp_key = fallback_key
 
-    # Validación defensiva en interfaz Streamlit (sin lanzar KeyError o TypeError)
-    try:
-        if hasattr(st, "error"):
-            if not fmp_key:
-                st.error("⚠️ Falta configurar FMP_API_KEY en secrets.toml (o variable de entorno FMP_API_KEY). El motor contable requiere esta clave.")
-            if not finnhub_key:
-                st.warning("⚠️ Falta configurar FINNHUB_API_KEY en secrets.toml (o variable de entorno FINNHUB_API_KEY). Consenso de analistas y cotizaciones en tiempo real estarán limitados.")
-            if not gemini_key and not fred_key and not finnhub_key and not fmp_key:
-                st.error(
-                    "❌ No se detectaron claves de API en la configuración. Asegúrate de configurar 'FMP_API_KEY' y 'FINNHUB_API_KEY' "
-                    "en .streamlit/secrets.toml o en las variables de entorno del sistema."
-                )
-    except Exception:
-        pass
+    if not fmp_key:
+        logger.info("FMP_KEY no detectada; funciones dependientes de FMP usarán fallbacks defensivos.")
+    if not finnhub_key:
+        logger.info("FINNHUB_KEY no detectada; consenso de Wall Street y perfil operarán con respaldo defensivo.")
 
     return SecretsTuple(gemini_key, fred_key, finnhub_key, fmp_key)
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 import math
 import statistics
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -359,6 +363,9 @@ def calcular_fcff_valuation(
         if 0 < total_cash < 1e5:
             total_cash = total_cash * 1e6
 
+    if shares_diluted <= 1.0 and mcap > 0 and precio_actual > 0:
+        shares_diluted = mcap / precio_actual
+
     if shares_diluted <= 0 or precio_actual <= 0:
         return _resultado_fcff_vacio(precio_actual, total_cash, total_debt, rf, beta, erp)
 
@@ -540,6 +547,8 @@ def calcular_fcff_valuation(
         implied_sh = mcap / precio_actual
         if shares_count <= 1000 or shares_count < implied_sh * 0.01 or shares_count > implied_sh * 100:
             shares_count = implied_sh
+    elif shares_count <= 1.0 and mcap > 0 and precio_actual > 0:
+        shares_count = mcap / precio_actual
 
     # Shares proyectadas mantenidas para análisis informativo
     if buyback_rate_ != 0.0:
@@ -647,7 +656,9 @@ def _resultado_fcff_vacio(
         "total_cash":        total_cash,
         "total_debt":        total_debt,
         "shares_diluted":    0.0,
+        "shares_actuales":   0.0,
         "shares_efectivas":  0.0,
+        "shares_proyectadas": 0.0,
         "buyback_rate":      0.0,
         "fade_years":        DEFAULT_FADE_YEARS,
         "n_total":           5 + DEFAULT_FADE_YEARS,
