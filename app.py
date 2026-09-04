@@ -1,7 +1,3 @@
-import logging
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
 import datetime
 import numpy as np
 import pandas as pd
@@ -14,7 +10,6 @@ from config.settings import (
     SECTOR_BENCHMARKS,
     TOOLTIP_FADE_YEARS,
     cargar_secrets,
-    validar_secrets_configurados,
     obtener_ruta_logo,
     safe_get,
     safe_num,
@@ -28,7 +23,6 @@ from engine.valuation import (
     crear_calculador_dcf,
 )
 from data.financial_fetcher import (
-    FinnhubClient,
     fetch_datos_concurrente,
     obtener_datos_dividendos,
     obtener_noticias_financieras,
@@ -38,7 +32,6 @@ from data.financial_fetcher import (
     extraer_fcff_desapalancado,
     extraer_metricas_ttm,
     obtener_rf_tnx,
-    obtener_consenso_wall_street,
 )
 from engine.metrics import (
     calcular_altman_zscore,
@@ -48,7 +41,6 @@ from engine.metrics import (
     calcular_ratios_solvencia,
     calcular_scoring,
     evaluar_veredicto,
-    calcular_buyback_yield,
 )
 from services.ai_service import (
     obtener_analisis_macro_ia,
@@ -69,18 +61,8 @@ def seleccionar_ticker(t):
 # --- INYECCIÓN DE CSS PERSONALIZADO ---
 inyectar_estilos()
 
-# --- AUTENTICACIÓN Y AUDITORÍA DE SECRETS ---
-secrets_actuales = cargar_secrets()
-gemini_key, fred_key, finnhub_key, fmp_key = secrets_actuales
-finnhub_client = FinnhubClient(api_key=finnhub_key)
-
-diag_secrets = validar_secrets_configurados(secrets_actuales)
-if diag_secrets.get("errores"):
-    for err in diag_secrets["errores"]:
-        logger.info("Configuración de secrets: %s", err)
-if diag_secrets.get("avisos"):
-    for av in diag_secrets["avisos"]:
-        logger.info("Configuración de secrets: %s", av)
+# --- AUTENTICACIÓN SECRETS ---
+gemini_key, fred_key, fmp_key = cargar_secrets()
 
 # --- BÚSQUEDA DE LOGO Y RENDERIZADO SIDEBAR ---
 ruta_logo_detectada = obtener_ruta_logo()
@@ -110,7 +92,7 @@ if limpiar_btn:
 
 # INYECCIÓN DE TICKERS RELACIONADOS (PEERS)
 if ticker_input:
-    peers_list = obtener_peers(ticker_input, max_peers=3, finnhub_client=finnhub_client)
+    peers_list = obtener_peers(ticker_input, max_peers=3)
     if peers_list:
         st.sidebar.caption("🏢 Empresas relacionadas:")
         cols_peers = st.sidebar.columns(len(peers_list))
@@ -227,15 +209,8 @@ else:
     st.markdown('<h1 style="color: #0A192F;">📈 Sistema Avanzado de Análisis Fundamental Top-Down</h1>', unsafe_allow_html=True)
     with st.spinner(f"📡 Compilando métricas y evaluando macroeconomía para {ticker_input}..."):
         try:
-            # Extracción concurrente optimizada con caché en sesión para evitar llamadas al mover sliders
-            session_cache_key = f"market_data_{ticker_input}"
-            if session_cache_key in st.session_state and st.session_state.get("active_ticker") == ticker_input:
-                datos_mercado = st.session_state[session_cache_key]
-            else:
-                datos_mercado = fetch_datos_concurrente(ticker_input, finnhub_key, fred_key, fmp_key=fmp_key)
-                st.session_state[session_cache_key] = datos_mercado
-                st.session_state["active_ticker"] = ticker_input
-
+            # Extracción concurrente optimizada
+            datos_mercado = fetch_datos_concurrente(ticker_input, fmp_key, fred_key)
             precio_actual = datos_mercado["precio_actual"]
             prev_close = datos_mercado["prev_close"]
             hist = datos_mercado["hist"]
@@ -245,64 +220,20 @@ else:
             cf = datos_mercado["cf"]
             tasa_libre_riesgo = datos_mercado["tasa_fred"]
             news_data_cache = datos_mercado["news_data"]
-            diagnosticos_api = datos_mercado.get("diagnosticos", [])
             
-            # Diagnósticos de degradación o límites temporales de API registrados silenciosamente
-            for diag in diagnosticos_api:
-                logger.info("Diagnóstico de API: %s", diag.get('detalle', ''))
-
-            # Fallback defensivo para precio actual si el endpoint quote de Finnhub falló
-            if precio_actual == 0.0 and isinstance(info_estatica, dict):
-                precio_actual = safe_num(
-                    info_estatica.get("stockPrice")
-                    or info_estatica.get("price")
-                    or info_estatica.get("currentPrice")
-                    or (
-                        info_estatica.get("marketCap", 0.0) / info_estatica.get("sharesOutstanding", 1.0)
-                        if safe_num(info_estatica.get("sharesOutstanding", 0.0)) > 0
-                        else 0.0
-                    ),
-                    0.0
-                )
-
-            # Blindaje para histórico si está vacío pero disponemos de precio actual
-            if hist.empty and precio_actual > 0:
-                today_dt = pd.to_datetime(datetime.date.today())
-                hist = pd.DataFrame([{
-                    "Open": precio_actual,
-                    "High": precio_actual,
-                    "Low": precio_actual,
-                    "Close": precio_actual,
-                    "Volume": 0,
-                }], index=pd.DatetimeIndex([today_dt], name="Date"))
-
             info = info_estatica.copy()
             info["currentPrice"] = precio_actual
             info["previousClose"] = prev_close
             
-            # Verificación defensiva elegante: solo detener si NO hay ningún dato fundamental disponible
-            if (not info and inc.empty and bs.empty) or (precio_actual == 0.0 and inc.empty and bs.empty):
-                st.error(
-                    f"❌ No se pudieron obtener estados financieros ni cotización para '{ticker_input}'. "
-                    "Verifica que el símbolo sea válido o revisa la conectividad y límites de cuota de tus APIs."
-                )
+            if not info or (hist.empty and inc.empty) or precio_actual == 0:
+                st.error("❌ Ticker no encontrado o problemas de conexión con el proveedor financiero. Verifica el símbolo ingresado.")
                 st.stop()
 
             # --- EXTRACCIÓN Y NORMALIZACIÓN INSTITUCIONAL TTM ---
             m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual)
             mcap = safe_num(m_ttm.get("mcap", 0.0), 0.0)
             shares_current = safe_num(m_ttm.get("shares_diluted", 0.0), 0.0)
-            if shares_current <= 1.0:
-                shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 0.0
-            if shares_current <= 1.0 and not bs.empty:
-                for col in bs.columns:
-                    matching_rows = bs.loc[bs.index.str.lower().str.contains("shares", na=False), col]
-                    if not matching_rows.empty:
-                        candidate = safe_num(matching_rows.iloc[0], 0.0)
-                        if candidate > 1.0:
-                            shares_current = candidate
-                            break
-            if shares_current <= 1.0:
+            if shares_current <= 0:
                 shares_current = (mcap / precio_actual) if (mcap > 0 and precio_actual > 0) else 1.0
 
             net_income_val = safe_num(m_ttm.get("net_income_ttm", 0.0), 0.0)
@@ -391,7 +322,6 @@ else:
                 fcf_ttm=fcf_ttm,
                 shares_current=shares_current,
                 is_fibra_util=is_fibra_util,
-                current_ratio_fallback=safe_num(m_ttm.get("current_ratio", 0.0)),
             )
 
             net_debt = res_solv["net_debt"]
@@ -448,9 +378,6 @@ else:
                 short_term_debt=sh_debt,
                 tax_rate=tax_rate,
                 is_asset_light=is_asset_light,
-                roe_fallback=safe_num(m_ttm.get("roe", 0.0)),
-                roa_fallback=safe_num(m_ttm.get("roa", 0.0)),
-                roic_fallback=safe_num(m_ttm.get("roic", 0.0)),
             )
 
             mg_op = res_rent["mg_op"]
@@ -496,13 +423,13 @@ else:
                 eps_growth = 0.0
                 eps_growth_str = "N/D"
                 col_eps, msg_eps = "⚪", "Crecimiento de EPS no disponible o no reportado."
-            # BUYBACK YIELD (Variación interanual de acciones en circulación o recompras netas)
-            res_by = calcular_buyback_yield(inc, bs, cf, shares_current=shares_current, mcap=mcap)
-            buyback_yield = res_by["buyback_yield"]
-            buyback_yield_str = res_by["buyback_yield_str"]
-            col_by = res_by["col_by"]
-            msg_by = res_by["msg_by"]
-            div_rate, div_yield, next_div_date = obtener_datos_dividendos(ticker_input, info, finnhub_key, precio_actual)
+            # BUYBACK YIELD
+            sh_prev = bs.loc['Basic Average Shares'].iloc[1] if (not bs.empty and 'Basic Average Shares' in bs.index and len(bs.columns) > 1 and not pd.isna(bs.loc['Basic Average Shares'].iloc[1])) else shares_current
+            buyback_yield = ((sh_prev - shares_current) / sh_prev * 100) if sh_prev > 0 else 0.0
+            if buyback_yield >= 1.5: col_by, msg_by = "🟢", f"Fuerte Recompra: Reduce flotante en {buyback_yield:.1f}% anual."
+            elif buyback_yield >= 0.0: col_by, msg_by = "🟡", f"Recompra Neutra: Variación de {buyback_yield:.1f}%."
+            else: col_by, msg_by = "🔴", f"Dilución de Accionistas: Incrementa flotante en {abs(buyback_yield):.1f}%."
+            div_rate, div_yield, next_div_date = obtener_datos_dividendos(ticker_input, info, fmp_key, precio_actual)
             val_div_metric = f"${div_rate:.2f} ({div_yield:.2f}%)" if div_rate > 0 else "N/A"
             msg_div_tooltip = f"Rendimiento anualizado por dividendo: {div_yield:.2f}%\nPróxima fecha ex-dividendo estimada: {next_div_date}"
             fcf_yield = (fcf_ttm / mcap * 100) if mcap > 0 else 0.0
@@ -511,19 +438,12 @@ else:
             else: col_fcfy, msg_fcfy = "🔴", f"Rendimiento Exigente ({fcf_yield:.2f}% vs FRED {tasa_libre_riesgo:.2f}%)."
             
             # --- MÓDULO 3: VALUACIÓN, FCFF Y DDM (40%) ---
-            beta = safe_num(m_ttm.get("beta", 1.0), 1.0)
-            rf_tnx = safe_num(obtener_rf_tnx(fallback_fred=tasa_libre_riesgo), 4.20)
-            erp_mercado = safe_num(obtener_erp_mercado(fred_key, rf_tnx), 5.0)
+            beta = m_ttm.get("beta", 1.0)
+            rf_tnx = obtener_rf_tnx(fallback_fred=tasa_libre_riesgo)
+            erp_mercado = obtener_erp_mercado(fred_key, rf_tnx)
 
             # Extraer partidas FCFF con dual-path (EBIT primario + OCF fallback)
             comp_fcff = extraer_fcff_desapalancado(cf, inc, bs, info)
-
-            # Tasa de crecimiento prospectiva para la Fase 1
-            growth_exp = 0.0
-            if eps_growth > 0:
-                growth_exp = min(eps_growth / 100.0, 0.38) if eps_growth > 38 else (eps_growth / 100.0)
-            elif m_ttm.get("revenue_growth", 0.0) > 0:
-                growth_exp = m_ttm.get("revenue_growth", 0.0)
 
             # ── MOTOR FCFF INSTITUCIONAL (Fuente central de verdad) ──
             res_fcff = calcular_fcff_valuation(
@@ -540,12 +460,11 @@ else:
                 rf                    = rf_tnx,
                 precio_actual         = precio_actual,
                 erp                   = erp_mercado,
-                growth_rate_exp       = growth_exp if growth_exp > 0 else None,
                 cagr_revenue_hist     = m_ttm.get("cagr_revenue_3_5y", 0.0),
                 revenue_growth_api    = m_ttm.get("revenue_growth", 0.0),
                 revenue_ttm           = m_ttm.get("revenue_ttm", rev_ttm),
                 operating_margin_hist = m_ttm.get("op_margin_hist", mg_op / 100.0 if mg_op > 0 else 0.12),
-                finnhub_key           = finnhub_key,
+                fmp_key               = fmp_key,
                 fred_key              = fred_key,
                 ticker                = ticker_input,
                 # ── Nuevos parámetros del modelo ──────────────────────────
@@ -610,98 +529,42 @@ else:
                 total_equity=total_eq,
                 peg_info=m_ttm["peg_ratio_info"],
                 earnings_growth=m_ttm["earnings_growth"],
-                buyback_yield=buyback_yield,
             )
 
             pe = res_mult["pe"]
-            pe_str = res_mult["pe_str"]
             col_pe = res_mult["col_pe"]
             msg_pe = res_mult["msg_pe"]
 
             p_fcf = res_mult["p_fcf"]
-            p_fcf_str = res_mult["p_fcf_str"]
             col_pfcf = res_mult["col_pfcf"]
             msg_pfcf = res_mult["msg_pfcf"]
 
             ev_ebitda = res_mult["ev_ebitda"]
-            ev_ebitda_str = res_mult["ev_ebitda_str"]
             col_ev = res_mult["col_ev"]
             msg_ev = res_mult["msg_ev"]
 
             peg = res_mult["peg"]
-            peg_str = res_mult["peg_str"]
             col_peg = res_mult["col_peg"]
             msg_peg = res_mult["msg_peg"]
 
             p_s = res_mult["p_s"]
-            # --- CONSENSO DE WALL STREET (Finnhub Oficial + Fallback FMP) ---
-            target = safe_num(
-                info.get("targetMeanPrice")
-                or info.get("targetMean")
-                or info.get("targetMedianPrice")
-                or info.get("targetPrice")
-                or m_ttm.get("target_mean_price", 0.0),
-                0.0
-            )
-            if target <= 0.0:
-                try:
-                    consenso_res = obtener_consenso_wall_street(
-                        ticker_input,
-                        finnhub_api_key=finnhub_key,
-                        finnhub_client=finnhub_client,
-                        fmp_api_key=fmp_key
-                    )
-                    target = safe_num(consenso_res.target_mean, 0.0)
-                except Exception as e_ws:
-                    logger.debug("Error extrayendo consenso para %s: %s", ticker_input, e_ws)
-                    target = 0.0
+            p_b = res_mult["p_b"]
 
-            if target > 0 and precio_actual > 0:
-                upside = ((target - precio_actual) / precio_actual) * 100.0
-                col_upside = "🟢" if upside >= 5.0 else ("🟡" if upside >= -5.0 else "🔴")
-                val_target_str = f"${target:,.2f}"
-                delta_target_str = f"{upside:+.1f}% vs Mercado"
-            else:
-                upside = 0.0
-                col_upside = "⚪"
-                val_target_str = "N/D"
-                delta_target_str = None
+            target = m_ttm["target_mean_price"]
+            upside = (((target - precio_actual) / precio_actual) * 100) if precio_actual != 0 else 0.0
+            col_upside = "🟢" if upside > 0 else "🔴"
             col_vintr = "🟢" if v_intr_dcf >= precio_actual else "🔴"
             
             # --- MÓDULO 4: RIESGOS Y SALUD CONTABLE (15%) ---
-            # Altman Z-Score: FMP /financial-score con fallback resiliente al cálculo manual
-            altman_z_fmp = safe_num(info.get("altmanZScore"), 0.0)
-            if altman_z_fmp > 0.0:
-                z_score = altman_z_fmp
-                if z_score > 2.99:
-                    col_z, msg_z = "🟢", "Riesgo de bancarrota casi nulo."
-                elif z_score >= 1.81:
-                    col_z, msg_z = "🟡", "Precaución: Zona Gris."
-                else:
-                    col_z, msg_z = "🔴", "Alto riesgo de insolvencia."
-            else:
-                res_z = calcular_altman_zscore(debt_eq, roa)
-                z_score, col_z, msg_z = res_z["z_score"], res_z["status"], res_z["msg_z"]
-
+            res_z = calcular_altman_zscore(debt_eq, roa)
+            z_score, col_z, msg_z = res_z["z_score"], res_z["status"], res_z["msg_z"]
             short_int = m_ttm["short_percent_of_float"] * 100.0 if m_ttm["short_percent_of_float"] < 1.0 else m_ttm["short_percent_of_float"]
             
             col_b, msg_b = ("🟢", "Volatilidad baja (Defensiva).") if beta < 0.8 else (("🟡", "Volatilidad moderada.") if beta <= 1.4 else ("🔴", "Alta volatilidad sistémica."))
             col_s, msg_s = ("🟢", "Bajo interés en corto.") if short_int < 5 else (("🟡", "Posicionamiento en corto moderado.") if short_int <= 10 else ("🔴", "Fuerte pesimismo en corto."))
             
-            # Piotroski F-Score: FMP con fallback resiliente al cálculo manual
-            piotroski_fmp = info.get("piotroskiScore")
-            if piotroski_fmp is not None and safe_num(piotroski_fmp, -1) >= 0:
-                f_score = int(safe_num(piotroski_fmp, 0))
-                fscore_str = f"{f_score}/9"
-                if f_score >= 7:
-                    col_fscore, msg_fscore = "🟢", "Salud contable sólida y de alta calidad."
-                elif f_score >= 4:
-                    col_fscore, msg_fscore = "🟡", "Salud contable promedio."
-                else:
-                    col_fscore, msg_fscore = "🔴", "Riesgo de deterioro contable."
-            else:
-                res_fs = calcular_piotroski_fscore(inc, bs, cf, info)
-                f_score, fscore_str, col_fscore, msg_fscore = res_fs["f_score"], res_fs["fscore_str"], res_fs["status"], res_fs["msg_fscore"]
+            res_fs = calcular_piotroski_fscore(inc, bs, cf, info)
+            f_score, fscore_str, col_fscore, msg_fscore = res_fs["f_score"], res_fs["fscore_str"], res_fs["status"], res_fs["msg_fscore"]
             
             # --- EXTRACCIÓN MACROECONÓMICA Y GEOPOLÍTICA (5%) ---
             texto_ia_final, macro_score = obtener_analisis_macro_ia(ticker_input, nombre, sector, gemini_key)
@@ -732,7 +595,7 @@ else:
                 res_veredicto["is_knockout"], res_veredicto["veredicto"], res_veredicto["color_v"], res_veredicto["veredicto_txt"]
             )
             
-            doble_filtro = "🟢 Oportunidad de Alta Confianza (Cotiza por debajo de tu Precio Máx de Compra y Wall Street le ve alto potencial)." if (precio_actual <= precio_max_compra and target > 0 and upside > 15) else ("🟡 Valor Oculto" if (v_intr > precio_actual and target > 0 and upside > 0) else "⚪ Valuación Justa o Mixta")
+            doble_filtro = "🟢 Oportunidad de Alta Confianza (Cotiza por debajo de tu Precio Máx de Compra y Wall Street le ve alto potencial)." if (precio_actual <= precio_max_compra and upside > 15) else ("🟡 Valor Oculto" if (v_intr > precio_actual and upside > 0) else "⚪ Valuación Justa o Mixta")
 
             # --- DEFINICIÓN DE TOOLTIPS MÓDULOS 1 Y 2 ---
             h_nde = f"¿Qué es? Deuda neta dividida por EBITDA.\n¿Para qué sirve? Mide cuántos años tardaría en pagar su deuda.\nDiagnóstico: {msg_nde}"
@@ -753,10 +616,7 @@ else:
             h_vint = "¿Qué es? Modelo DCF (Flujos de Caja Descontados).\n¿Para qué sirve? Estima el valor presente de la caja libre futura que generará el negocio, descontada al WACC.\nDiagnóstico: Representa el valor intrínseco fundamental."
             h_ddm  = "¿Qué es? Modelo Gordon Growth (DDM).\n¿Para qué sirve? Valúa la acción basándose en el valor presente de sus dividendos futuros asumiendo crecimiento constante.\nDiagnóstico: Complementario para empresas maduras o REITs."
             h_pmax = f"¿Qué es? Valor Intrínseco menos Margen de Seguridad.\n¿Para qué sirve? Define el umbral máximo de precio para mitigar riesgos de error en la proyección.\nDiagnóstico: Descuento de seguridad exigido del {desc_req*100:.0f}%."
-            if target > 0:
-                h_ws = f"¿Qué es? Precio Objetivo Consenso (12 meses).\n¿Para qué sirve? Indica la valoración promedio proyectada por analistas de Wall Street.\nDiagnóstico: Precio objetivo de {val_target_str} USD con un potencial (upside) esperado del {upside:+.1f}% respecto al precio actual."
-            else:
-                h_ws = "¿Qué es? Precio Objetivo Consenso (12 meses).\n¿Para qué sirve? Indica la valoración promedio proyectada por analistas de Wall Street.\nDiagnóstico: Sin cobertura de analistas disponible para este activo."
+            h_ws   = f"¿Qué es? Precio Objetivo Consenso (12 meses).\n¿Para qué sirve? Indica la valoración promedio proyectada por analistas de Wall Street.\nDiagnóstico: Upside esperado del {upside:.1f}%."
             
             h_pe   = f"¿Qué es? Múltiplo Precio / Beneficio Neto (P/E).\n¿Para qué sirve? Mide la valoración de las utilidades contables del último año (TTM).\nDiagnóstico: La empresa cotiza a {pe:.1f} veces sus ganancias anuales, lo que requiere un crecimiento continuo de beneficios para sostener la valoración de mercado."
             h_pfcf = f"¿Qué es? Precio / Flujo de Caja Libre.\n¿Para qué sirve? Valora la empresa en función del efectivo real generado, aislando posibles trucos contables.\nDiagnóstico: Con un P/FCF de {p_fcf:.1f}x, la empresa requiere {p_fcf:.1f} años de generación de flujo libre de caja para cubrir su precio actual de mercado."
@@ -770,20 +630,6 @@ else:
             h_peg  = f"¿Qué es? PER / Tasa de Crecimiento Esperado.\n¿Para qué sirve? Ajusta el múltiplo de valuación según la velocidad a la que crecen las utilidades.\nDiagnóstico: Con un PEG de {peg:.2f}x, la acción cotiza con {peg_msg} la tasa de crecimiento esperada de sus ganancias."
             
             h_ev   = f"¿Qué es? Valor de Empresa (EV) / EBITDA.\n¿Para qué sirve? Valora la operación del negocio neutralizando su estructura de deuda y carga fiscal.\nDiagnóstico: El Valor total de la Empresa (EV) equivale a {ev_ebitda:.1f} años de su beneficio operativo EBITDA actual."
-            
-            if buyback_yield > 0:
-                diag_by_m3 = f"La empresa reduce sus acciones en circulación al {buyback_yield:.1f}% anual, incrementando el beneficio por acción (EPS)."
-            elif buyback_yield < 0:
-                diag_by_m3 = f"Existe una emisión neta o dilución de acciones del {abs(buyback_yield):.1f}% anual."
-            else:
-                diag_by_m3 = "Sin recompras netas significativas registradas en el período (0.0%)."
-
-            h_by_m3 = (
-                "¿Qué es? Recompra de Acciones / Buyback Yield.\n"
-                "¿Para qué sirve? Mide el retorno de capital al accionista mediante la compra de acciones propias en el mercado, "
-                "reduciendo el número de acciones en circulación y aumentando el beneficio por acción (EPS).\n"
-                f"Diagnóstico: {diag_by_m3}"
-            )
             
             h_z    = f"¿Qué es? Modelo Altman Z-Score.\n¿Para qué sirve? Predice riesgo de quiebra.\nDiagnóstico: {msg_z}"
             h_b    = f"¿Qué es? Coeficiente Beta.\n¿Para qué sirve? Mide volatilidad bursátil.\nDiagnóstico: {msg_b}"
@@ -860,39 +706,15 @@ else:
                 
                 with g_col1:
                     st.write("**Comparativa de Márgenes (5 Años)**")
-                    posibles_rev = ['Total Revenue', 'Operating Revenue', 'Revenue', 'TotalRevenue']
-                    posibles_op = ['Operating Income', 'OperatingIncome', 'Operating Profit', 'EBIT']
-                    posibles_ni = ['Net Income', 'NetIncome', 'Net Income Common Stockholders']
-
-                    row_rev = next((r for r in posibles_rev if r in inc.index), None)
-                    row_op = next((r for r in posibles_op if r in inc.index), None)
-                    row_ni = next((r for r in posibles_ni if r in inc.index), None)
-
-                    if not inc.empty and row_rev and row_op and row_ni:
+                    if 'Gross Profit' in inc.index and 'Operating Income' in inc.index and 'Total Revenue' in inc.index:
                         try:
-                            # Filtrar columnas anuales numéricas (hasta 5 años)
-                            cols_anuales = sorted([c for c in inc.columns if str(c).isdigit() and len(str(c)) == 4])
-                            if len(cols_anuales) > 5:
-                                cols_anuales = cols_anuales[-5:]
-                            if not cols_anuales:
-                                cols_anuales = [c for c in inc.columns if c not in ["MRQ", "TTM"]]
-                            if not cols_anuales:
-                                cols_anuales = list(inc.columns)
-
-                            s_rev = inc.loc[row_rev, cols_anuales]
-                            if isinstance(s_rev, pd.DataFrame): s_rev = s_rev.iloc[0]
-                            s_op = inc.loc[row_op, cols_anuales]
-                            if isinstance(s_op, pd.DataFrame): s_op = s_op.iloc[0]
-                            s_ni = inc.loc[row_ni, cols_anuales]
-                            if isinstance(s_ni, pd.DataFrame): s_ni = s_ni.iloc[0]
-
-                            rev_seguro = s_rev.replace(0, np.nan)
+                            rev_seguro = inc.loc['Total Revenue'].replace(0, np.nan)
                             df_margins = pd.DataFrame({
-                                "Margen Operativo (%)": (s_op / rev_seguro) * 100,
-                                "Margen Neto (%)": (s_ni / rev_seguro) * 100
-                            }, index=cols_anuales).dropna()
+                                "Margen Operativo (%)": (inc.loc['Operating Income'] / rev_seguro) * 100,
+                                "Margen Neto (%)": (inc.loc['Net Income'] / rev_seguro) * 100
+                            }).dropna()
                             
-                            df_margins.index = [str(x) for x in df_margins.index]
+                            df_margins.index = pd.to_datetime(df_margins.index).year.astype(str)
                             df_margins = df_margins.sort_index()
                             fig_m = px.bar(df_margins, barmode='group', text_auto='.1f', color_discrete_sequence=['#0A192F', '#0284C7'])
                             fig_m.update_layout(
@@ -907,57 +729,18 @@ else:
                             st.plotly_chart(fig_m, use_container_width=True)
                         except Exception:
                             st.write("Gráfico de márgenes no disponible para este ticker.")
-                    else:
-                        st.write("Gráfico de márgenes no disponible para este ticker.")
                 with g_col2:
                     st.write("**Comparativa de Flujos de Efectivo (5 Años - Millones USD)**")
-                    posibles_ocf = ['Operating Cash Flow', 'OperatingCashFlow', 'Cash Flow From Continuing Operating Activities', 'Total Cash From Operating Activities', 'operatingCashFlow', 'netCashProvidedByOperatingActivities']
-                    posibles_fcf = ['Free Cash Flow', 'FreeCashFlow', 'freeCashFlow']
-                    posibles_capex = ['Capital Expenditure', 'CapitalExpenditure', 'Capital Expenditures', 'Purchase Of Property Plant And Equipment', 'capitalExpenditure', 'investmentsInPropertyPlantAndEquipment']
-
-                    row_ocf = next((r for r in posibles_ocf if r in cf.index), None)
-                    row_fcf = next((r for r in posibles_fcf if r in cf.index), None)
-                    row_capex = next((r for r in posibles_capex if r in cf.index), None)
-
-                    if not cf.empty and (row_ocf or row_fcf):
+                    if not cf.empty and 'Operating Cash Flow' in cf.index and 'Free Cash Flow' in cf.index:
                         try:
-                            # Filtrar columnas anuales numéricas (hasta 5 años)
-                            cols_anuales_cf = sorted([c for c in cf.columns if str(c).isdigit() and len(str(c)) == 4])
-                            if len(cols_anuales_cf) > 5:
-                                cols_anuales_cf = cols_anuales_cf[-5:]
-                            if not cols_anuales_cf:
-                                cols_anuales_cf = [c for c in cf.columns if c not in ["MRQ", "TTM"]]
-                            if not cols_anuales_cf:
-                                cols_anuales_cf = list(cf.columns)
-
-                            s_ocf = cf.loc[row_ocf, cols_anuales_cf] if row_ocf else pd.Series(0.0, index=cols_anuales_cf)
-                            if isinstance(s_ocf, pd.DataFrame): s_ocf = s_ocf.iloc[0]
-
-                            if row_capex:
-                                s_capex = cf.loc[row_capex, cols_anuales_cf].abs()
-                                if isinstance(s_capex, pd.DataFrame): s_capex = s_capex.iloc[0]
-                            else:
-                                s_capex = pd.Series(0.0, index=cols_anuales_cf)
-
-                            if row_fcf:
-                                s_fcf = cf.loc[row_fcf, cols_anuales_cf]
-                                if isinstance(s_fcf, pd.DataFrame): s_fcf = s_fcf.iloc[0]
-                                if not row_capex and row_ocf:
-                                    s_capex = (s_ocf.fillna(0.0) - s_fcf.fillna(0.0)).abs()
-                            elif row_capex and row_ocf:
-                                s_fcf = s_ocf.fillna(0.0) - s_capex.fillna(0.0)
-                            else:
-                                s_fcf = s_ocf
-
                             df_cf = pd.DataFrame({
-                                "Flujo Operativo (OCF)": s_ocf / 1e6,
-                                "CapEx (Inversión Capital)": s_capex / 1e6,
-                                "Flujo Libre (FCF)": s_fcf / 1e6
-                            }, index=cols_anuales_cf).dropna(how='all')
+                                "Flujo Operativo": cf.loc['Operating Cash Flow'] / 1e6,
+                                "Flujo Libre (FCF)": cf.loc['Free Cash Flow'] / 1e6
+                            }).dropna()
                             
-                            df_cf.index = [str(x) for x in df_cf.index]
+                            df_cf.index = pd.to_datetime(df_cf.index).year.astype(str)
                             df_cf = df_cf.sort_index()
-                            fig_cf = px.bar(df_cf, barmode='group', text_auto=',.0f', color_discrete_sequence=['#0284C7', '#F59E0B', '#059669'])
+                            fig_cf = px.bar(df_cf, barmode='group', text_auto=',.0f', color_discrete_sequence=['#0284C7', '#059669'])
                             fig_cf.update_layout(
                                 xaxis_title="", yaxis_title="Millones USD ($)", legend_title="",
                                 font=dict(color='#0A192F', family='Trebuchet MS', size=11),
@@ -970,32 +753,33 @@ else:
                             st.plotly_chart(fig_cf, use_container_width=True)
                         except Exception:
                             st.write("Gráfico de flujos no disponible para este ticker.")
-                    else:
-                        st.write("Gráfico de flujos no disponible para este ticker.")
                 st.markdown("### 🏷️ Módulo 3: Valuación y Valor Intrínseco (40%)")
 
                 upside_vs_precio = ((v_intr_dcf - precio_actual) / precio_actual * 100.0) if precio_actual > 0 else 0.0
                 col_vintr = "🟢" if v_intr_dcf >= precio_actual else "🔴"
+                col_mseg = "🟢" if margen_seguridad >= 0.10 else ("🟡" if margen_seguridad >= 0.0 else "🔴")
 
                 if mostrar_ddm:
-                    row1_c1, row1_c2, row1_c3, row1_c4 = st.columns(4)
+                    row1_c1, row1_c2, row1_c3, row1_c4, row1_c5 = st.columns(5)
                     row1_c1.metric(f"{col_vintr} V. Intrínseco (FCFF)", f"${v_intr_dcf:,.2f}", f"{upside_vs_precio:+.1f}% vs Mercado", help=h_vint)
                     row1_c2.metric(f"{col_ddm} V. Intrínseco (DDM)", val_ddm_str, help=h_ddm)
-                    row1_c3.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
-                    row1_c4.metric(f"{col_upside} Consenso W.St", val_target_str, delta_target_str, help=h_ws)
+                    row1_c3.metric(f"{col_mseg} Margen Seguridad", f"{margen_seguridad*100:+.1f}%", help="Diferencial porcentual entre el valor intrínseco FCFF y la cotización actual.")
+                    row1_c4.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
+                    row1_c5.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}" if target > 0 else "N/D", f"{upside:+.1f}%" if target > 0 else None, help=h_ws)
                 else:
-                    row1_c1, row1_c2, row1_c3 = st.columns(3)
+                    row1_c1, row1_c2, row1_c3, row1_c4, row1_c5 = st.columns(5)
                     row1_c1.metric(f"{col_vintr} V. Intrínseco (FCFF)", f"${v_intr_dcf:,.2f}", f"{upside_vs_precio:+.1f}% vs Mercado", help=h_vint)
-                    row1_c2.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
-                    row1_c3.metric(f"{col_upside} Consenso W.St", val_target_str, delta_target_str, help=h_ws)
+                    row1_c2.metric(f"{col_mseg} Margen Seguridad", f"{margen_seguridad*100:+.1f}%", help="Diferencial porcentual entre el valor intrínseco FCFF y la cotización actual.")
+                    row1_c3.metric(f"{col_pmax} P. Máx Compra", f"${precio_max_compra:,.2f}", f"-{desc_req*100:.0f}% Descuento", help=h_pmax)
+                    row1_c4.metric(f"{col_upside} Consenso W.St", f"${target:,.2f}" if target > 0 else "N/D", f"{upside:+.1f}%" if target > 0 else None, help=h_ws)
+                    row1_c5.metric("💵 Cotización Mercado", f"${precio_actual:,.2f}", help="Último precio de cierre registrado en mercado.")
 
                 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
-                row2_c1, row2_c2, row2_c3, row2_c4, row2_c5 = st.columns(5)
-                row2_c1.metric(f"{col_pe} PER (P/E)", pe_str, help=h_pe)
-                row2_c2.metric(f"{col_pfcf} P/FCF", p_fcf_str, help=h_pfcf)
-                row2_c3.metric(f"{col_peg} PEG Forward", peg_str, help=h_peg)
-                row2_c4.metric(f"{col_ev} EV / EBITDA", ev_ebitda_str, help=h_ev)
-                row2_c5.metric(f"{col_by} Recompra Acciones", buyback_yield_str, help=h_by_m3)
+                row2_c1, row2_c2, row2_c3, row2_c4 = st.columns(4)
+                row2_c1.metric(f"{col_pe} PER (P/E)", f"{pe:.1f}x", help=h_pe)
+                row2_c2.metric(f"{col_pfcf} P/FCF", f"{p_fcf:.1f}x", help=h_pfcf)
+                row2_c3.metric(f"{col_peg} PEG Forward", f"{peg:.2f}x", help=h_peg)
+                row2_c4.metric(f"{col_ev} EV / EBITDA", f"{ev_ebitda:.1f}x", help=h_ev)
 
                 if mostrar_ddm:
                     explicacion_modelo = (
@@ -1006,8 +790,8 @@ else:
                     )
                 else:
                     explicacion_modelo = (
-                        fr"💡 **Criterio de Valuación Seleccionado (FCFF):**" + "\n\n"
-                        fr"Para **{nombre}**, el **Modelo de Flujo de Caja Libre para la Firma (FCFF)** descuenta los flujos de caja operativos netos de CapEx con convención de medio año al WACC empírico ({wacc:.2f}%), incorporando el valor terminal de Gordon Shapiro ($g_{{term}} = {g_term*100:.1f}\%$) y reconciliando mediante el puente Enterprise Value → Equity Value por acción."
+                        f"💡 **Criterio de Valuación Seleccionado (FCFF):**\n\n"
+                        f"Para **{nombre}**, el **Modelo de Flujo de Caja Libre para la Firma (FCFF)** descuenta los flujos de caja operativos netos de CapEx con convención de medio año al WACC empírico ({wacc:.2f}%), incorporando el valor terminal de Gordon Shapiro ($g_{{term}} = {g_term*100:.1f}\%$) y reconciliando mediante el puente Enterprise Value → Equity Value por acción."
                     )
                 st.info(explicacion_modelo)
                 st.markdown("### 🛡️ Módulo 4: Capa de Riesgos y Salud Contable (15%)")
@@ -1052,11 +836,11 @@ else:
             # --- CONTENIDO DE LA PESTAÑA: NOTICIAS Y CATALIZADORES ---
             with tab_noticias:
                 st.markdown(f"<h2 style='color: #0A192F; font-weight: 700;'>📰 Noticias y Catalizadores Recientes ({ticker_input})</h2>", unsafe_allow_html=True)
-                news_data = news_data_cache if news_data_cache else obtener_noticias_financieras(ticker_input, finnhub_key)
+                news_data = news_data_cache if news_data_cache else obtener_noticias_financieras(ticker_input)
                 
                 if news_data:
                     for n in news_data:
-                        link_href = n['link'] if n['link'] and n['link'].startswith('http') else f"https://finnhub.io/"
+                        link_href = n['link'] if n['link'] and n['link'].startswith('http') else f"https://finance.yahoo.com/quote/{ticker_input}/news"
                         st.markdown(f"""
                         <div style='border: 1px solid #C5A059; border-radius: 8px; padding: 15px; margin-bottom: 15px; background-color: #FFFFFF; box-shadow: 0 2px 4px rgba(0,0,0,0.05);'>
                             <p style='color: #64748B; font-size: 12px; margin-bottom: 5px; font-weight: 700;'>🏢 {n['publisher']} &nbsp;|&nbsp; 🕒 {n['date']}</p>
@@ -1096,10 +880,7 @@ else:
                 
             def format_val_multiplo(name, val, target, is_peg=False):
                 semaforo = eval_val(val, target)
-                if val <= 0:
-                    val_str = "N/D"
-                else:
-                    val_str = f"{val:.2f}x" if is_peg else f"{val:.1f}x"
+                val_str = f"{val:.2f}x" if is_peg else f"{val:.1f}x"
                 tgt_str = f"{target:.2f}x" if is_peg else f"{target:.1f}x"
                 if target > 0 and val > 0:
                     diff = ((val / target) - 1) * 100
