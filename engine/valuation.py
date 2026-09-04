@@ -303,6 +303,7 @@ def calcular_fcff_valuation(
     da_hist: Optional[List[float]] = None,
     delta_nwc_hist: Optional[List[float]] = None,
     fmp_key: str = "",
+    **kwargs: Any,
 ) -> Dict[str, Union[float, str, list]]:
     """
     Motor de Valuacion FCFF (Free Cash Flow to Firm) Institucional.

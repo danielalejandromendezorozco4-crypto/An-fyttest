@@ -18,6 +18,12 @@ from data.financial_fetcher import (
     obtener_noticias_financieras,
     obtener_consenso_wall_street,
     ConsensusWallStreet,
+    _fetch_with_retry,
+    fetch_fmp_company_profile,
+    fetch_fmp_quote,
+    obtener_diagnosticos_api,
+    limpiar_diagnosticos_api,
+    registrar_evento_diagnostico,
 )
 
 __all__ = [
@@ -39,4 +45,10 @@ __all__ = [
     "obtener_noticias_financieras",
     "obtener_consenso_wall_street",
     "ConsensusWallStreet",
+    "_fetch_with_retry",
+    "fetch_fmp_company_profile",
+    "fetch_fmp_quote",
+    "obtener_diagnosticos_api",
+    "limpiar_diagnosticos_api",
+    "registrar_evento_diagnostico",
 ]

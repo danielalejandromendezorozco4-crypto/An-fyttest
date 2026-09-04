@@ -4,8 +4,9 @@ import datetime
 import logging
 import math
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,131 @@ from config.settings import (
 from engine.metrics import calcular_altman_zscore, calcular_piotroski_fscore
 
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGISTRO Y DIAGNÓSTICO DEFENSIVO DE EVENTOS DE API (RATE LIMIT / ERRORES)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DIAGNOSTICOS_EVENTOS: List[Dict[str, Any]] = []
+
+
+def registrar_evento_diagnostico(api_name: str, endpoint: str, status_code: Optional[int], detalle: str) -> None:
+    """Registra un evento de fallo o degradación para informar al usuario de manera transparente."""
+    _DIAGNOSTICOS_EVENTOS.append({
+        "api": api_name,
+        "endpoint": endpoint,
+        "status_code": status_code,
+        "detalle": detalle,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+
+
+def obtener_diagnosticos_api() -> List[Dict[str, Any]]:
+    """Retorna la lista de diagnósticos acumulados en la ejecución actual."""
+    return list(_DIAGNOSTICOS_EVENTOS)
+
+
+def limpiar_diagnosticos_api() -> None:
+    """Limpia los eventos de diagnóstico previos."""
+    _DIAGNOSTICOS_EVENTOS.clear()
+
+
+# Retroceso exponencial y micropausa para evitar colisiones en ráfaga
+_RETRY_BASE_DELAY: float = 0.01 if os.getenv("PYTEST_CURRENT_TEST") else 1.5
+_BURST_PAUSE: float = 0.001 if os.getenv("PYTEST_CURRENT_TEST") else 0.1
+
+
+def _fetch_with_retry(
+    fetch_fn: Callable[[], requests.Response],
+    api_name: str = "API",
+    endpoint: str = "",
+    max_retries: int = 3,
+    base_delay: float = _RETRY_BASE_DELAY,
+    burst_pause: float = _BURST_PAUSE,
+) -> Optional[requests.Response]:
+    """
+    Ejecuta una petición HTTP con reintentos defensivos y retroceso exponencial ante HTTP 429.
+    - Si recibe HTTP 429: espera base_delay * (2 ** intento) [1.5s, 3.0s, 6.0s] y reintenta hasta max_retries veces.
+    - Añade una micropausa de seguridad (burst_pause = 0.1s) entre peticiones consecutivas para evitar colisiones.
+    - Si agota los reintentos o recibe errores de autenticación (401/403) o timeout/conexión,
+      registra el evento diagnóstico y retorna None para degradación elegante.
+    """
+    last_response: Optional[requests.Response] = None
+    if burst_pause > 0:
+        time.sleep(burst_pause)
+
+    for intento in range(max_retries + 1):
+        try:
+            response = fetch_fn()
+            last_response = response
+
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 429:
+                if intento < max_retries:
+                    delay = base_delay * (2 ** intento)
+                    logger.warning(
+                        "%s Rate Limit (HTTP 429) en '%s'. Reintentando en %.2fs (intento %d/%d)...",
+                        api_name, endpoint, delay, intento + 1, max_retries
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.warning(
+                        "%s Rate Limit persistente (HTTP 429) en '%s' tras %d intentos. Activando degradación elegante.",
+                        api_name, endpoint, max_retries
+                    )
+                    registrar_evento_diagnostico(
+                        api_name,
+                        endpoint,
+                        429,
+                        f"{api_name}: Rate limit temporal (429) en {endpoint} - usando estimación interna o fallback defensivo."
+                    )
+                    return None
+            elif response.status_code in (401, 403):
+                logger.warning("%s API Key no válida o no autorizada (HTTP %s) en '%s'.", api_name, response.status_code, endpoint)
+                registrar_evento_diagnostico(
+                    api_name,
+                    endpoint,
+                    response.status_code,
+                    f"{api_name}: Acceso no autorizado o prohibido (HTTP {response.status_code}) en {endpoint} - aplicando fallback defensivo."
+                )
+                return None
+            else:
+                logger.warning("%s respondió con HTTP %s para '%s'.", api_name, response.status_code, endpoint)
+                registrar_evento_diagnostico(
+                    api_name,
+                    endpoint,
+                    response.status_code,
+                    f"{api_name}: Respuesta no exitosa (HTTP {response.status_code}) en {endpoint}."
+                )
+                return None
+        except requests.RequestException as exc:
+            if intento < max_retries:
+                delay = base_delay * (2 ** intento)
+                logger.debug("Excepción de red en %s [%s]: %s. Reintentando en %.2fs...", api_name, endpoint, exc, delay)
+                time.sleep(delay)
+            else:
+                logger.warning("Fallo de conexión persistente con %s en '%s': %s", api_name, endpoint, exc)
+                registrar_evento_diagnostico(
+                    api_name,
+                    endpoint,
+                    None,
+                    f"{api_name}: Error de conexión o timeout en {endpoint}: {exc}"
+                )
+                return None
+        except Exception as exc:
+            logger.warning("Error inesperado en %s [%s]: %s", api_name, endpoint, exc)
+            registrar_evento_diagnostico(
+                api_name,
+                endpoint,
+                None,
+                f"{api_name}: Excepción interna en {endpoint}: {exc}"
+            )
+            return None
+
+    return last_response
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. CLIENTES Y SESIONES HTTP DEFENSIVAS (FINNHUB Y FMP API)
@@ -53,7 +179,8 @@ def _finnhub_get(
 ) -> Optional[Union[Dict[str, Any], List[Any]]]:
     """
     Realiza una petición GET segura y resiliente a la API de Finnhub.
-    Maneja defensivamente códigos HTTP 429 (Rate Limit), 401/403 (Auth) y timeouts.
+    Maneja defensivamente códigos HTTP 429 (Rate Limit), 401/403 (Auth) y timeouts
+    utilizando _fetch_with_retry con retroceso exponencial.
     """
     url = f"{FINNHUB_BASE_URL}/{endpoint.lstrip('/')}"
     query_params = dict(params or {})
@@ -72,27 +199,19 @@ def _finnhub_get(
     if key_to_use and "token" not in query_params:
         query_params["token"] = key_to_use
 
-    try:
-        session = obtener_session_finnhub(api_key=key_to_use)
-        response = session.get(url, params=query_params, timeout=timeout)
+    session = obtener_session_finnhub(api_key=key_to_use)
+    response = _fetch_with_retry(
+        lambda: session.get(url, params=query_params, timeout=timeout),
+        api_name="Finnhub",
+        endpoint=endpoint,
+    )
 
-        if response.status_code == 200:
-            try:
-                return response.json()
-            except Exception:
-                return None
-        elif response.status_code == 429:
-            logger.warning("Finnhub API Rate Limit Exceeded (HTTP 429).")
+    if response is not None and response.status_code == 200:
+        try:
+            return response.json()
+        except Exception:
             return None
-        elif response.status_code in (401, 403):
-            logger.warning("Finnhub API Key no válida o no autorizada (HTTP %s).", response.status_code)
-            return None
-        else:
-            logger.warning("Finnhub API respondió con código HTTP %s para %s", response.status_code, endpoint)
-            return None
-    except (requests.RequestException, Exception) as exc:
-        logger.debug("Excepción durante petición GET a Finnhub [%s]: %s", endpoint, exc)
-        return None
+    return None
 
 
 class FinnhubClient:
@@ -194,7 +313,8 @@ def _fmp_get(
 ) -> Optional[Union[Dict[str, Any], List[Any]]]:
     """
     Realiza una petición GET segura y resiliente a la API de Financial Modeling Prep (FMP).
-    Maneja defensivamente códigos HTTP 429 (Rate Limit), 401/403 (Auth/Forbidden) y timeouts.
+    Maneja defensivamente códigos HTTP 429 (Rate Limit), 401/403 (Auth/Forbidden) y timeouts
+    utilizando _fetch_with_retry con retroceso exponencial.
     """
     url = f"{FMP_BASE_URL}/{endpoint.lstrip('/')}"
     query_params = dict(params or {})
@@ -213,34 +333,26 @@ def _fmp_get(
     if key_to_use and "apikey" not in query_params:
         query_params["apikey"] = key_to_use
 
-    try:
-        session = obtener_session_fmp(api_key=key_to_use)
-        response = session.get(url, params=query_params, timeout=timeout)
+    session = obtener_session_fmp(api_key=key_to_use)
+    response = _fetch_with_retry(
+        lambda: session.get(url, params=query_params, timeout=timeout),
+        api_name="FMP",
+        endpoint=endpoint,
+    )
 
-        if response.status_code == 200:
-            try:
-                return response.json()
-            except Exception:
-                return None
-        elif response.status_code == 429:
-            logger.warning("FMP API Rate Limit Exceeded (HTTP 429).")
+    if response is not None and response.status_code == 200:
+        try:
+            return response.json()
+        except Exception:
             return None
-        elif response.status_code in (401, 403):
-            logger.warning("FMP API Key no válida o no autorizada (HTTP %s).", response.status_code)
-            return None
-        else:
-            logger.warning("FMP API respondió con código HTTP %s para %s", response.status_code, endpoint)
-            return None
-    except (requests.RequestException, Exception) as exc:
-        logger.debug("Excepción durante petición GET a FMP [%s]: %s", endpoint, exc)
-        return None
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1.C ENDPOINTS CON CACHÉ FMP API (ttl=3600)
+# 1.C ENDPOINTS CON CACHÉ FMP API (ttl=3600, show_spinner=False)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=FMP_CACHE_TTL)
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
 def fetch_fmp_income_statement(symbol: str, api_key: str = "", limit: int = 5) -> List[Dict[str, Any]]:
     """Income Statement (5 años / períodos) desde Financial Modeling Prep."""
     symbol = str(symbol).upper().strip()
@@ -250,7 +362,7 @@ def fetch_fmp_income_statement(symbol: str, api_key: str = "", limit: int = 5) -
     return res if isinstance(res, list) else []
 
 
-@st.cache_data(ttl=FMP_CACHE_TTL)
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
 def fetch_fmp_balance_sheet(symbol: str, api_key: str = "", limit: int = 5) -> List[Dict[str, Any]]:
     """Balance Sheet (5 años / períodos) desde Financial Modeling Prep."""
     symbol = str(symbol).upper().strip()
@@ -260,7 +372,7 @@ def fetch_fmp_balance_sheet(symbol: str, api_key: str = "", limit: int = 5) -> L
     return res if isinstance(res, list) else []
 
 
-@st.cache_data(ttl=FMP_CACHE_TTL)
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
 def fetch_fmp_cash_flow(symbol: str, api_key: str = "", limit: int = 5) -> List[Dict[str, Any]]:
     """Cash Flow Statement (5 años / períodos) desde Financial Modeling Prep."""
     symbol = str(symbol).upper().strip()
@@ -270,7 +382,7 @@ def fetch_fmp_cash_flow(symbol: str, api_key: str = "", limit: int = 5) -> List[
     return res if isinstance(res, list) else []
 
 
-@st.cache_data(ttl=FMP_CACHE_TTL)
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
 def fetch_fmp_ratios_ttm(symbol: str, api_key: str = "") -> Dict[str, Any]:
     """Ratios TTM desde Financial Modeling Prep."""
     symbol = str(symbol).upper().strip()
@@ -282,7 +394,7 @@ def fetch_fmp_ratios_ttm(symbol: str, api_key: str = "") -> Dict[str, Any]:
     return res if isinstance(res, dict) else {}
 
 
-@st.cache_data(ttl=FMP_CACHE_TTL)
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
 def fetch_fmp_key_metrics_ttm(symbol: str, api_key: str = "") -> Dict[str, Any]:
     """Key Metrics TTM desde Financial Modeling Prep."""
     symbol = str(symbol).upper().strip()
@@ -294,7 +406,7 @@ def fetch_fmp_key_metrics_ttm(symbol: str, api_key: str = "") -> Dict[str, Any]:
     return res if isinstance(res, dict) else {}
 
 
-@st.cache_data(ttl=FMP_CACHE_TTL)
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
 def fetch_fmp_financial_score(symbol: str, api_key: str = "") -> Dict[str, Any]:
     """Scores de Solvencia y Salud Contable (Altman Z y Piotroski) desde FMP."""
     symbol = str(symbol).upper().strip()
@@ -306,13 +418,37 @@ def fetch_fmp_financial_score(symbol: str, api_key: str = "") -> Dict[str, Any]:
     return res if isinstance(res, dict) else {}
 
 
-@st.cache_data(ttl=FMP_CACHE_TTL)
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
 def fetch_fmp_enterprise_values(symbol: str, api_key: str = "", limit: int = 1) -> Dict[str, Any]:
     """Enterprise Values, market cap, acciones y stock price desde FMP."""
     symbol = str(symbol).upper().strip()
     if not symbol:
         return {}
     res = _fmp_get(f"enterprise-values/{symbol}", params={"limit": limit}, api_key=api_key)
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+        return res[0]
+    return res if isinstance(res, dict) else {}
+
+
+@st.cache_data(ttl=FMP_CACHE_TTL, show_spinner=False)
+def fetch_fmp_company_profile(symbol: str, api_key: str = "") -> Dict[str, Any]:
+    """Perfil corporativo institucional (nombre, sector, industria, descripción, mcap) desde FMP."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return {}
+    res = _fmp_get(f"profile/{symbol}", api_key=api_key)
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+        return res[0]
+    return res if isinstance(res, dict) else {}
+
+
+@st.cache_data(ttl=FINNHUB_CACHE_TTL_QUOTE, show_spinner=False)
+def fetch_fmp_quote(symbol: str, api_key: str = "") -> Dict[str, Any]:
+    """Cotización en tiempo real (precio, previousClose) desde FMP."""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return {}
+    res = _fmp_get(f"quote/{symbol}", api_key=api_key)
     if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
         return res[0]
     return res if isinstance(res, dict) else {}
@@ -507,11 +643,12 @@ def _extraer_serie(
 # 2. COTIZACIONES Y VELAS HISTÓRICAS (FINNHUB)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=FINNHUB_CACHE_TTL_QUOTE)
-def fetch_cotizacion_intradia(ticker: str, finnhub_api_key: str = "") -> Tuple[float, float, pd.DataFrame]:
+@st.cache_data(ttl=FINNHUB_CACHE_TTL_QUOTE, show_spinner=False)
+def fetch_cotizacion_intradia(ticker: str, finnhub_api_key: str = "", fmp_key: str = "", **kwargs: Any) -> Tuple[float, float, pd.DataFrame]:
     """
     Obtiene la cotización en tiempo real y el histórico de 5 años de velas diarias (OHLCV)
-    directamente desde los endpoints `/quote` y `/stock/candle` de Finnhub API.
+    directamente desde los endpoints `/quote` y `/stock/candle` de Finnhub API, con
+    fallback automático y transparente a FMP Quote ante caídas de servicio o límites de tasa.
 
     Normaliza la respuesta a un pandas.DataFrame con columnas estandarizadas:
     ['Open', 'High', 'Low', 'Close', 'Volume'] y DatetimeIndex ('Date').
@@ -524,7 +661,7 @@ def fetch_cotizacion_intradia(ticker: str, finnhub_api_key: str = "") -> Tuple[f
     if not ticker:
         return precio_actual, prev_close, hist
 
-    # CAPA 1: Endpoint Quote en tiempo real
+    # CAPA 1: Endpoint Quote en tiempo real (Finnhub)
     quote_res = _finnhub_get("quote", params={"symbol": ticker}, api_key=finnhub_api_key)
     if isinstance(quote_res, dict) and "c" in quote_res:
         precio_actual = safe_num(quote_res.get("c", 0.0))
@@ -533,7 +670,7 @@ def fetch_cotizacion_intradia(ticker: str, finnhub_api_key: str = "") -> Tuple[f
             diff_d = safe_num(quote_res.get("d", 0.0))
             prev_close = precio_actual - diff_d
 
-    # CAPA 2: Endpoint Stock Candle (5 Años de Velas Diarias)
+    # CAPA 2: Endpoint Stock Candle (5 Años de Velas Diarias Finnhub)
     now_dt = datetime.datetime.now(datetime.timezone.utc)
     to_ts = int(now_dt.timestamp())
     from_ts = int((now_dt - datetime.timedelta(days=5 * 365 + 10)).timestamp())
@@ -581,15 +718,25 @@ def fetch_cotizacion_intradia(ticker: str, finnhub_api_key: str = "") -> Tuple[f
     # CAPA 3 (Fallback FMP): Si Finnhub no devolvió cotización o velas
     if precio_actual == 0.0 or hist.empty:
         try:
-            fmp_quote = _fmp_get(f"quote/{ticker}")
-            if isinstance(fmp_quote, list) and len(fmp_quote) > 0 and isinstance(fmp_quote[0], dict):
-                fq = fmp_quote[0]
+            fmp_quote = fetch_fmp_quote(ticker, api_key=fmp_key)
+            if isinstance(fmp_quote, dict) and fmp_quote:
                 if precio_actual == 0.0:
-                    precio_actual = safe_num(fq.get("price", 0.0))
+                    precio_actual = safe_num(fmp_quote.get("price", 0.0))
                 if prev_close == 0.0:
-                    prev_close = safe_num(fq.get("previousClose", 0.0))
+                    prev_close = safe_num(fmp_quote.get("previousClose", 0.0))
         except Exception as e_fmp:
             logger.debug("FMP quote fallback error para %s: %s", ticker, e_fmp)
+
+    # CAPA 4 (Blindaje Histórico): Si tenemos precio pero hist está vacío (por limitación de velas)
+    if precio_actual > 0.0 and hist.empty:
+        today_dt = pd.to_datetime(datetime.date.today())
+        hist = pd.DataFrame([{
+            "Open": precio_actual,
+            "High": precio_actual,
+            "Low": precio_actual,
+            "Close": precio_actual,
+            "Volume": 0,
+        }], index=pd.DatetimeIndex([today_dt], name="Date"))
 
     return precio_actual, prev_close, hist
 
@@ -711,7 +858,7 @@ class ConsensusWallStreet(tuple):
         )
 
 
-@st.cache_data(ttl=FINNHUB_CACHE_TTL_METRICS)
+@st.cache_data(ttl=FINNHUB_CACHE_TTL_METRICS, show_spinner=False)
 def obtener_consenso_wall_street(
     ticker: str,
     finnhub_api_key: str = "",
@@ -719,6 +866,7 @@ def obtener_consenso_wall_street(
     metrics_dict: Optional[Dict[str, Any]] = None,
     _yf_info: Optional[Dict[str, Any]] = None,
     yf_info: Optional[Dict[str, Any]] = None,
+    _finnhub_client: Optional[Any] = None,
     finnhub_client: Optional[Any] = None,
     fmp_api_key: str = "",
 ) -> ConsensusWallStreet:
@@ -889,7 +1037,7 @@ def obtener_consenso_wall_street(
     )
 
 
-@st.cache_data(ttl=FINNHUB_CACHE_TTL_METRICS)
+@st.cache_data(ttl=FINNHUB_CACHE_TTL_METRICS, show_spinner=False)
 def fetch_datos_fundamentales(
     ticker: str,
     finnhub_api_key: str = "",
@@ -941,13 +1089,14 @@ def fetch_datos_fundamentales(
     finnhub_client = FinnhubClient(api_key=finnhub_key)
 
     # 1. Consultas concurrentes a FMP y Finnhub
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=9) as executor:
         # Finnhub
         f_prof = executor.submit(_finnhub_get, "stock/profile2", {"symbol": ticker}, finnhub_key)
         f_metric = executor.submit(_finnhub_get, "stock/metric", {"symbol": ticker, "metric": "all"}, finnhub_key)
         f_target = executor.submit(finnhub_client.price_target, ticker)
         f_trends = executor.submit(finnhub_client.recommendation_trends, ticker)
         # FMP
+        f_fmp_prof = executor.submit(fetch_fmp_company_profile, ticker, fmp_key)
         f_fmp_inc = executor.submit(fetch_fmp_income_statement, ticker, fmp_key, 5)
         f_fmp_bs = executor.submit(fetch_fmp_balance_sheet, ticker, fmp_key, 5)
         f_fmp_cf = executor.submit(fetch_fmp_cash_flow, ticker, fmp_key, 5)
@@ -960,6 +1109,11 @@ def fetch_datos_fundamentales(
             prof_data = f_prof.result(timeout=10.0) or {}
         except Exception:
             prof_data = {}
+
+        try:
+            fmp_prof_data = f_fmp_prof.result(timeout=10.0) or {}
+        except Exception:
+            fmp_prof_data = {}
 
         try:
             metric_data = f_metric.result(timeout=10.0) or {}
@@ -1011,7 +1165,7 @@ def fetch_datos_fundamentales(
         except Exception:
             fmp_ev_list = []
 
-    # 2. Procesamiento de Perfil y Acciones (Finnhub + FMP EV)
+    # 2. Procesamiento de Perfil y Acciones (Finnhub + FMP EV + FMP Profile)
     mcap_m = safe_num(prof_data.get("marketCapitalization", 0.0))
     shares_m = safe_num(prof_data.get("shareOutstanding", 0.0))
 
@@ -1025,9 +1179,14 @@ def fetch_datos_fundamentales(
         if mcap <= 0:
             mcap = safe_num(ev_item.get("marketCapitalization"), 0.0)
 
-    long_name = prof_data.get("name", ticker)
-    industry_raw = prof_data.get("finnhubIndustry", "General")
+    if mcap <= 0 and isinstance(fmp_prof_data, dict):
+        mcap = safe_num(fmp_prof_data.get("mktCap"), 0.0)
+
+    long_name = prof_data.get("name") or (fmp_prof_data.get("companyName") if isinstance(fmp_prof_data, dict) else "") or ticker
+    industry_raw = prof_data.get("finnhubIndustry") or (fmp_prof_data.get("industry") if isinstance(fmp_prof_data, dict) else "") or "General"
     sector_std = _map_gics_sector(industry_raw)
+    if sector_std == "General" and isinstance(fmp_prof_data, dict) and fmp_prof_data.get("sector"):
+        sector_std = _map_gics_sector(fmp_prof_data.get("sector"))
 
     metrics_dict = metric_data.get("metric", {}) if isinstance(metric_data, dict) else {}
     series_dict = metric_data.get("series", {}).get("annual", {}) if isinstance(metric_data, dict) else {}
@@ -1543,6 +1702,11 @@ def fetch_datos_fundamentales(
         "altmanZScore": altman_z_val,
         "piotroskiScore": piotroski_val,
         "fmp_financial_score": fmp_s,
+        "stockPrice": safe_num(prof_data.get("stockPrice") or (fmp_prof_data.get("price") if isinstance(fmp_prof_data, dict) else 0.0), 0.0),
+        "longBusinessSummary": prof_data.get("description") or (fmp_prof_data.get("description") if isinstance(fmp_prof_data, dict) else "") or "",
+        "website": prof_data.get("weburl") or (fmp_prof_data.get("website") if isinstance(fmp_prof_data, dict) else "") or "",
+        "currency": prof_data.get("currency") or (fmp_prof_data.get("currency") if isinstance(fmp_prof_data, dict) else "") or "USD",
+        "country": prof_data.get("country") or (fmp_prof_data.get("country") if isinstance(fmp_prof_data, dict) else "") or "US",
     })
 
     claves_criticas = [
@@ -1563,7 +1727,7 @@ def fetch_datos_fundamentales(
 # 4. NOTICIAS CORPORATIVAS Y MACROECONOMÍA (FINNHUB & FRED)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=FINNHUB_CACHE_TTL_NEWS)
+@st.cache_data(ttl=FINNHUB_CACHE_TTL_NEWS, show_spinner=False)
 def obtener_noticias_financieras(ticker: str, finnhub_api_key: str = "") -> List[Dict[str, str]]:
     """
     Obtiene los titulares y noticias corporativas más recientes para un ticker
@@ -1619,7 +1783,7 @@ def obtener_noticias_financieras(ticker: str, finnhub_api_key: str = "") -> List
     return clean_news
 
 
-@st.cache_data(ttl=FRED_CACHE_TTL)
+@st.cache_data(ttl=FRED_CACHE_TTL, show_spinner=False)
 def obtener_tasa_fred(api_key: str) -> float:
     """Obtiene la tasa del bono del tesoro a 10 años (DGS10) desde la API de FRED."""
     if api_key:
@@ -1632,7 +1796,7 @@ def obtener_tasa_fred(api_key: str) -> float:
     return 4.20
 
 
-@st.cache_data(ttl=FRED_CACHE_TTL)
+@st.cache_data(ttl=FRED_CACHE_TTL, show_spinner=False)
 def obtener_erp_mercado(fred_api_key: str = "", rf_actual: float = 4.25) -> float:
     """
     Calcula la Prima de Riesgo de Mercado (ERP) empírica observada a partir de
@@ -1650,7 +1814,7 @@ def obtener_erp_mercado(fred_api_key: str = "", rf_actual: float = 4.25) -> floa
     return 5.00
 
 
-@st.cache_data(ttl=FRED_CACHE_TTL)
+@st.cache_data(ttl=FRED_CACHE_TTL, show_spinner=False)
 def obtener_rf_tnx(fallback_fred: float = 4.20, finnhub_api_key: str = "") -> float:
     """
     Obtiene la tasa libre de riesgo (R_f).
@@ -1659,7 +1823,7 @@ def obtener_rf_tnx(fallback_fred: float = 4.20, finnhub_api_key: str = "") -> fl
     return val if val > 0 else 4.20
 
 
-@st.cache_data(ttl=FRED_CACHE_TTL)
+@st.cache_data(ttl=FRED_CACHE_TTL, show_spinner=False)
 def obtener_kd_finnhub_fred(
     ticker: str,
     finnhub_api_key: str = "",
@@ -1686,7 +1850,7 @@ def obtener_kd_finnhub_fred(
 obtener_kd_fmp_fred = obtener_kd_finnhub_fred
 
 
-@st.cache_data(ttl=FINNHUB_CACHE_TTL_METRICS)
+@st.cache_data(ttl=FINNHUB_CACHE_TTL_METRICS, show_spinner=False)
 def obtener_datos_dividendos(
     ticker: str, info_dict: Dict[str, Any], finnhub_api_key: str = "", precio_ref: float = 0.0
 ) -> Tuple[float, float, str]:
@@ -1717,7 +1881,7 @@ def obtener_datos_dividendos(
 # 5. ORQUESTADOR CONCURRENTE MAESTRO
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=FINNHUB_CACHE_TTL_QUOTE)
+@st.cache_data(ttl=FINNHUB_CACHE_TTL_QUOTE, show_spinner=False)
 def fetch_datos_concurrente(
     ticker: str, finnhub_key: str = "", fred_key: str = "", fmp_key: str = ""
 ) -> Dict[str, Any]:
@@ -1729,6 +1893,7 @@ def fetch_datos_concurrente(
     - Feed de noticias (Finnhub)
     vía ThreadPoolExecutor para máxima velocidad de respuesta en UI.
     """
+    limpiar_diagnosticos_api()
     with ThreadPoolExecutor(max_workers=4) as executor:
         f_quote = executor.submit(fetch_cotizacion_intradia, ticker, finnhub_key, fmp_key=fmp_key)
         f_funda = executor.submit(fetch_datos_fundamentales, ticker, finnhub_key, fmp_key=fmp_key)
@@ -1765,6 +1930,7 @@ def fetch_datos_concurrente(
         "cf": cf,
         "tasa_fred": tasa_fred,
         "news_data": news_data,
+        "diagnosticos": obtener_diagnosticos_api(),
     }
 
 

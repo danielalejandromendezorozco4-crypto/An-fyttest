@@ -1,6 +1,6 @@
 import math
 import os
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 import unicodedata
 import numpy as np
 import pandas as pd
@@ -247,21 +247,67 @@ class SecretsTuple(tuple):
         return super().__getitem__(item)
 
 
-def cargar_secrets():
+def validar_secrets_configurados(secrets: Optional[SecretsTuple] = None) -> Dict[str, Any]:
+    """
+    Valida la existencia y formato de las API keys críticas (FMP_API_KEY y FINNHUB_API_KEY).
+    Retorna un diccionario de diagnóstico con estados booleanos, lista de errores y avisos.
+    """
+    if secrets is None:
+        secrets = cargar_secrets()
+
+    fmp_k = str(secrets.fmp_key or "").strip()
+    finnhub_k = str(secrets.finnhub_key or "").strip()
+    fred_k = str(secrets.fred_key or "").strip()
+    gemini_k = str(secrets.gemini_key or "").strip()
+
+    placeholders = {"tu_clave_aqui", "your_api_key_here", "none", "null", "api_key", "fmp_key", "finnhub_key", "xxx"}
+
+    fmp_valida = bool(fmp_k and len(fmp_k) >= 8 and fmp_k.lower() not in placeholders)
+    finnhub_valida = bool(finnhub_k and len(finnhub_k) >= 8 and finnhub_k.lower() not in placeholders)
+    fred_valida = bool(fred_k and len(fred_k) >= 8 and fred_k.lower() not in placeholders)
+    gemini_valida = bool(gemini_k and len(gemini_k) >= 8 and gemini_k.lower() not in placeholders)
+
+    errores = []
+    avisos = []
+
+    if not fmp_valida:
+        errores.append("Falta configurar FMP_API_KEY en secrets.toml (o variable de entorno FMP_API_KEY)")
+    if not finnhub_valida:
+        avisos.append("Falta configurar FINNHUB_API_KEY en secrets.toml (módulo de consenso y perfil de mercado estará limitado)")
+
+    return {
+        "fmp_valida": fmp_valida,
+        "finnhub_valida": finnhub_valida,
+        "fred_valida": fred_valida,
+        "gemini_valida": gemini_valida,
+        "errores": errores,
+        "avisos": avisos,
+        "todas_criticas_presentes": fmp_valida and finnhub_valida,
+    }
+
+
+def cargar_secrets() -> SecretsTuple:
     """
     Carga las claves de API necesarias desde st.secrets o variables de entorno (os.environ).
+    Valida existencia y formato de FINNHUB_API_KEY y FMP_API_KEY.
+    Si una clave falta o está vacía, notifica en la interfaz con un mensaje claro
+    sin provocar excepciones no controladas (KeyError / TypeError).
     Retorna SecretsTuple: (gemini_key, fred_key, finnhub_key, fmp_key).
     """
     def _obtener_clave(nombres: list[str]) -> str:
         for nom in nombres:
             try:
                 if hasattr(st, "secrets") and nom in st.secrets and st.secrets[nom]:
-                    return str(st.secrets[nom]).strip()
+                    val = str(st.secrets[nom]).strip()
+                    if val and val.lower() not in ("none", "null", "tu_clave_aqui", "xxx"):
+                        return val
             except Exception:
                 pass
             env_val = os.getenv(nom)
             if env_val and env_val.strip():
-                return env_val.strip()
+                clean_env = env_val.strip()
+                if clean_env.lower() not in ("none", "null", "tu_clave_aqui", "xxx"):
+                    return clean_env
         return ""
 
     gemini_key = _obtener_clave(["GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
@@ -275,15 +321,20 @@ def cargar_secrets():
         if fallback_key:
             fmp_key = fallback_key
 
-    if not gemini_key and not fred_key and not finnhub_key and not fmp_key:
-        try:
-            st.error(
-                "⚠️ Faltan claves en la configuración. Asegúrate de configurar 'FMP_API_KEY', 'FINNHUB_API_KEY', "
-                "'GEMINI_KEY' y 'FRED_KEY' en st.secrets o en tu archivo .env."
-            )
-            st.stop()
-        except Exception:
-            pass
+    # Validación defensiva en interfaz Streamlit (sin lanzar KeyError o TypeError)
+    try:
+        if hasattr(st, "error"):
+            if not fmp_key:
+                st.error("⚠️ Falta configurar FMP_API_KEY en secrets.toml (o variable de entorno FMP_API_KEY). El motor contable requiere esta clave.")
+            if not finnhub_key:
+                st.warning("⚠️ Falta configurar FINNHUB_API_KEY en secrets.toml (o variable de entorno FINNHUB_API_KEY). Consenso de analistas y cotizaciones en tiempo real estarán limitados.")
+            if not gemini_key and not fred_key and not finnhub_key and not fmp_key:
+                st.error(
+                    "❌ No se detectaron claves de API en la configuración. Asegúrate de configurar 'FMP_API_KEY' y 'FINNHUB_API_KEY' "
+                    "en .streamlit/secrets.toml o en las variables de entorno del sistema."
+                )
+    except Exception:
+        pass
 
     return SecretsTuple(gemini_key, fred_key, finnhub_key, fmp_key)
 

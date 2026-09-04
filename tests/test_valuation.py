@@ -985,6 +985,39 @@ class TestRecalibracionFCFFYSupuestosAvanzados(unittest.TestCase):
         self.assertLess(res["valor_intrinseco"], 550.0)
         self.assertNotAlmostEqual(res["valor_intrinseco"], 884.39, delta=100.0)
 
+    def test_dcf_con_ausencia_total_de_consenso_o_multiplos(self):
+        """
+        Verifica que el motor DCF calcule el valor intrínseco de forma robusta
+        incluso ante la ausencia total de consenso de analistas (targetMean = 0, None)
+        o múltiplos de mercado (P/E, PEG = 0).
+        """
+        res = calcular_fcff_valuation(
+            ocf_hist=[100e6, 90e6, 80e6],
+            capex_hist=[20e6, 18e6, 15e6],
+            interest_hist=[5e6, 4e6, 3e6],
+            pretax_hist=[50e6, 45e6, 40e6],
+            taxprov_hist=[10e6, 9e6, 8e6],
+            total_debt=50e6,
+            total_cash=30e6,
+            shares_diluted=10e6,
+            mcap=800e6,
+            beta=1.1,
+            rf=4.25,
+            precio_actual=80.0,
+            revenue_growth_api=0.0,
+            cagr_revenue_hist=0.05,
+            consenso_target=0.0,
+            target_high=0.0,
+            target_low=0.0,
+            num_analysts=0,
+        )
+        self.assertIsNotNone(res)
+        self.assertGreater(res["valor_intrinseco"], 0.0)
+        self.assertGreater(res["enterprise_value"], 0.0)
+        self.assertGreater(res["equity_value"], 0.0)
+        self.assertGreater(res["precio_max_compra"], 0.0)
+        self.assertEqual(res["shares_actuales"], 10e6)
+
 
 if __name__ == "__main__":
     unittest.main()

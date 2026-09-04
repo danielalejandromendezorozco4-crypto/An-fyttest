@@ -10,6 +10,7 @@ from config.settings import (
     SECTOR_BENCHMARKS,
     TOOLTIP_FADE_YEARS,
     cargar_secrets,
+    validar_secrets_configurados,
     obtener_ruta_logo,
     safe_get,
     safe_num,
@@ -64,9 +65,18 @@ def seleccionar_ticker(t):
 # --- INYECCIÓN DE CSS PERSONALIZADO ---
 inyectar_estilos()
 
-# --- AUTENTICACIÓN SECRETS ---
-gemini_key, fred_key, finnhub_key, fmp_key = cargar_secrets()
+# --- AUTENTICACIÓN Y AUDITORÍA DE SECRETS ---
+secrets_actuales = cargar_secrets()
+gemini_key, fred_key, finnhub_key, fmp_key = secrets_actuales
 finnhub_client = FinnhubClient(api_key=finnhub_key)
+
+diag_secrets = validar_secrets_configurados(secrets_actuales)
+if diag_secrets.get("errores"):
+    for err in diag_secrets["errores"]:
+        st.sidebar.error(f"⚠️ {err}")
+if diag_secrets.get("avisos"):
+    for av in diag_secrets["avisos"]:
+        st.sidebar.info(f"ℹ️ {av}")
 
 # --- BÚSQUEDA DE LOGO Y RENDERIZADO SIDEBAR ---
 ruta_logo_detectada = obtener_ruta_logo()
@@ -231,13 +241,47 @@ else:
             cf = datos_mercado["cf"]
             tasa_libre_riesgo = datos_mercado["tasa_fred"]
             news_data_cache = datos_mercado["news_data"]
+            diagnosticos_api = datos_mercado.get("diagnosticos", [])
             
+            # Avisos específicos de degradación o límites temporales de API
+            for diag in diagnosticos_api:
+                st.warning(f"⚠️ {diag.get('detalle', '')}")
+
+            # Fallback defensivo para precio actual si el endpoint quote de Finnhub falló
+            if precio_actual == 0.0 and isinstance(info_estatica, dict):
+                precio_actual = safe_num(
+                    info_estatica.get("stockPrice")
+                    or info_estatica.get("price")
+                    or info_estatica.get("currentPrice")
+                    or (
+                        info_estatica.get("marketCap", 0.0) / info_estatica.get("sharesOutstanding", 1.0)
+                        if safe_num(info_estatica.get("sharesOutstanding", 0.0)) > 0
+                        else 0.0
+                    ),
+                    0.0
+                )
+
+            # Blindaje para histórico si está vacío pero disponemos de precio actual
+            if hist.empty and precio_actual > 0:
+                today_dt = pd.to_datetime(datetime.date.today())
+                hist = pd.DataFrame([{
+                    "Open": precio_actual,
+                    "High": precio_actual,
+                    "Low": precio_actual,
+                    "Close": precio_actual,
+                    "Volume": 0,
+                }], index=pd.DatetimeIndex([today_dt], name="Date"))
+
             info = info_estatica.copy()
             info["currentPrice"] = precio_actual
             info["previousClose"] = prev_close
             
-            if not info or (hist.empty and inc.empty) or precio_actual == 0:
-                st.error("❌ Ticker no encontrado, cuota de Finnhub excedida o problemas de conexión. Verifica el símbolo o tu FINNHUB_API_KEY.")
+            # Verificación defensiva elegante: solo detener si NO hay ningún dato fundamental disponible
+            if (not info and inc.empty and bs.empty) or (precio_actual == 0.0 and inc.empty and bs.empty):
+                st.error(
+                    f"❌ No se pudieron obtener estados financieros ni cotización para '{ticker_input}'. "
+                    "Verifica que el símbolo sea válido o revisa la conectividad y límites de cuota de tus APIs."
+                )
                 st.stop()
 
             # --- EXTRACCIÓN Y NORMALIZACIÓN INSTITUCIONAL TTM ---
