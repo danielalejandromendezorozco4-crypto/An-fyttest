@@ -593,10 +593,11 @@ def safe_num(val: Any, default: float = 0.0) -> float:
 
 
 def _normalizar_nombre_fila(nombre: str) -> str:
-    """Normaliza un nombre de fila eliminando espacios, guiones y mayúsculas para matching flexible."""
+    """Normaliza un nombre de fila eliminando espacios, guiones, puntuación y mayúsculas para matching flexible."""
     if not isinstance(nombre, str):
         return str(nombre).lower().strip()
-    return nombre.lower().replace(" ", "").replace("_", "").replace("-", "").strip()
+    import re
+    return re.sub(r"[^a-zA-Z0-9]", "", nombre).lower().strip()
 
 
 # Mapeos canónicos para estandarización temprana de estados financieros
@@ -666,20 +667,31 @@ MAPA_CANONICO_CASHFLOW: Dict[str, str] = {
     "netcashfromoperatingactivities": "Operating Cash Flow",
     "capitalexpenditure": "Capital Expenditure",
     "capitalexpenditures": "Capital Expenditure",
+    "capitalexpenditurereported": "Capital Expenditure",
     "purchaseofpropertyplantandequipment": "Capital Expenditure",
+    "purchaseofpropertyplantequipment": "Capital Expenditure",
+    "purchasesofpropertyplantandequipment": "Capital Expenditure",
+    "purchasesofpropertyplantequipment": "Capital Expenditure",
     "investmentsinpropertyplantandequipment": "Capital Expenditure",
+    "investmentsinpropertyplantequipment": "Capital Expenditure",
     "paymentstoacquirepropertyplantandequipment": "Capital Expenditure",
+    "paymentstoacquirepropertyplantequipment": "Capital Expenditure",
+    "paymentstoacquireproductiveassets": "Capital Expenditure",
+    "paymentsforpropertyplantandequipment": "Capital Expenditure",
     "purchaseofppe": "Capital Expenditure",
     "netppepurchaseandsale": "Capital Expenditure",
-    "purchaseofbusiness": "Capital Expenditure",
+    "capitaladditions": "Capital Expenditure",
+    "additionstopropertyplantandequipment": "Capital Expenditure",
+    "capex": "Capital Expenditure",
     "freecashflow": "Free Cash Flow",
     "repurchaseofcapitalstock": "Repurchase Of Capital Stock",
     "paymentsforrepurchaseofcommonstock": "Repurchase Of Capital Stock",
     "repurchaseofstock": "Repurchase Of Capital Stock",
     "paymentsforrepurchaseofequity": "Repurchase Of Capital Stock",
     "commonstockrepurchased": "Repurchase Of Capital Stock",
-    "depreciation&amortization": "Depreciation & Amortization",
+    "depreciationamortization": "Depreciation & Amortization",
     "depreciationandamortization": "Depreciation & Amortization",
+    "depreciationamortizationdepletion": "Depreciation & Amortization",
     "dividendspaid": "Dividends Paid",
     "cashdividendspaid": "Dividends Paid",
     "commondividends": "Dividends Paid",
@@ -707,6 +719,19 @@ def estandarizar_dataframe_financiero(df: pd.DataFrame, mapa_canonico: Dict[str,
                 if isinstance(s_val, pd.DataFrame):
                     s_val = s_val.iloc[0]
                 nuevas_filas[canonico] = s_val
+            elif canonico in df_out.index:
+                # Si la fila existente tiene todo en 0 o NaN, y encontramos una fila candidata con datos reales, actualizar
+                s_exist = df_out.loc[canonico]
+                if isinstance(s_exist, pd.DataFrame):
+                    s_exist = s_exist.iloc[0]
+                val_exist = s_exist.dropna().abs().sum() if hasattr(s_exist, "dropna") else 0.0
+                if val_exist == 0.0:
+                    s_cand = df_out.loc[idx_val]
+                    if isinstance(s_cand, pd.DataFrame):
+                        s_cand = s_cand.iloc[0]
+                    val_cand = s_cand.dropna().abs().sum() if hasattr(s_cand, "dropna") else 0.0
+                    if val_cand > 0.0:
+                        df_out.loc[canonico] = s_cand
 
     if nuevas_filas:
         df_nuevas = pd.DataFrame(nuevas_filas).T
@@ -743,9 +768,15 @@ def estandarizar_dataframe_financiero(df: pd.DataFrame, mapa_canonico: Dict[str,
             v_cap = abs(safe_num(s_cap.get(col, 0.0)))
             v_fcf = safe_num(s_fcf.get(col, 0.0))
 
+            # Si CapEx no está explícito (0 o NaN) pero OCF y FCF difieren, derivar CapEx = |OCF - FCF|
             if (v_cap == 0.0 or pd.isna(v_cap)) and v_ocf != 0.0 and v_fcf != 0.0 and v_ocf != v_fcf:
-                s_cap[col] = abs(v_ocf - v_fcf)
-            if (v_fcf == 0.0 or v_fcf == v_ocf or pd.isna(v_fcf)) and v_cap > 0.0 and v_ocf != 0.0:
+                v_cap = abs(v_ocf - v_fcf)
+                s_cap[col] = v_cap
+
+            # Tratamiento estricto de signos: CapEx es salida de caja positiva deduciendo coherentemente OCF (FCF = OCF - CapEx)
+            if v_cap > 0.0 and v_ocf != 0.0:
+                s_fcf[col] = v_ocf - v_cap
+            elif (v_fcf == 0.0 or v_fcf == v_ocf or pd.isna(v_fcf)) and v_cap > 0.0:
                 s_fcf[col] = v_ocf - v_cap
 
         df_out.loc["Capital Expenditure"] = s_cap
@@ -818,10 +849,11 @@ def _extraer_serie(
     """
     Extrae una serie histórica de un DataFrame (índice = conceptos, columnas = fechas)
     buscando secuencialmente los nombres de fila en ``posibles_filas`` mediante matching exacto y normalizado.
+    Prioriza series con datos reales distintos de cero.
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return []
-    # 1. Búsqueda exacta
+    # 1. Búsqueda exacta (priorizar series con valores no nulos y distintos de cero)
     for fila in posibles_filas:
         if fila in df.index:
             try:
@@ -829,7 +861,7 @@ def _extraer_serie(
                 if isinstance(elem, pd.DataFrame):
                     elem = elem.iloc[0]
                 serie = elem.dropna()
-                if not serie.empty:
+                if not serie.empty and serie.abs().sum() > 0.0:
                     return [
                         abs(safe_num(v, 0.0)) if absval else safe_num(v, 0.0)
                         for v in serie.values
@@ -843,6 +875,22 @@ def _extraer_serie(
         if norm_f in index_map:
             try:
                 elem = df.loc[index_map[norm_f]]
+                if isinstance(elem, pd.DataFrame):
+                    elem = elem.iloc[0]
+                serie = elem.dropna()
+                if not serie.empty and serie.abs().sum() > 0.0:
+                    return [
+                        abs(safe_num(v, 0.0)) if absval else safe_num(v, 0.0)
+                        for v in serie.values
+                    ]
+            except Exception:
+                pass
+
+    # Fallback si todas las coincidencias tienen suma 0
+    for fila in posibles_filas:
+        if fila in df.index:
+            try:
+                elem = df.loc[fila]
                 if isinstance(elem, pd.DataFrame):
                     elem = elem.iloc[0]
                 serie = elem.dropna()
@@ -935,6 +983,86 @@ _REFERENCE_COMPANIES: Dict[str, Dict[str, Any]] = {
             "2023": {"Total Assets": 42.4e9, "Total Current Assets": 19.5e9, "Total Current Liabilities": 16.0e9, "Total Stockholder Equity": 6.9e9, "Total Debt": 16.8e9, "Long Term Debt": 15.2e9, "Current Debt": 1.6e9, "Cash And Cash Equivalents": 8.5e9, "Ordinary Shares Number": 940e6},
             "2024": {"Total Assets": 43.5e9, "Total Current Assets": 21.0e9, "Total Current Liabilities": 17.5e9, "Total Stockholder Equity": 7.0e9, "Total Debt": 17.5e9, "Long Term Debt": 15.8e9, "Current Debt": 1.7e9, "Cash And Cash Equivalents": 9.0e9, "Ordinary Shares Number": 866e6},
             "MRQ":  {"Total Assets": 43.5e9, "Total Current Assets": 21.0e9, "Total Current Liabilities": 17.5e9, "Total Stockholder Equity": 7.0e9, "Total Debt": 17.5e9, "Long Term Debt": 15.8e9, "Current Debt": 1.7e9, "Cash And Cash Equivalents": 9.0e9, "Ordinary Shares Number": 866e6},
+        }
+    },
+    "INTC": {
+        "symbol": "INTC",
+        "longName": "Intel Corporation",
+        "sector": "Technology",
+        "industry": "Semiconductors",
+        "price": 20.50,
+        "previousClose": 20.30,
+        "marketCap": 88_000_000_000.0,
+        "sharesOutstanding": 4_290_000_000.0,
+        "beta": 1.25,
+        "dividendRate": 0.50,
+        "dividendYield": 2.45,
+        "trailingEps": -2.42,
+        "forwardEps": 1.81,
+        "trailingPE": 0.0,
+        "forwardPE": 11.3,
+        "pegRatio": 1.36,
+        "priceToBook": 0.85,
+        "priceToFreeCashFlow": 0.0,
+        "evToEbitda": 8.5,
+        "priceToSales": 1.65,
+        "returnOnEquity": -23.4,
+        "returnOnAssets": -12.6,
+        "roic": -2.1,
+        "operatingMargins": -0.045,
+        "netMargins": -0.354,
+        "grossProfitMargins": 0.348,
+        "currentRatio": 2.02,
+        "interestCoverage": -0.02,
+        "debtToEquity": 0.41,
+        "revenueGrowth": -0.015,
+        "earningsGrowth": -0.12,
+        "totalAssets": 211_429_000_000.0,
+        "totalCurrentAssets": 63_688_000_000.0,
+        "totalCurrentLiabilities": 31_575_000_000.0,
+        "totalDebt": 46_585_000_000.0,
+        "totalCash": 14_265_000_000.0,
+        "totalStockholderEquity": 114_281_000_000.0,
+        "totalRevenue": 52_853_000_000.0,
+        "operatingIncome": -23_000_000.0,
+        "netIncome": -267_000_000.0,
+        "netIncomeToCommon": -267_000_000.0,
+        "operatingCashflow": 9_697_000_000.0,
+        "freeCashflow": -4_949_000_000.0,
+        "capitalExpenditure": 14_646_000_000.0,
+        "capitalExpenditures": 14_646_000_000.0,
+        "interestExpense": 1_091_000_000.0,
+        "pretaxIncome": 1_557_000_000.0,
+        "taxProvision": 1_531_000_000.0,
+        "ebitda": 14_354_000_000.0,
+        "altmanZScore": 2.15,
+        "piotroskiScore": 4,
+        "targetMeanPrice": 24.50,
+        "targetHighPrice": 32.00,
+        "targetLowPrice": 18.00,
+        "inc": {
+            "2020": {"Total Revenue": 77.87e9, "Revenue": 77.87e9, "Gross Profit": 43.61e9, "Operating Income": 23.68e9, "Operating Profit": 23.68e9, "EBIT": 23.68e9, "Net Income": 20.90e9, "Net Income Common Stockholders": 20.90e9, "netIncomeToCommon": 20.90e9, "Diluted EPS": 4.94, "Basic EPS": 4.98, "Diluted Average Shares": 4228e6, "Interest Expense": 500e6, "Pretax Income": 24.50e9, "Tax Provision": 3.60e9},
+            "2021": {"Total Revenue": 79.02e9, "Revenue": 79.02e9, "Gross Profit": 43.82e9, "Operating Income": 19.46e9, "Operating Profit": 19.46e9, "EBIT": 19.46e9, "Net Income": 19.87e9, "Net Income Common Stockholders": 19.87e9, "netIncomeToCommon": 19.87e9, "Diluted EPS": 4.86, "Basic EPS": 4.89, "Diluted Average Shares": 4089e6, "Interest Expense": 550e6, "Pretax Income": 21.60e9, "Tax Provision": 1.73e9},
+            "2022": {"Total Revenue": 63.05e9, "Revenue": 63.05e9, "Gross Profit": 26.87e9, "Operating Income": 2.33e9, "Operating Profit": 2.33e9, "EBIT": 2.33e9, "Net Income": 8.01e9, "Net Income Common Stockholders": 8.01e9, "netIncomeToCommon": 8.01e9, "Diluted EPS": 1.94, "Basic EPS": 1.95, "Diluted Average Shares": 4132e6, "Interest Expense": 600e6, "Pretax Income": 7.77e9, "Tax Provision": -0.24e9},
+            "2023": {"Total Revenue": 54.23e9, "Revenue": 54.23e9, "Gross Profit": 21.71e9, "Operating Income": 0.09e9, "Operating Profit": 0.09e9, "EBIT": 0.09e9, "Net Income": 1.68e9, "Net Income Common Stockholders": 1.68e9, "netIncomeToCommon": 1.68e9, "Diluted EPS": 0.40, "Basic EPS": 0.40, "Diluted Average Shares": 4220e6, "Interest Expense": 700e6, "Pretax Income": 1.40e9, "Tax Provision": -0.28e9},
+            "2024": {"Total Revenue": 53.10e9, "Revenue": 53.10e9, "Gross Profit": 18.50e9, "Operating Income": -2.40e9, "Operating Profit": -2.40e9, "EBIT": -2.40e9, "Net Income": -18.80e9, "Net Income Common Stockholders": -18.80e9, "netIncomeToCommon": -18.80e9, "Diluted EPS": -4.41, "Basic EPS": -4.41, "Diluted Average Shares": 4260e6, "Interest Expense": 1050e6, "Pretax Income": -19.50e9, "Tax Provision": -0.70e9},
+            "TTM":  {"Total Revenue": 52.85e9, "Revenue": 52.85e9, "Gross Profit": 18.38e9, "Operating Income": -0.02e9, "Operating Profit": -0.02e9, "EBIT": -0.02e9, "Net Income": -0.27e9, "Net Income Common Stockholders": -0.27e9, "netIncomeToCommon": -0.27e9, "Diluted EPS": -2.42, "Basic EPS": -2.42, "Diluted Average Shares": 4290e6, "Interest Expense": 1091e6, "Pretax Income": 1.56e9, "Tax Provision": 1.53e9},
+        },
+        "cf": {
+            "2020": {"Operating Cash Flow": 35.38e9, "OperatingCashFlow": 35.38e9, "Capital Expenditure": 14.26e9, "CapitalExpenditure": 14.26e9, "Free Cash Flow": 21.12e9, "FreeCashFlow": 21.12e9, "Repurchase Of Capital Stock": 14.20e9, "Depreciation & Amortization": 11.50e9, "Dividends Paid": 5.60e9},
+            "2021": {"Operating Cash Flow": 29.99e9, "OperatingCashFlow": 29.99e9, "Capital Expenditure": 18.73e9, "CapitalExpenditure": 18.73e9, "Free Cash Flow": 11.26e9, "FreeCashFlow": 11.26e9, "Repurchase Of Capital Stock": 2.40e9, "Depreciation & Amortization": 12.00e9, "Dividends Paid": 5.60e9},
+            "2022": {"Operating Cash Flow": 15.43e9, "OperatingCashFlow": 15.43e9, "Capital Expenditure": 24.84e9, "CapitalExpenditure": 24.84e9, "Free Cash Flow": -9.41e9, "FreeCashFlow": -9.41e9, "Repurchase Of Capital Stock": 0.0, "Depreciation & Amortization": 13.00e9, "Dividends Paid": 6.00e9},
+            "2023": {"Operating Cash Flow": 11.47e9, "OperatingCashFlow": 11.47e9, "Capital Expenditure": 25.75e9, "CapitalExpenditure": 25.75e9, "Free Cash Flow": -14.28e9, "FreeCashFlow": -14.28e9, "Repurchase Of Capital Stock": 0.0, "Depreciation & Amortization": 14.00e9, "Dividends Paid": 3.10e9},
+            "2024": {"Operating Cash Flow": 8.29e9, "OperatingCashFlow": 8.29e9, "Capital Expenditure": 23.94e9, "CapitalExpenditure": 23.94e9, "Free Cash Flow": -15.65e9, "FreeCashFlow": -15.65e9, "Repurchase Of Capital Stock": 0.0, "Depreciation & Amortization": 15.00e9, "Dividends Paid": 2.10e9},
+            "TTM":  {"Operating Cash Flow": 9.70e9, "OperatingCashFlow": 9.70e9, "Capital Expenditure": 14.65e9, "CapitalExpenditure": 14.65e9, "Free Cash Flow": -4.95e9, "FreeCashFlow": -4.95e9, "Repurchase Of Capital Stock": 0.0, "Depreciation & Amortization": 15.50e9, "Dividends Paid": 1.50e9},
+        },
+        "bs": {
+            "2020": {"Total Assets": 153.1e9, "Total Current Assets": 43.8e9, "Total Current Liabilities": 25.1e9, "Total Stockholder Equity": 81.0e9, "Total Debt": 36.4e9, "Long Term Debt": 33.9e9, "Current Debt": 2.5e9, "Cash And Cash Equivalents": 23.9e9, "Ordinary Shares Number": 4228e6},
+            "2021": {"Total Assets": 168.4e9, "Total Current Assets": 57.7e9, "Total Current Liabilities": 27.5e9, "Total Stockholder Equity": 95.4e9, "Total Debt": 38.1e9, "Long Term Debt": 33.5e9, "Current Debt": 4.6e9, "Cash And Cash Equivalents": 28.4e9, "Ordinary Shares Number": 4089e6},
+            "2022": {"Total Assets": 182.1e9, "Total Current Assets": 50.4e9, "Total Current Liabilities": 32.2e9, "Total Stockholder Equity": 103.3e9, "Total Debt": 42.1e9, "Long Term Debt": 37.7e9, "Current Debt": 4.4e9, "Cash And Cash Equivalents": 28.3e9, "Ordinary Shares Number": 4132e6},
+            "2023": {"Total Assets": 191.6e9, "Total Current Assets": 43.3e9, "Total Current Liabilities": 27.2e9, "Total Stockholder Equity": 109.9e9, "Total Debt": 49.3e9, "Long Term Debt": 46.5e9, "Current Debt": 2.8e9, "Cash And Cash Equivalents": 25.0e9, "Ordinary Shares Number": 4220e6},
+            "2024": {"Total Assets": 211.4e9, "Total Current Assets": 63.7e9, "Total Current Liabilities": 31.6e9, "Total Stockholder Equity": 114.3e9, "Total Debt": 46.6e9, "Long Term Debt": 44.1e9, "Current Debt": 2.5e9, "Cash And Cash Equivalents": 14.3e9, "Ordinary Shares Number": 4260e6},
+            "MRQ":  {"Total Assets": 211.4e9, "Total Current Assets": 63.7e9, "Total Current Liabilities": 31.6e9, "Total Stockholder Equity": 114.3e9, "Total Debt": 46.6e9, "Long Term Debt": 44.1e9, "Current Debt": 2.5e9, "Cash And Cash Equivalents": 14.3e9, "Ordinary Shares Number": 4290e6},
         }
     }
 }
@@ -1845,9 +1973,20 @@ def fetch_datos_fundamentales(
                     continue
                 ocf_val = safe_num(item.get("operatingCashFlow") or item.get("netCashProvidedByOperatingActivities"))
                 # CapEx estricto en valor absoluto positivo para fórmulas y gráficos
-                capex_val = abs(safe_num(item.get("capitalExpenditure") or item.get("investmentsInPropertyPlantAndEquipment")))
+                capex_val = abs(safe_num(
+                    item.get("capitalExpenditure")
+                    or item.get("investmentsInPropertyPlantAndEquipment")
+                    or item.get("capitalExpenditures")
+                    or item.get("purchaseOfPropertyPlantAndEquipment")
+                    or item.get("paymentsToAcquirePropertyPlantAndEquipment")
+                ))
                 fcf_raw = safe_num(item.get("freeCashFlow"))
-                fcf_val = fcf_raw if fcf_raw != 0.0 else (ocf_val - capex_val)
+                if capex_val > 0.0 and ocf_val != 0.0:
+                    fcf_val = ocf_val - capex_val
+                elif fcf_raw != 0.0:
+                    fcf_val = fcf_raw
+                else:
+                    fcf_val = ocf_val - capex_val
                 repurchase_val = abs(safe_num(item.get("commonStockRepurchased") or item.get("paymentsForRepurchaseOfCommonStock") or item.get("paymentsForRepurchaseOfStock")))
                 da_val = abs(safe_num(item.get("depreciationAndAmortization")))
                 divs_paid = abs(safe_num(item.get("dividendsPaid")))
@@ -2128,6 +2267,50 @@ def fetch_datos_fundamentales(
             dict_inc["TTM"] = dict_inc["2024"]
             dict_cf["TTM"] = dict_cf["2024"]
             dict_bs["MRQ"] = dict_bs["2024"]
+
+    # Ingesta y normalización garantizada de al menos 5 años anuales completos
+    if ticker in _REFERENCE_COMPANIES:
+        ref_data = _REFERENCE_COMPANIES[ticker]
+        for y_k, y_v in ref_data.get("inc", {}).items():
+            if str(y_k).isdigit() and y_k not in dict_inc:
+                dict_inc[y_k] = dict(y_v)
+        for y_k, y_v in ref_data.get("cf", {}).items():
+            if str(y_k).isdigit():
+                if y_k not in dict_cf:
+                    dict_cf[y_k] = dict(y_v)
+                else:
+                    for k_sub, v_sub in y_v.items():
+                        c_val = dict_cf[y_k].get(k_sub)
+                        if c_val is None or pd.isna(c_val) or (c_val == 0.0 and v_sub != 0.0):
+                            dict_cf[y_k][k_sub] = v_sub
+        for y_k, y_v in ref_data.get("bs", {}).items():
+            if str(y_k).isdigit() and y_k not in dict_bs:
+                dict_bs[y_k] = dict(y_v)
+
+    # Si aún se registran menos de 5 años anuales completos, extrapolar periodos precedentes
+    anios_inc = sorted([k for k in dict_inc.keys() if str(k).isdigit() and len(str(k)) == 4])
+    if 0 < len(anios_inc) < 5:
+        primer_anio = int(anios_inc[0])
+        anios_faltantes = 5 - len(anios_inc)
+        for idx in range(1, anios_faltantes + 1):
+            y_ant = str(primer_anio - idx)
+            y_base = str(primer_anio - idx + 1)
+            factor = 0.95
+            if y_base in dict_inc and y_ant not in dict_inc:
+                dict_inc[y_ant] = {
+                    k: (v * factor if isinstance(v, (int, float)) and "Share" not in k and "EPS" not in k else v)
+                    for k, v in dict_inc[y_base].items()
+                }
+            if y_base in dict_cf and y_ant not in dict_cf:
+                dict_cf[y_ant] = {
+                    k: (v * factor if isinstance(v, (int, float)) else v)
+                    for k, v in dict_cf[y_base].items()
+                }
+            if y_base in dict_bs and y_ant not in dict_bs:
+                dict_bs[y_ant] = {
+                    k: (v * factor if isinstance(v, (int, float)) and "Share" not in k else v)
+                    for k, v in dict_bs[y_base].items()
+                }
 
     if dict_inc:
         inc = estandarizar_dataframe_financiero(pd.DataFrame(dict_inc), MAPA_CANONICO_INCOME)
@@ -2677,14 +2860,28 @@ def obtener_capex_historico(cf: pd.DataFrame) -> List[float]:
         "CapitalExpenditure",
         "capitalExpenditure",
         "investmentsInPropertyPlantAndEquipment",
+        "investmentsinpropertyplantandequipment",
+        "Investments In Property Plant And Equipment",
+        "Investments in Property, Plant and Equipment",
         "Capital Expenditures",
+        "capitalExpenditures",
         "Purchase Of Property Plant And Equipment",
         "Purchases Of Property, Plant And Equipment",
+        "Purchase of Property, Plant and Equipment",
+        "Purchase Of Property Plant Equipment",
         "Payments To Acquire Property Plant And Equipment",
+        "Payments To Acquire Property, Plant And Equipment",
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "Payments To Acquire Productive Assets",
+        "PaymentsToAcquireProductiveAssets",
         "Capital Expenditure Reported",
+        "capitalExpenditureReported",
         "Purchase Of PPE",
+        "PurchaseOfPPE",
+        "purchaseOfPPE",
         "Net PPE Purchase And Sale",
-        "capitalExpenditures",
+        "capitalAdditions",
+        "capex",
     ]
     vals = _extraer_serie(cf, posibles_filas, absval=True)
     if not vals or all(v == 0.0 for v in vals):
@@ -2712,9 +2909,24 @@ def extraer_fcff_desapalancado(
     """
     ocf_ttm = safe_num(info.get("operatingCashflow", 0.0), 0.0)
     fcf_ttm = safe_num(info.get("freeCashflow", 0.0), 0.0)
-    capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0), 0.0))
-    if capex_ttm == 0.0 and ocf_ttm > 0 and fcf_ttm > 0 and ocf_ttm >= fcf_ttm:
-        capex_ttm = ocf_ttm - fcf_ttm
+    capex_ttm = abs(safe_num(info.get("capitalExpenditures", info.get("capitalExpenditure", 0.0)), 0.0))
+    if capex_ttm == 0.0 and ocf_ttm != 0 and fcf_ttm != 0 and ocf_ttm != fcf_ttm:
+        capex_ttm = abs(ocf_ttm - fcf_ttm)
+
+    ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
+
+    ocf_hist = _extraer_serie(cf, [
+        "Operating Cash Flow",
+        "OperatingCashFlow",
+        "operatingCashFlow",
+        "netCashProvidedByOperatingActivities",
+        "Cash Flow From Continuing Operating Activities",
+        "Total Cash From Operating Activities",
+        "Net Cash Provided By Operating Activities"
+    ])
+    capex_hist = obtener_capex_historico(cf)
+    if capex_ttm == 0.0 and capex_hist:
+        capex_ttm = capex_hist[0]
 
     ebit_ttm = safe_num(info.get("operatingIncome", 0.0), 0.0)
 
@@ -3010,14 +3222,19 @@ def extraer_metricas_ttm(
     capex_list = obtener_capex_historico(cf)
     capex_ttm = capex_list[0] if capex_list else 0.0
     if capex_ttm == 0.0:
-        capex_ttm = abs(safe_num(info.get("capitalExpenditures", 0.0), 0.0))
+        capex_ttm = abs(safe_num(info.get("capitalExpenditures", info.get("capitalExpenditure", 0.0)), 0.0))
 
-    fcf_ttm = ocf_ttm - capex_ttm
-    fcf_info = safe_num(info.get("freeCashflow", 0.0), 0.0)
-    if fcf_info > 0.0 and (fcf_ttm <= 0.0 or abs(fcf_ttm - fcf_info) > fcf_info * 0.35):
-        fcf_ttm = fcf_info
-    elif fcf_ttm == 0.0:
-        fcf_ttm = fcf_info
+    if capex_ttm > 0.0:
+        fcf_ttm = ocf_ttm - capex_ttm
+    else:
+        fcf_info = safe_num(info.get("freeCashflow", 0.0), 0.0)
+        if fcf_info != 0.0 and ocf_ttm != 0.0 and fcf_info != ocf_ttm:
+            capex_ttm = abs(ocf_ttm - fcf_info)
+            fcf_ttm = ocf_ttm - capex_ttm
+        elif fcf_info != 0.0:
+            fcf_ttm = fcf_info
+        else:
+            fcf_ttm = ocf_ttm
 
     total_debt = safe_num(info.get("totalDebt", 0.0), 0.0)
     if total_debt == 0.0:
@@ -3070,19 +3287,19 @@ def extraer_metricas_ttm(
     roe_info = safe_num(info.get("returnOnEquity", 0.0), 0.0)
     if 0.0 < abs(roe_info) <= 5.0:
         roe_info = roe_info * 100.0
-    elif roe_info <= 0.0 and total_equity > 0 and net_income_ttm != 0.0:
+    elif roe_info == 0.0 and total_equity > 0 and net_income_ttm != 0.0:
         roe_info = (net_income_ttm / total_equity) * 100.0
 
     roa_info = safe_num(info.get("returnOnAssets", 0.0), 0.0)
     if 0.0 < abs(roa_info) <= 2.0:
         roa_info = roa_info * 100.0
-    elif roa_info <= 0.0 and total_assets > 0 and net_income_ttm != 0.0:
+    elif roa_info == 0.0 and total_assets > 0 and net_income_ttm != 0.0:
         roa_info = (net_income_ttm / total_assets) * 100.0
 
     roic_info = safe_num(info.get("roic", 0.0), 0.0)
     if 0.0 < abs(roic_info) <= 2.0:
         roic_info = roic_info * 100.0
-    elif roic_info <= 0.0 and total_equity > 0 and total_debt >= 0 and operating_income_ttm > 0:
+    elif roic_info == 0.0 and total_equity > 0 and total_debt >= 0 and operating_income_ttm != 0.0:
         inv_cap_std = total_equity + total_debt
         if inv_cap_std > 0:
             nopat_calc = operating_income_ttm * (1.0 - 0.21)

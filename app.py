@@ -537,12 +537,35 @@ else:
 
             divergencia_roa = "⚠️ Alerta de Apalancamiento: Brecha extrema entre ROE y ROA." if (roa > 0 and (roe / roa) > 4.0) else ""
             
-            fcf_conv = (fcf_ttm / net_income) if net_income != 0 else 0.0
-            if fcf_conv > 1.0: col_fcfc, msg_fcfc = "🟢", "Genera más dinero líquido que ganancia contable."
-            elif fcf_conv >= 0.8: col_fcfc, msg_fcfc = "🟢", "Flujo de Caja Sano."
-            else: col_fcfc, msg_fcfc = "🔴", "Baja conversión contable a flujo de caja."
+            if net_income <= 0:
+                if fcf_ttm < 0:
+                    fcf_conv = -abs(fcf_ttm / net_income)
+                    val_fcf_conv_str = "Negativo"
+                    col_fcfc, msg_fcfc = "🔴", "Pérdidas contables y quema de flujo de caja libre."
+                else:
+                    fcf_conv = (fcf_ttm / abs(net_income))
+                    val_fcf_conv_str = f"{fcf_conv:.1f}x"
+                    col_fcfc, msg_fcfc = "🟡", "Flujo libre positivo a pesar de pérdidas contables."
+            elif fcf_ttm < 0:
+                fcf_conv = (fcf_ttm / net_income)
+                val_fcf_conv_str = f"{fcf_conv:.1f}x"
+                col_fcfc, msg_fcfc = "🔴", "Quema de flujo de caja libre a pesar de utilidades contables."
+            else:
+                fcf_conv = (fcf_ttm / net_income)
+                val_fcf_conv_str = f"{fcf_conv:.1f}x"
+                if fcf_conv > 1.0:
+                    col_fcfc, msg_fcfc = "🟢", "Genera más dinero líquido que ganancia contable."
+                elif fcf_conv >= 0.8:
+                    col_fcfc, msg_fcfc = "🟢", "Flujo de Caja Sano."
+                else:
+                    col_fcfc, msg_fcfc = "🔴", "Baja conversión contable a flujo de caja."
             
-            alerta_fcf_calidad = f"⚠️ Alerta de Calidad de Flujo: Convierte solo el {fcf_conv*100:.1f}% de utilidades en FCF." if (fcf_conv < 0.8 and net_income > 0) else ""
+            if net_income > 0 and fcf_conv < 0.8:
+                alerta_fcf_calidad = f"⚠️ Alerta de Calidad de Flujo: Convierte solo el {fcf_conv*100:.1f}% de utilidades en FCF."
+            elif net_income <= 0 or fcf_ttm < 0:
+                alerta_fcf_calidad = "⚠️ Alerta de Calidad de Flujo: Flujo de caja libre o utilidad neta en terreno negativo."
+            else:
+                alerta_fcf_calidad = ""
             earnings_growth_val = m_ttm.get("earnings_growth", 0.0)
             if earnings_growth_val is not None and not pd.isna(earnings_growth_val) and earnings_growth_val != 0.0:
                 eps_growth = earnings_growth_val * 100.0 if abs(earnings_growth_val) < 1.0 else earnings_growth_val
@@ -919,7 +942,7 @@ else:
                 c5.metric(f"{col_roic} ROIC", f"{roic:.1f}%", help=h_roic)
                 c6.metric(f"{col_roe} ROE", val_roe, help=h_roe)
                 c7.metric(f"{col_roa} ROA", f"{roa:.1f}%", help=h_roa)
-                c8.metric(f"{col_fcfc} Conv. FCF", f"{fcf_conv:.1f}x", help=h_fcfc)
+                c8.metric(f"{col_fcfc} Conv. FCF", val_fcf_conv_str, help=h_fcfc)
                 c8_fcfy, c9, c9_by, c9_div = st.columns(4)
                 c8_fcfy.metric(f"{col_fcfy} FCF Yield", f"{fcf_yield:.2f}%", help=h_fcfy)
                 c9.metric(f"{col_eps} EPS YoY", eps_growth_str, help=h_eps)
@@ -958,8 +981,12 @@ else:
                                 c for c in cols_anuales
                                 if pd.notna(s_rev.get(c)) and safe_num(s_rev.get(c)) > 0
                             ]
-                            if len(cols_validas_m) > 5:
+                            if len(cols_validas_m) >= 5:
                                 cols_validas_m = cols_validas_m[-5:]
+                            elif len(cols_anuales) >= 5:
+                                cols_validas_m = cols_anuales[-5:]
+                            else:
+                                cols_validas_m = cols_validas_m or cols_anuales
 
                             if cols_validas_m:
                                 x_years = [str(c) for c in cols_validas_m]
@@ -983,6 +1010,8 @@ else:
                                         y=op_pcts,
                                         text=[f"{v:.1f}%" for v in op_pcts],
                                         textposition="outside",
+                                        textfont=dict(size=12, color='#0A192F', family='Trebuchet MS'),
+                                        cliponaxis=False,
                                         marker_color='#0A192F',
                                         customdata=customdata_op,
                                         hovertemplate=(
@@ -1003,6 +1032,8 @@ else:
                                         y=ni_pcts,
                                         text=[f"{v:.1f}%" for v in ni_pcts],
                                         textposition="outside",
+                                        textfont=dict(size=12, color='#0A192F', family='Trebuchet MS'),
+                                        cliponaxis=False,
                                         marker_color='#0284C7',
                                         customdata=customdata_ni,
                                         hovertemplate=(
@@ -1021,9 +1052,11 @@ else:
                                     font=dict(color='#0A192F', family='Trebuchet MS', size=11),
                                     paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='#0A192F', size=11)),
-                                    margin=dict(l=0, r=0, t=30, b=0),
+                                    margin=dict(l=10, r=10, t=35, b=25),
+                                    uniformtext_minsize=11,
+                                    uniformtext_mode='show',
                                     xaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11)),
-                                    yaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11))
+                                    yaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11), automargin=True)
                                 )
                                 st.plotly_chart(fig_m, use_container_width=True)
                             else:
@@ -1071,13 +1104,15 @@ else:
                                 if v_cap > 0.0 and v_ocf != 0.0:
                                     s_fcf[c] = v_ocf - v_cap
 
-                            cols_validas_cf = [
-                                c for c in cols_anuales_cf
-                                if (pd.notna(s_ocf.get(c)) and safe_num(s_ocf.get(c)) != 0) or
-                                   (pd.notna(s_capex.get(c)) and safe_num(s_capex.get(c)) != 0)
-                            ]
-                            if len(cols_validas_cf) > 5:
-                                cols_validas_cf = cols_validas_cf[-5:]
+                            if len(cols_anuales_cf) >= 5:
+                                cols_validas_cf = cols_anuales_cf[-5:]
+                            else:
+                                cols_validas_cf = [
+                                    c for c in cols_anuales_cf
+                                    if (pd.notna(s_ocf.get(c)) and safe_num(s_ocf.get(c)) != 0) or
+                                       (pd.notna(s_capex.get(c)) and safe_num(s_capex.get(c)) != 0) or
+                                       (pd.notna(s_fcf.get(c)) and safe_num(s_fcf.get(c)) != 0)
+                                ]
 
                             if cols_validas_cf:
                                 x_cf_years = [str(c) for c in cols_validas_cf]
@@ -1096,8 +1131,10 @@ else:
                                     name="Flujo Operativo (OCF)",
                                     x=x_cf_years,
                                     y=ocf_nom,
-                                    text=[f"${v:,.0f}" for v in ocf_nom],
+                                    text=[f"-${abs(v):,.0f}" if v < 0 else f"${v:,.0f}" for v in ocf_nom],
                                     textposition="outside",
+                                    textfont=dict(size=12, color='#0A192F', family='Trebuchet MS'),
+                                    cliponaxis=False,
                                     marker_color='#0284C7',
                                     customdata=customdata_ocf,
                                     hovertemplate=(
@@ -1114,8 +1151,10 @@ else:
                                     name="CapEx (Inversión Capital)",
                                     x=x_cf_years,
                                     y=capex_nom,
-                                    text=[f"${v:,.0f}" for v in capex_nom],
+                                    text=[f"-${abs(v):,.0f}" if v < 0 else f"${v:,.0f}" for v in capex_nom],
                                     textposition="outside",
+                                    textfont=dict(size=12, color='#0A192F', family='Trebuchet MS'),
+                                    cliponaxis=False,
                                     marker_color='#F59E0B',
                                     customdata=customdata_capex,
                                     hovertemplate=(
@@ -1132,8 +1171,10 @@ else:
                                     name="Flujo Libre (FCF)",
                                     x=x_cf_years,
                                     y=fcf_nom,
-                                    text=[f"${v:,.0f}" for v in fcf_nom],
+                                    text=[f"-${abs(v):,.0f}" if v < 0 else f"${v:,.0f}" for v in fcf_nom],
                                     textposition="outside",
+                                    textfont=dict(size=12, color='#0A192F', family='Trebuchet MS'),
+                                    cliponaxis=False,
                                     marker_color='#059669',
                                     customdata=customdata_fcf,
                                     hovertemplate=(
@@ -1151,9 +1192,11 @@ else:
                                     font=dict(color='#0A192F', family='Trebuchet MS', size=11),
                                     paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='#0A192F', size=11)),
-                                    margin=dict(l=0, r=0, t=30, b=0),
+                                    margin=dict(l=10, r=10, t=35, b=25),
+                                    uniformtext_minsize=11,
+                                    uniformtext_mode='show',
                                     xaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11)),
-                                    yaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11))
+                                    yaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11), automargin=True)
                                 )
                                 st.plotly_chart(fig_cf, use_container_width=True)
                             else:

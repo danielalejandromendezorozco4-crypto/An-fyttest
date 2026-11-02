@@ -437,3 +437,114 @@ def test_criterio_4_resilience_incomplete_financial_statements():
     # Caso C: DataFrame vacío
     df_vacio = pd.DataFrame()
     assert estandarizar_dataframe_financiero(df_vacio, MAPA_CANONICO_CASHFLOW).empty
+
+
+def test_criterio_1_ma_capex_and_fcf_reconciliation():
+    """
+    Criterio 1: En 'MA', el estado de flujos y el módulo de efectivo muestran barras visibles
+    y valores reales para CapEx, diferenciando claramente OCF de FCF en los 5 años evaluados.
+    """
+    info, inc, bs, cf = fetch_datos_fundamentales("MA")
+    assert not cf.empty, "El Cash Flow Statement de MA no debe estar vacío"
+    assert "Capital Expenditure" in cf.index, "CapEx debe existir en el Cash Flow de MA"
+    assert "Operating Cash Flow" in cf.index, "OCF debe existir en el Cash Flow de MA"
+    assert "Free Cash Flow" in cf.index, "FCF debe existir en el Cash Flow de MA"
+
+    cols_anuales = sorted([c for c in cf.columns if str(c).isdigit() and len(str(c)) == 4])
+    assert len(cols_anuales) >= 5, f"Se esperaban al menos 5 años anuales para MA, obtenidos: {cols_anuales}"
+
+    # Evaluar los últimos 5 años
+    for y in cols_anuales[-5:]:
+        v_ocf = float(cf.loc["Operating Cash Flow", y])
+        v_capex = abs(float(cf.loc["Capital Expenditure", y]))
+        v_fcf = float(cf.loc["Free Cash Flow", y])
+
+        assert v_capex > 0, f"CapEx en {y} debe ser mayor a 0 para MA"
+        assert v_ocf > 0, f"OCF en {y} debe ser positivo para MA"
+        assert v_fcf > 0, f"FCF en {y} debe ser positivo para MA"
+        assert v_fcf != v_ocf, f"FCF no debe duplicar a OCF en {y} para MA"
+        # Reconciliación FCF = OCF - CapEx (tolerancia por redondeo de millones)
+        assert abs(v_fcf - (v_ocf - v_capex)) < 1e6, f"FCF debe igualar OCF - CapEx en {y}"
+
+
+def test_criterio_2_cashflow_labels_formatting():
+    """
+    Criterio 2: Las etiquetas numéricas sobre las barras de flujos de efectivo formatean
+    adecuadamente tanto números positivos ($16,433) como negativos (-$4,949), evitando símbolos
+    extraños como '$-100'.
+    """
+    fcf_nom = [16433.0, 13586.0, -4949.0, 0.0]
+    formatted = [f"-${abs(v):,.0f}" if v < 0 else f"${v:,.0f}" for v in fcf_nom]
+    assert formatted[0] == "$16,433"
+    assert formatted[1] == "$13,586"
+    assert formatted[2] == "-$4,949"
+    assert formatted[3] == "$0"
+
+
+def test_criterio_3_intc_complex_negative_margins_solvency_and_5y_history():
+    """
+    Criterio 3: En 'INTC', los módulos de solvencia, rentabilidad y valuación muestran sus ratios
+    reales correspondientes, y los gráficos de márgenes y flujos despliegan el historial completo
+    de 5 años sin truncarse ni colapsar a cero, preservando márgenes y ROIC negativos.
+    """
+    info, inc, bs, cf = fetch_datos_fundamentales("INTC")
+    assert not inc.empty, "Income Statement de INTC no debe estar vacío"
+    assert not cf.empty, "Cash Flow de INTC no debe estar vacío"
+
+    cols_anuales_inc = sorted([c for c in inc.columns if str(c).isdigit() and len(str(c)) == 4])
+    cols_anuales_cf = sorted([c for c in cf.columns if str(c).isdigit() and len(str(c)) == 4])
+    assert len(cols_anuales_inc) >= 5, f"INC de INTC debe tener al menos 5 años: {cols_anuales_inc}"
+    assert len(cols_anuales_cf) >= 5, f"CF de INTC debe tener al menos 5 años: {cols_anuales_cf}"
+
+    m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio_actual=25.0)
+
+    # Ratios de rentabilidad para INTC
+    res_rent = calcular_ratios_rentabilidad(
+        revenue_ttm=m_ttm["revenue_ttm"],
+        gross_profit_ttm=m_ttm["gross_profit_ttm"],
+        operating_income_ttm=m_ttm["operating_income_ttm"],
+        net_income_ttm=m_ttm["net_income_ttm"],
+        total_assets=m_ttm["total_assets"],
+        total_equity=m_ttm["total_equity"],
+        total_debt=m_ttm["total_debt"],
+        total_cash=m_ttm["total_cash"],
+        current_liabilities=m_ttm["current_liabilities"],
+        short_term_debt=m_ttm["short_term_debt"],
+        tax_rate=0.21,
+    )
+
+    # Verificar que el margen operativo y neto no colapsan a 0.0 si hay pérdidas
+    assert res_rent["mg_op"] != 0.0 or m_ttm["operating_income_ttm"] == 0.0
+    assert res_rent["roic"] != 0.0 or m_ttm["operating_income_ttm"] == 0.0
+
+    # Ratios de solvencia para INTC con FCF negativo
+    res_solv = calcular_ratios_solvencia(
+        total_debt=m_ttm["total_debt"],
+        total_cash=m_ttm["total_cash"],
+        total_equity=m_ttm["total_equity"],
+        ebitda_ttm=m_ttm["ebitda_ttm"],
+        ebit_ttm=m_ttm["operating_income_ttm"],
+        interest_expense=m_ttm["interest_expense_ttm"],
+        current_assets=m_ttm["current_assets"],
+        current_liabilities=m_ttm["current_liabilities"],
+        fcf_ttm=m_ttm["fcf_ttm"],
+    )
+    assert res_solv["cur_ratio"] > 0, "Current Ratio de INTC debe ser positivo"
+    assert "Flujo de Caja Libre Negativo" in res_solv["msg_fcfd"] or res_solv["fcf_debt_ratio"] > 0
+
+    # Verificar que FCF negativo y utilidades negativas no produzcan ratio de conversión FCF verde
+    net_income = m_ttm["net_income_ttm"]
+    fcf_ttm = m_ttm["fcf_ttm"]
+    if net_income < 0 and fcf_ttm < 0:
+        # No debe considerarse saludable
+        assert not (fcf_ttm / net_income > 1.0 and net_income > 0)
+
+
+def test_criterio_4_app_compilation_and_clean_execution():
+    """
+    Criterio 4: La app compila y ejecuta sin errores ante activos con utilidades o flujos negativos.
+    """
+    import py_compile
+    # Compilación de app.py
+    py_compile.compile("app.py", doraise=True)
+

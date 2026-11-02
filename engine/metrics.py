@@ -463,13 +463,13 @@ def calcular_ratios_rentabilidad(
     net_margin = (net_income_ttm / revenue_ttm * 100.0) if revenue_ttm > 0 else 0.0
 
     # 2. ROE (Finviz Standard)
-    if roe_fallback > 0.0:
+    if roe_fallback != 0.0:
         if total_equity > 0 and net_income_ttm != 0.0:
             raw_roe = (net_income_ttm / total_equity) * 100.0
-            if raw_roe > 300.0 or abs(raw_roe - roe_fallback) > 50.0:
+            if abs(raw_roe) > 300.0 or abs(raw_roe - roe_fallback) > 50.0:
                 roe = roe_fallback
             else:
-                roe = raw_roe if raw_roe > 0 else roe_fallback
+                roe = raw_roe
         else:
             roe = roe_fallback
     elif total_equity > 0 and net_income_ttm != 0.0:
@@ -492,13 +492,13 @@ def calcular_ratios_rentabilidad(
         col_roe, msg_roe = "⚪", "ROE No Aplicable (Patrimonio Negativo o sin datos)."
 
     # 3. ROA (Finviz Standard)
-    if roa_fallback > 0.0:
+    if roa_fallback != 0.0:
         if total_assets > 0 and net_income_ttm != 0.0:
             raw_roa = (net_income_ttm / total_assets * 100.0)
-            if raw_roa > 45.0 or abs(raw_roa - roa_fallback) > 15.0:
+            if abs(raw_roa) > 45.0 or abs(raw_roa - roa_fallback) > 15.0:
                 roa = roa_fallback
             else:
-                roa = raw_roa if raw_roa > 0 else roa_fallback
+                roa = raw_roa
         else:
             roa = roa_fallback
     elif total_assets > 0 and net_income_ttm != 0.0:
@@ -520,7 +520,12 @@ def calcular_ratios_rentabilidad(
 
     # 4. ROIC (Finviz / Morningstar Standard: NOPAT TTM / Operating Invested Capital)
     t_rate_clamped = min(max(tax_rate, 0.0), 0.35)
-    nopat = (operating_income_ttm * (1.0 - t_rate_clamped)) if operating_income_ttm > 0 else max(net_income_ttm, 0.0)
+    if operating_income_ttm != 0.0:
+        nopat = operating_income_ttm * (1.0 - t_rate_clamped)
+    elif net_income_ttm != 0.0:
+        nopat = net_income_ttm
+    else:
+        nopat = 0.0
 
     # Capital Invertido Operativo = Activos Totales - Pasivos Circulantes Operativos (Current Liabilities - Short Debt)
     op_cl = max(current_liabilities - short_term_debt, 0.0)
@@ -540,7 +545,12 @@ def calcular_ratios_rentabilidad(
             roic = roic_fallback
         else:
             roic = raw_roic
-    elif raw_roic > 0.0:
+    elif roic_fallback < 0.0:
+        if raw_roic == 0.0 or abs(raw_roic - roic_fallback) > 15.0:
+            roic = roic_fallback
+        else:
+            roic = raw_roic
+    elif raw_roic != 0.0:
         roic = raw_roic
     else:
         roic = 0.0
@@ -658,8 +668,10 @@ def calcular_ratios_solvencia(
             col_cob, msg_cob = "🟢", "Cubre holgadamente sus intereses."
         elif cob_int >= 4.0:
             col_cob, msg_cob = "🟡", "Cobertura de intereses dentro del promedio."
-        else:
+        elif cob_int >= 0.0:
             col_cob, msg_cob = "🔴", "Peligro: El flujo operativo apenas cubre los intereses."
+        else:
+            col_cob, msg_cob = "🔴", "Crítico: EBIT negativo, no cubre gastos por intereses."
 
     # 3. Razón Corriente (Current Ratio - MRQ Standard Finviz)
     if current_ratio_fallback > 0:
@@ -705,8 +717,10 @@ def calcular_ratios_solvencia(
         col_fcfd, msg_fcfd = "🟢", f"Excelente Cobertura: El FCF paga el {fcf_debt_ratio:.1f}% de toda la deuda en un solo año."
     elif fcf_debt_ratio >= 10.0:
         col_fcfd, msg_fcfd = "🟡", f"Cobertura Moderada: El FCF paga el {fcf_debt_ratio:.1f}% de la deuda total."
-    else:
+    elif fcf_debt_ratio >= 0.0:
         col_fcfd, msg_fcfd = "🔴", f"Cobertura Débil: El FCF cubre solo el {fcf_debt_ratio:.1f}% de la deuda total."
+    else:
+        col_fcfd, msg_fcfd = "🔴", f"Flujo de Caja Libre Negativo: Quema de caja ({fcf_debt_ratio:.1f}% de la deuda)."
 
     # 6. Caja por Acción (Finviz Cash/sh) y Caja Neta por Acción
     cash_per_share = (total_cash / shares_current) if shares_current > 0 else 0.0
@@ -869,7 +883,7 @@ def evaluar_veredicto(pts, z_score, net_debt_ebitda, is_fibra_util, cob_int, int
     int_exp = safe_num(int_exp, 0.0)
     roic = safe_num(roic, 0.0)
 
-    is_knockout = (z_score < 1.81) or (net_debt_ebitda > 4.5 and not is_fibra_util) or (cob_int < 2.0 and int_exp > 1) or (0 < roic < 8)
+    is_knockout = (z_score < 1.81) or (net_debt_ebitda > 4.5 and not is_fibra_util) or (cob_int < 2.0 and int_exp > 1) or (roic != 0.0 and roic < 8.0)
     if is_knockout:
         veredicto = "⛔ VETO DE INVERSIÓN (Knockout Activo)"
         color_v = "🔴"
