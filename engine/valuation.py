@@ -761,7 +761,10 @@ def calcular_dcf_intr_ps(
     t_debt = safe_num(total_debt, default=0.0)
     sh_curr = max(safe_num(shares_current, default=1.0), 1.0)
 
-    caja_neta_ps     = ((t_cash - t_debt) / sh_curr) if sh_curr > 0 else 0.0
+    if sh_curr <= 1000 and (abs(t_cash) > 1e6 or abs(t_debt) > 1e6):
+        caja_neta_ps = 0.0
+    else:
+        caja_neta_ps = ((t_cash - t_debt) / sh_curr) if sh_curr > 0 else 0.0
     valor_intrinseco = max(pv_flujos + pv_terminal + caja_neta_ps, 0.0)
 
     es_atractivo = valor_intrinseco >= p_act
