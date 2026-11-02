@@ -18,18 +18,43 @@ def _ejecutar_gemini_con_timeout(modelo_ia, prompt, timeout_segundos=10):
         except FutureTimeoutError:
             raise TimeoutError(f"La consulta a Gemini excedió el tiempo límite de {timeout_segundos}s")
 
-@st.cache_data(ttl=86400)
-def obtener_perfil_corporativo(ticker, nombre, sector, industria, gemini_key, mcap, mg_op, roic):
+_AI_PERFIL_CACHE: dict = {}
+_AI_MACRO_CACHE: dict = {}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def obtener_perfil_corporativo(
+    ticker: str,
+    nombre: str,
+    sector: str,
+    industria: str,
+    gemini_key: str,
+    mcap: float,
+    mg_op: float,
+    roic: float,
+) -> str:
     """
-    Obtiene el perfil corporativo estructurado mediante Gemini AI.
+    Obtiene el perfil corporativo estructurado mediante Gemini AI con persistencia de 24h en caché.
     Soporta reintentos, ordenamiento de modelos y timeout para prevenir bloqueos en Streamlit.
     """
+    ticker = str(ticker or "").upper().strip()
+    nombre = str(nombre or "").strip()
+    sector = str(sector or "").strip()
+    industria = str(industria or "").strip()
+    gemini_key = str(gemini_key or "").strip()
+    mcap = round(float(mcap or 0.0), -6)
+    mg_op = round(float(mg_op or 0.0), 1)
+    roic = round(float(roic or 0.0), 1)
+
+    cache_key = (ticker, nombre, sector, industria, mcap, mg_op, roic)
+    if cache_key in _AI_PERFIL_CACHE:
+        return _AI_PERFIL_CACHE[cache_key]
+
     fallback_msg = (
         f"⚠️ **Perfil Corporativo no disponible temporalmente:** La consulta a la IA excedió el tiempo o límite de cuota. "
         f"Las métricas cuantitativas de {nombre} ({ticker}) se encuentran cargadas normalmente en el Dashboard."
     )
 
-    if not gemini_key or not isinstance(gemini_key, str) or not gemini_key.strip():
+    if not gemini_key:
         return fallback_msg
 
     prompt = f"""Actúa como un Analista de Equity Research Senior. Genera un Perfil Corporativo y Tesis de Negocio exhaustivo para {nombre} (Ticker: {ticker}), operando en el sector {sector} / {industria}.
@@ -50,7 +75,7 @@ def obtener_perfil_corporativo(ticker, nombre, sector, industria, gemini_key, mc
     Reglas de estilo: Sé estrictamente financiero, profesional y cuantitativo. Usa viñetas internamente para facilitar la lectura. No uses metáforas."""
     
     try:
-        api_key_limpia = gemini_key.strip().replace('"', '').replace("'", "")
+        api_key_limpia = gemini_key.replace('"', '').replace("'", "")
         genai.configure(api_key=api_key_limpia)
         
         try:
@@ -70,7 +95,9 @@ def obtener_perfil_corporativo(ticker, nombre, sector, industria, gemini_key, mc
                         modelo_ia = genai.GenerativeModel(m_name)
                         respuesta = _ejecutar_gemini_con_timeout(modelo_ia, prompt, timeout_segundos=10)
                         if respuesta and respuesta.text:
-                            return respuesta.text.strip()
+                            res_perfil = respuesta.text.strip()
+                            _AI_PERFIL_CACHE[cache_key] = res_perfil
+                            return res_perfil
                     except (TimeoutError, Exception):
                         time.sleep(0.3)
                         continue
@@ -80,18 +107,28 @@ def obtener_perfil_corporativo(ticker, nombre, sector, industria, gemini_key, mc
         return fallback_msg
 
 
-def obtener_analisis_macro_ia(ticker_input, nombre, sector, gemini_key):
+@st.cache_data(ttl=86400, show_spinner=False)
+def obtener_analisis_macro_ia(ticker_input: str, nombre: str, sector: str, gemini_key: str) -> tuple[str, float]:
     """
-    Obtiene el análisis macroeconómico y geopolítico vía Gemini AI.
+    Obtiene el análisis macroeconómico y geopolítico vía Gemini AI con persistencia de 24h en caché.
     Reintenta en caso de error y garantiza un retorno neutro por defecto si la API falla.
     """
+    ticker_input = str(ticker_input or "").upper().strip()
+    nombre = str(nombre or "").strip()
+    sector = str(sector or "").strip()
+    gemini_key = str(gemini_key or "").strip()
+
+    cache_key = (ticker_input, nombre, sector)
+    if cache_key in _AI_MACRO_CACHE:
+        return _AI_MACRO_CACHE[cache_key]
+
     texto_ia_fallback = (
         "El análisis macroeconómico asistido por IA no se encuentra disponible en este momento debido a saturación o cuota de la API. "
         "Se aplicará una calificación macroeconómica neutral por defecto."
     )
     macro_score_fallback = 2.5
 
-    if not gemini_key or not isinstance(gemini_key, str) or not gemini_key.strip():
+    if not gemini_key:
         return texto_ia_fallback, macro_score_fallback
 
     prompt = f"""Actúa como un analista de renta variable corporativa y estratega macroeconómico experto. Elabora un reporte de investigación institucional (Top-Down) sobre la situación actual de {nombre} (Ticker: {ticker_input}) en el sector {sector}.
@@ -142,6 +179,7 @@ def obtener_analisis_macro_ia(ticker_input, nombre, sector, gemini_key):
                             
                             texto_ia_final = '\n'.join(texto_limpio).strip()
                             if texto_ia_final:
+                                _AI_MACRO_CACHE[cache_key] = (texto_ia_final, macro_score)
                                 return texto_ia_final, macro_score
                     except (TimeoutError, Exception):
                         time.sleep(0.3)

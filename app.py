@@ -56,15 +56,50 @@ from services.ai_service import (
 )
 from reports.pdf_generator import generar_pdf_reporte
 
+def calcular_hash_parametros_pdf(data: dict) -> str:
+    """Calcula un hash SHA256 determinista a partir de los parámetros serializables del análisis."""
+    import hashlib
+    claves = (
+        data.get("ticker", ""),
+        data.get("nombre", ""),
+        data.get("sector", ""),
+        data.get("pts", 0),
+        data.get("veredicto", ""),
+        round(float(data.get("v_intr_dcf", 0.0) or 0.0), 2),
+        round(float(data.get("precio_actual", 0.0) or 0.0), 2),
+        round(float(data.get("precio_max_compra", 0.0) or 0.0), 2),
+        round(float(data.get("desc_req", 0.0) or 0.0), 4),
+        round(float(data.get("wacc", 0.0) or 0.0), 4),
+        round(float(data.get("g_term", 0.0) or 0.0), 4),
+        round(float(data.get("roic", 0.0) or 0.0), 2),
+        round(float(data.get("fcf_yield", 0.0) or 0.0), 2),
+        round(float(data.get("tasa_libre_riesgo", 0.0) or 0.0), 2),
+        str(data.get("pe", "")),
+        str(data.get("p_fcf", "")),
+        str(data.get("peg", "")),
+        str(data.get("ev_ebitda", "")),
+        str(data.get("p_s", "")),
+        str(data.get("p_b", "")),
+        str(data.get("texto_ia_final", ""))[:200],
+        str(data.get("perfil_texto", ""))[:200],
+    )
+    return hashlib.sha256(str(claves).encode("utf-8")).hexdigest()
+
+@st.cache_data(show_spinner=False)
+def generar_pdf_reporte_cached(cache_key: str, _analysis_data: dict) -> bytes:
+    """Genera y cachea el archivo binario del reporte PDF institucional evitando ejecuciones redundantes."""
+    return generar_pdf_reporte(_analysis_data)
+
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="An-FyT - Análisis Fundamental Top-Down", layout="wide", page_icon="📈")
 
 # --- MANEJO DE ESTADO GLOBAL PARA DIRECTORIO SECTORIAL ---
-if "ticker_search" not in st.session_state:
+if hasattr(st, "session_state") and "ticker_search" not in st.session_state:
     st.session_state["ticker_search"] = ""
 
 def seleccionar_ticker(t):
-    st.session_state["ticker_search"] = t
+    if hasattr(st, "session_state"):
+        st.session_state["ticker_search"] = t
 
 # --- INYECCIÓN DE CSS PERSONALIZADO ---
 inyectar_estilos()
@@ -105,8 +140,10 @@ with col_btn2:
     limpiar_btn = st.button("🧹", help="Limpiar búsqueda actual", use_container_width=True)
 
 if limpiar_btn:
-    st.session_state["ticker_search"] = ""
-    st.rerun()
+    if hasattr(st, "session_state"):
+        st.session_state["ticker_search"] = ""
+    if hasattr(st, "rerun"):
+        st.rerun()
 
 # INYECCIÓN DE TICKERS RELACIONADOS (PEERS)
 if ticker_input:
@@ -178,8 +215,6 @@ with st.sidebar.expander("⚙️ Supuestos Avanzados DCF", expanded=False):
              "Recomendado: 2.0–3.0% (alineado al PIB nominal global).",
     ) / 100.0
 st.sidebar.markdown("---")
-
-tasa_libre_riesgo = obtener_tasa_fred(fred_key)
 
 # --- FLUJO PRINCIPAL DE RENDERIZADO BIFURCADO ---
 if not ticker_input:
@@ -860,13 +895,10 @@ else:
                 
                 with g_col1:
                     st.write("**Comparativa de Márgenes (5 Años)**")
-                    posibles_rev = ['Total Revenue', 'Operating Revenue', 'Revenue', 'TotalRevenue']
-                    posibles_op = ['Operating Income', 'OperatingIncome', 'Operating Profit', 'EBIT']
-                    posibles_ni = ['Net Income', 'NetIncome', 'Net Income Common Stockholders']
-
-                    row_rev = next((r for r in posibles_rev if r in inc.index), None)
-                    row_op = next((r for r in posibles_op if r in inc.index), None)
-                    row_ni = next((r for r in posibles_ni if r in inc.index), None)
+                    # Acceso directo indexado O(1) a métricas estandarizadas
+                    row_rev = 'Total Revenue' if 'Total Revenue' in inc.index else ('Revenue' if 'Revenue' in inc.index else None)
+                    row_op = 'Operating Income' if 'Operating Income' in inc.index else ('Operating Profit' if 'Operating Profit' in inc.index else None)
+                    row_ni = 'Net Income' if 'Net Income' in inc.index else ('Net Income Common Stockholders' if 'Net Income Common Stockholders' in inc.index else None)
 
                     if not inc.empty and row_rev and row_op and row_ni:
                         try:
@@ -911,13 +943,10 @@ else:
                         st.write("Gráfico de márgenes no disponible para este ticker.")
                 with g_col2:
                     st.write("**Comparativa de Flujos de Efectivo (5 Años - Millones USD)**")
-                    posibles_ocf = ['Operating Cash Flow', 'OperatingCashFlow', 'Cash Flow From Continuing Operating Activities', 'Total Cash From Operating Activities', 'operatingCashFlow', 'netCashProvidedByOperatingActivities']
-                    posibles_fcf = ['Free Cash Flow', 'FreeCashFlow', 'freeCashFlow']
-                    posibles_capex = ['Capital Expenditure', 'CapitalExpenditure', 'Capital Expenditures', 'Purchase Of Property Plant And Equipment', 'capitalExpenditure', 'investmentsInPropertyPlantAndEquipment']
-
-                    row_ocf = next((r for r in posibles_ocf if r in cf.index), None)
-                    row_fcf = next((r for r in posibles_fcf if r in cf.index), None)
-                    row_capex = next((r for r in posibles_capex if r in cf.index), None)
+                    # Acceso directo indexado O(1) a métricas estandarizadas
+                    row_ocf = 'Operating Cash Flow' if 'Operating Cash Flow' in cf.index else None
+                    row_fcf = 'Free Cash Flow' if 'Free Cash Flow' in cf.index else None
+                    row_capex = 'Capital Expenditure' if 'Capital Expenditure' in cf.index else None
 
                     if not cf.empty and (row_ocf or row_fcf):
                         try:
@@ -1052,7 +1081,8 @@ else:
             # --- CONTENIDO DE LA PESTAÑA: NOTICIAS Y CATALIZADORES ---
             with tab_noticias:
                 st.markdown(f"<h2 style='color: #0A192F; font-weight: 700;'>📰 Noticias y Catalizadores Recientes ({ticker_input})</h2>", unsafe_allow_html=True)
-                news_data = news_data_cache if news_data_cache else obtener_noticias_financieras(ticker_input, finnhub_key)
+                # Centralización: reutilizar noticias obtenidas en la carga concurrente inicial sin llamadas secundarias redundantes
+                news_data = news_data_cache if news_data_cache is not None else []
                 
                 if news_data:
                     for n in news_data:
@@ -1181,10 +1211,10 @@ else:
                 "fcff_historico": res_fcff.get("fcff_historico", []),
                 "fcff_g_term":    res_fcff.get("g_term", 0.025),
             }
-            pdf_bytes = generar_pdf_reporte(analysis_data)
+            pdf_cache_key = calcular_hash_parametros_pdf(analysis_data)
             st.download_button(
                 label="📄 Exportar Reporte Institucional Premium (PDF 3 Páginas)",
-                data=pdf_bytes,
+                data=lambda: generar_pdf_reporte_cached(pdf_cache_key, _analysis_data=analysis_data),
                 file_name=f"Reporte_Premium_{ticker_input}.pdf",
                 mime="application/pdf"
             )

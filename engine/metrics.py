@@ -142,65 +142,81 @@ def calcular_buyback_yield(
     sh_prev = 0.0
     repurchase_val = 0.0
 
-    # Método 1: Variación interanual de acciones en circulación
-    for df_sh in [inc, bs]:
-        if isinstance(df_sh, pd.DataFrame) and not df_sh.empty:
-            for fila_sh in [
-                'Basic Average Shares', 'Diluted Average Shares',
-                'Ordinary Shares Number', 'Common Stock',
-                'Weighted Average Shares Diluted', 'Weighted Average Shares Basic'
-            ]:
-                if fila_sh in df_sh.index and len(df_sh.columns) > 1:
-                    try:
-                        s_sh = df_sh.loc[fila_sh].dropna()
-                        if isinstance(s_sh, pd.DataFrame):
-                            s_sh = s_sh.iloc[0]
-                        if len(s_sh) > 1:
-                            col_0 = str(s_sh.index[0])
-                            col_last = str(s_sh.index[-1])
-                            if col_0 > col_last:  # Orden descendente (ej. '2024', '2023', ...)
-                                sh_curr_rep = safe_num(s_sh.iloc[0], 0.0)
-                                sh_prev_rep = safe_num(s_sh.iloc[1], 0.0)
-                            else:  # Orden ascendente (ej. '2020', '2021', ..., '2024')
-                                sh_curr_rep = safe_num(s_sh.iloc[-1], 0.0)
-                                sh_prev_rep = safe_num(s_sh.iloc[-2], 0.0)
+    # Método 1: Variación interanual de acciones en circulación (acceso directo indexado O(1))
+    for df_sh in (inc, bs):
+        if isinstance(df_sh, pd.DataFrame) and not df_sh.empty and len(df_sh.columns) > 1:
+            fila_sh = None
+            if 'Diluted Average Shares' in df_sh.index:
+                fila_sh = 'Diluted Average Shares'
+            elif 'Basic Average Shares' in df_sh.index:
+                fila_sh = 'Basic Average Shares'
+            elif 'Common Stock' in df_sh.index:
+                fila_sh = 'Common Stock'
+            elif 'Ordinary Shares Number' in df_sh.index:
+                fila_sh = 'Ordinary Shares Number'
+            elif 'Weighted Average Shares Diluted' in df_sh.index:
+                fila_sh = 'Weighted Average Shares Diluted'
+            elif 'Weighted Average Shares Basic' in df_sh.index:
+                fila_sh = 'Weighted Average Shares Basic'
 
-                            if sh_prev_rep > 0:
-                                sh_prev = sh_prev_rep
-                                sh_for_by = sh_curr_rep if sh_curr_rep > 0 else (shares_current if shares_current > 0 else sh_prev)
-                                calc_by = ((sh_prev - sh_for_by) / sh_prev) * 100.0
-                                if abs(calc_by) >= 0.01:
-                                    buyback_yield = calc_by
-                                    break
-                    except Exception:
-                        pass
+            if fila_sh:
+                try:
+                    s_sh = df_sh.loc[fila_sh].dropna()
+                    if isinstance(s_sh, pd.DataFrame):
+                        s_sh = s_sh.iloc[0]
+                    if len(s_sh) > 1:
+                        col_0 = str(s_sh.index[0])
+                        col_last = str(s_sh.index[-1])
+                        if col_0 > col_last:  # Orden descendente (ej. '2024', '2023', ...)
+                            sh_curr_rep = safe_num(s_sh.iloc[0], 0.0)
+                            sh_prev_rep = safe_num(s_sh.iloc[1], 0.0)
+                        else:  # Orden ascendente (ej. '2020', '2021', ..., '2024')
+                            sh_curr_rep = safe_num(s_sh.iloc[-1], 0.0)
+                            sh_prev_rep = safe_num(s_sh.iloc[-2], 0.0)
+
+                        if sh_prev_rep > 0:
+                            sh_prev = sh_prev_rep
+                            sh_for_by = sh_curr_rep if sh_curr_rep > 0 else (shares_current if shares_current > 0 else sh_prev)
+                            calc_by = ((sh_prev - sh_for_by) / sh_prev) * 100.0
+                            if abs(calc_by) >= 0.01:
+                                buyback_yield = calc_by
+                                break
+                except Exception:
+                    pass
         if buyback_yield != 0.0:
             break
 
-    # Método 2 (Fallback o complemento si buyback_yield es ~0): Flujo de caja de recompras sobre Market Cap
+    # Método 2 (Fallback o complemento si buyback_yield es ~0): Flujo de caja de recompras sobre Market Cap (O(1))
     if isinstance(cf, pd.DataFrame) and not cf.empty:
-        for fila_rep in [
-            'Repurchase Of Capital Stock', 'Payments For Repurchase Of Common Stock',
-            'Repurchase Of Stock', 'Payments For Repurchase Of Equity', 'Common Stock Repurchased'
-        ]:
-            if fila_rep in cf.index:
-                try:
-                    s_rep = cf.loc[fila_rep].dropna()
-                    if isinstance(s_rep, pd.DataFrame):
-                        s_rep = s_rep.iloc[0]
-                    if not s_rep.empty:
-                        if 'TTM' in s_rep.index:
-                            repurchase_val = abs(safe_num(s_rep['TTM'], 0.0))
+        fila_rep = None
+        if 'Repurchase Of Capital Stock' in cf.index:
+            fila_rep = 'Repurchase Of Capital Stock'
+        elif 'Payments For Repurchase Of Common Stock' in cf.index:
+            fila_rep = 'Payments For Repurchase Of Common Stock'
+        elif 'Common Stock Repurchased' in cf.index:
+            fila_rep = 'Common Stock Repurchased'
+        elif 'Repurchase Of Stock' in cf.index:
+            fila_rep = 'Repurchase Of Stock'
+        elif 'Payments For Repurchase Of Equity' in cf.index:
+            fila_rep = 'Payments For Repurchase Of Equity'
+
+        if fila_rep:
+            try:
+                s_rep = cf.loc[fila_rep].dropna()
+                if isinstance(s_rep, pd.DataFrame):
+                    s_rep = s_rep.iloc[0]
+                if not s_rep.empty:
+                    if 'TTM' in s_rep.index:
+                        repurchase_val = abs(safe_num(s_rep['TTM'], 0.0))
+                    else:
+                        col_0 = str(s_rep.index[0])
+                        col_last = str(s_rep.index[-1])
+                        if col_0 > col_last:
+                            repurchase_val = abs(safe_num(s_rep.iloc[0], 0.0))
                         else:
-                            col_0 = str(s_rep.index[0])
-                            col_last = str(s_rep.index[-1])
-                            if col_0 > col_last:
-                                repurchase_val = abs(safe_num(s_rep.iloc[0], 0.0))
-                            else:
-                                repurchase_val = abs(safe_num(s_rep.iloc[-1], 0.0))
-                        break
-                except Exception:
-                    pass
+                            repurchase_val = abs(safe_num(s_rep.iloc[-1], 0.0))
+            except Exception:
+                pass
 
     if abs(buyback_yield) < 0.05 and repurchase_val > 0 and mcap > 0:
         buyback_yield = (repurchase_val / mcap) * 100.0

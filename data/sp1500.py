@@ -2,6 +2,7 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+from typing import Any, List, Optional
 import streamlit as st
 import pandas as pd
 import requests
@@ -55,19 +56,31 @@ def obtener_directorio_sp1500():
         }
         return pd.DataFrame(datos_fallback)
 
-def obtener_peers(ticker: str, max_peers: int = 3, finnhub_api_key: str = "", finnhub_client: Any = None) -> list[str]:
+_PEERS_CACHE: dict = {}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _obtener_peers_cached(
+    ticker: str,
+    max_peers: int = 3,
+    finnhub_api_key: str = "",
+    _finnhub_client: Any = None,
+) -> List[str]:
     """
-    Busca competidores relacionados consumiendo finnhub_client.company_peers(symbol).
-    Si no hay respuesta de la API o ocurre un error, usa el directorio S&P 1500 como fallback defensivo.
+    Función interna cacheada para buscar competidores relacionados.
+    Parámetro _finnhub_client prefijado con guión bajo para ser ignorado en el hashing de Streamlit.
     """
     ticker = str(ticker or "").upper().strip()
     if not ticker:
         return []
 
+    cache_k = f"{ticker}_{max_peers}"
+    if cache_k in _PEERS_CACHE:
+        return list(_PEERS_CACHE[cache_k])
+
     # Prioridad 1: Finnhub API vía finnhub_client.company_peers
     try:
-        if finnhub_client is not None and hasattr(finnhub_client, "company_peers"):
-            peers_fh = finnhub_client.company_peers(ticker)
+        if _finnhub_client is not None and hasattr(_finnhub_client, "company_peers"):
+            peers_fh = _finnhub_client.company_peers(ticker)
         else:
             from data.financial_fetcher import FinnhubClient
             client = FinnhubClient(api_key=finnhub_api_key)
@@ -76,7 +89,9 @@ def obtener_peers(ticker: str, max_peers: int = 3, finnhub_api_key: str = "", fi
         if peers_fh and isinstance(peers_fh, list):
             clean_peers = [str(p).upper().strip() for p in peers_fh if p and str(p).upper().strip() != ticker]
             if clean_peers:
-                return clean_peers[:max_peers]
+                res = clean_peers[:max_peers]
+                _PEERS_CACHE[cache_k] = res
+                return res
     except Exception:
         pass
 
@@ -97,4 +112,26 @@ def obtener_peers(ticker: str, max_peers: int = 3, finnhub_api_key: str = "", fi
             
         return peers['Symbol'].head(max_peers).tolist()
     return []
+
+
+def obtener_peers(
+    ticker: str,
+    max_peers: int = 3,
+    finnhub_api_key: str = "",
+    finnhub_client: Any = None,
+    **kwargs: Any,
+) -> List[str]:
+    """
+    Busca competidores relacionados consumiendo finnhub_client.company_peers(symbol) con caché persistente de 24h.
+    Soporta argumentos posicionales y nominales ('finnhub_client' o '_finnhub_client').
+    Si no hay respuesta de la API o ocurre un error, usa el directorio S&P 1500 como fallback defensivo.
+    """
+    client = finnhub_client or kwargs.get("_finnhub_client")
+    api_key = finnhub_api_key or kwargs.get("api_key", "")
+    return _obtener_peers_cached(
+        ticker=str(ticker or "").upper().strip(),
+        max_peers=max_peers,
+        finnhub_api_key=str(api_key or "").strip(),
+        _finnhub_client=client,
+    )
 

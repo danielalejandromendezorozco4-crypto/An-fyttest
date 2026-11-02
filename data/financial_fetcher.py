@@ -591,6 +591,107 @@ def _normalizar_nombre_fila(nombre: str) -> str:
     return nombre.lower().replace(" ", "").replace("_", "").replace("-", "").strip()
 
 
+# Mapeos canónicos para estandarización temprana de estados financieros
+MAPA_CANONICO_INCOME: Dict[str, str] = {
+    "totalrevenue": "Total Revenue",
+    "revenue": "Total Revenue",
+    "operatingrevenue": "Total Revenue",
+    "grossprofit": "Gross Profit",
+    "operatingincome": "Operating Income",
+    "operatingprofit": "Operating Income",
+    "ebit": "Operating Income",
+    "netincome": "Net Income",
+    "netincomecommonstockholders": "Net Income",
+    "netincometocommon": "Net Income",
+    "dilutedaverageshares": "Diluted Average Shares",
+    "basicaverageshares": "Basic Average Shares",
+    "weightedaveragesharesdiluted": "Diluted Average Shares",
+    "weightedaveragesharesbasic": "Basic Average Shares",
+    "weightedaverageshsoutdil": "Diluted Average Shares",
+    "weightedaverageshsout": "Basic Average Shares",
+    "ordinarysharesnumber": "Diluted Average Shares",
+    "interestexpense": "Interest Expense",
+    "pretaxincome": "Pretax Income",
+    "incomebeforetax": "Pretax Income",
+    "taxprovision": "Tax Provision",
+    "incometaxexpense": "Tax Provision",
+    "dilutedeps": "Diluted EPS",
+    "basiceps": "Basic EPS",
+}
+
+MAPA_CANONICO_BALANCE: Dict[str, str] = {
+    "totalassets": "Total Assets",
+    "totalassetsnet": "Total Assets",
+    "totalcurrentassets": "Total Current Assets",
+    "currentassets": "Total Current Assets",
+    "totalcurrentliabilities": "Total Current Liabilities",
+    "currentliabilities": "Total Current Liabilities",
+    "totalstockholderequity": "Total Stockholder Equity",
+    "stockholdersequity": "Total Stockholder Equity",
+    "totalstockholdersequity": "Total Stockholder Equity",
+    "totalequity": "Total Stockholder Equity",
+    "totaldebt": "Total Debt",
+    "longtermdebt": "Long Term Debt",
+    "shorttermdebt": "Short Term Debt",
+    "currentdebt": "Short Term Debt",
+    "cashandcashequivalents": "Cash And Cash Equivalents",
+    "cash": "Cash And Cash Equivalents",
+    "cashandshortterminvestments": "Cash And Cash Equivalents",
+    "commonstock": "Common Stock",
+    "retainedearnings": "Retained Earnings",
+    "netdebt": "Net Debt",
+}
+
+MAPA_CANONICO_CASHFLOW: Dict[str, str] = {
+    "operatingcashflow": "Operating Cash Flow",
+    "cashflowfromcontinuingoperatingactivities": "Operating Cash Flow",
+    "totalcashfromoperatingactivities": "Operating Cash Flow",
+    "netcashprovidedbyoperatingactivities": "Operating Cash Flow",
+    "capitalexpenditure": "Capital Expenditure",
+    "capitalexpenditures": "Capital Expenditure",
+    "purchaseofpropertyplantandequipment": "Capital Expenditure",
+    "investmentsinpropertyplantandequipment": "Capital Expenditure",
+    "freecashflow": "Free Cash Flow",
+    "repurchaseofcapitalstock": "Repurchase Of Capital Stock",
+    "paymentsforrepurchaseofcommonstock": "Repurchase Of Capital Stock",
+    "repurchaseofstock": "Repurchase Of Capital Stock",
+    "paymentsforrepurchaseofequity": "Repurchase Of Capital Stock",
+    "commonstockrepurchased": "Repurchase Of Capital Stock",
+    "depreciation&amortization": "Depreciation & Amortization",
+    "depreciationandamortization": "Depreciation & Amortization",
+    "dividendspaid": "Dividends Paid",
+}
+
+
+def estandarizar_dataframe_financiero(df: pd.DataFrame, mapa_canonico: Dict[str, str]) -> pd.DataFrame:
+    """
+    Estandariza tempranamente las etiquetas de filas a nombres canónicos consistentes.
+    Permite accesos directos indexados O(1) en cálculos y gráficos, manteniendo compatibilidad
+    con filas existentes.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+
+    df_out = df.copy()
+    nuevas_filas: Dict[str, pd.Series] = {}
+
+    for idx_val in df_out.index:
+        norm_key = _normalizar_nombre_fila(str(idx_val))
+        if norm_key in mapa_canonico:
+            canonico = mapa_canonico[norm_key]
+            if canonico not in df_out.index and canonico not in nuevas_filas:
+                s_val = df_out.loc[idx_val]
+                if isinstance(s_val, pd.DataFrame):
+                    s_val = s_val.iloc[0]
+                nuevas_filas[canonico] = s_val
+
+    if nuevas_filas:
+        df_nuevas = pd.DataFrame(nuevas_filas).T
+        df_out = pd.concat([df_out, df_nuevas])
+
+    return df_out
+
+
 def _extraer_val_df(df: Any, posibles_filas: List[str], default: float = 0.0) -> float:
     """
     Extrae el valor más reciente de un DataFrame buscando en las filas candidatas
@@ -1532,11 +1633,11 @@ def fetch_datos_fundamentales(
             pass
 
     if dict_inc:
-        inc = pd.DataFrame(dict_inc)
+        inc = estandarizar_dataframe_financiero(pd.DataFrame(dict_inc), MAPA_CANONICO_INCOME)
     if dict_bs:
-        bs = pd.DataFrame(dict_bs)
+        bs = estandarizar_dataframe_financiero(pd.DataFrame(dict_bs), MAPA_CANONICO_BALANCE)
     if dict_cf:
-        cf = pd.DataFrame(dict_cf)
+        cf = estandarizar_dataframe_financiero(pd.DataFrame(dict_cf), MAPA_CANONICO_CASHFLOW)
 
     # 4. Consenso de Wall Street (Finnhub Oficial + Fallback FMP)
     consenso = obtener_consenso_wall_street(
@@ -1858,14 +1959,21 @@ def obtener_noticias_financieras(ticker: str, finnhub_api_key: str = "") -> List
     return clean_news
 
 
-@st.cache_data(ttl=FRED_CACHE_TTL, show_spinner=False)
-def obtener_tasa_fred(api_key: str) -> float:
-    """Obtiene la tasa del bono del tesoro a 10 años (DGS10) desde la API de FRED."""
-    if api_key:
+_FRED_TASA_CACHE: Dict[str, float] = {}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def obtener_tasa_fred(api_key: str = "") -> float:
+    """Obtiene la tasa del bono del tesoro a 10 años (DGS10) desde la API de FRED con persistencia diaria en caché."""
+    api_key_clean = str(api_key or "").strip()
+    if api_key_clean in _FRED_TASA_CACHE:
+        return _FRED_TASA_CACHE[api_key_clean]
+    if api_key_clean:
         try:
-            url = f"https://api.stlouisfed.org/fred/series/observations?series_id=DGS10&api_key={api_key.strip()}&file_type=json&sort_order=desc&limit=1"
+            url = f"https://api.stlouisfed.org/fred/series/observations?series_id=DGS10&api_key={api_key_clean}&file_type=json&sort_order=desc&limit=1"
             res = requests.get(url, timeout=5).json()
-            return safe_num(res['observations'][0]['value'], default=4.20)
+            val = safe_num(res['observations'][0]['value'], default=4.20)
+            _FRED_TASA_CACHE[api_key_clean] = val
+            return val
         except Exception:
             pass
     return 4.20
