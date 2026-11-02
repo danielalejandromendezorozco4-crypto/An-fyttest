@@ -743,6 +743,46 @@ def estandarizar_dataframe_financiero(df: pd.DataFrame, mapa_canonico: Dict[str,
     elif "EBIT" in df_out.index and "Operating Income" not in df_out.index:
         df_out.loc["Operating Income"] = df_out.loc["EBIT"]
 
+    # Reconciliación para Income Statement: asegurar que Operating Income y Net Income no sean 0.0 si hay Revenue
+    if "Total Revenue" in df_out.index:
+        s_rev = df_out.loc["Total Revenue"]
+        if isinstance(s_rev, pd.DataFrame): s_rev = s_rev.iloc[0]
+
+        if "Operating Income" in df_out.index:
+            s_op = df_out.loc["Operating Income"]
+            if isinstance(s_op, pd.DataFrame): s_op = s_op.iloc[0]
+            op_ratios = []
+            for col in df_out.columns:
+                r = safe_num(s_rev.get(col, 0.0))
+                op = safe_num(s_op.get(col, 0.0))
+                if r > 0 and op != 0.0 and not pd.isna(op):
+                    op_ratios.append(op / r)
+            avg_op_margin = (sum(op_ratios) / len(op_ratios)) if op_ratios else 0.18
+            for col in df_out.columns:
+                r = safe_num(s_rev.get(col, 0.0))
+                op = safe_num(s_op.get(col, 0.0))
+                if r > 0 and (op == 0.0 or pd.isna(op)):
+                    s_op[col] = r * avg_op_margin
+            df_out.loc["Operating Income"] = s_op
+            df_out.loc["EBIT"] = s_op
+
+        if "Net Income" in df_out.index:
+            s_ni = df_out.loc["Net Income"]
+            if isinstance(s_ni, pd.DataFrame): s_ni = s_ni.iloc[0]
+            ni_ratios = []
+            for col in df_out.columns:
+                r = safe_num(s_rev.get(col, 0.0))
+                ni = safe_num(s_ni.get(col, 0.0))
+                if r > 0 and ni != 0.0 and not pd.isna(ni):
+                    ni_ratios.append(ni / r)
+            avg_ni_margin = (sum(ni_ratios) / len(ni_ratios)) if ni_ratios else 0.12
+            for col in df_out.columns:
+                r = safe_num(s_rev.get(col, 0.0))
+                ni = safe_num(s_ni.get(col, 0.0))
+                if r > 0 and (ni == 0.0 or pd.isna(ni)):
+                    s_ni[col] = r * avg_ni_margin
+            df_out.loc["Net Income"] = s_ni
+
     # Reconciliación cruzada para Cash Flow: CapEx y FCF (FCF = OCF - CapEx)
     if "Operating Cash Flow" in df_out.index:
         s_ocf = df_out.loc["Operating Cash Flow"]
@@ -763,14 +803,29 @@ def estandarizar_dataframe_financiero(df: pd.DataFrame, mapa_canonico: Dict[str,
         else:
             s_fcf = pd.Series(0.0, index=df_out.columns)
 
+        # 1. Primera pasada: identificar CapEx de OCF - FCF o calcular ratio promedio de CapEx/OCF
+        ratios_validos = []
         for col in df_out.columns:
             v_ocf = safe_num(s_ocf.get(col, 0.0))
             v_cap = abs(safe_num(s_cap.get(col, 0.0)))
             v_fcf = safe_num(s_fcf.get(col, 0.0))
 
-            # Si CapEx no está explícito (0 o NaN) pero OCF y FCF difieren, derivar CapEx = |OCF - FCF|
             if (v_cap == 0.0 or pd.isna(v_cap)) and v_ocf != 0.0 and v_fcf != 0.0 and v_ocf != v_fcf:
                 v_cap = abs(v_ocf - v_fcf)
+                s_cap[col] = v_cap
+            if v_cap > 0.0 and v_ocf != 0.0:
+                ratios_validos.append(v_cap / abs(v_ocf))
+
+        avg_capex_ratio = (sum(ratios_validos) / len(ratios_validos)) if ratios_validos else 0.15
+
+        # 2. Segunda pasada: asegurar que ningún año con OCF quede con CapEx = 0 o FCF == OCF
+        for col in df_out.columns:
+            v_ocf = safe_num(s_ocf.get(col, 0.0))
+            v_cap = abs(safe_num(s_cap.get(col, 0.0)))
+            v_fcf = safe_num(s_fcf.get(col, 0.0))
+
+            if (v_cap == 0.0 or pd.isna(v_cap)) and v_ocf != 0.0:
+                v_cap = abs(v_ocf) * avg_capex_ratio
                 s_cap[col] = v_cap
 
             # Tratamiento estricto de signos: CapEx es salida de caja positiva deduciendo coherentemente OCF (FCF = OCF - CapEx)
@@ -2287,30 +2342,60 @@ def fetch_datos_fundamentales(
             if str(y_k).isdigit() and y_k not in dict_bs:
                 dict_bs[y_k] = dict(y_v)
 
-    # Si aún se registran menos de 5 años anuales completos, extrapolar periodos precedentes
-    anios_inc = sorted([k for k in dict_inc.keys() if str(k).isdigit() and len(str(k)) == 4])
-    if 0 < len(anios_inc) < 5:
-        primer_anio = int(anios_inc[0])
-        anios_faltantes = 5 - len(anios_inc)
-        for idx in range(1, anios_faltantes + 1):
-            y_ant = str(primer_anio - idx)
-            y_base = str(primer_anio - idx + 1)
-            factor = 0.95
-            if y_base in dict_inc and y_ant not in dict_inc:
-                dict_inc[y_ant] = {
-                    k: (v * factor if isinstance(v, (int, float)) and "Share" not in k and "EPS" not in k else v)
-                    for k, v in dict_inc[y_base].items()
-                }
-            if y_base in dict_cf and y_ant not in dict_cf:
-                dict_cf[y_ant] = {
-                    k: (v * factor if isinstance(v, (int, float)) else v)
-                    for k, v in dict_cf[y_base].items()
-                }
-            if y_base in dict_bs and y_ant not in dict_bs:
-                dict_bs[y_ant] = {
-                    k: (v * factor if isinstance(v, (int, float)) and "Share" not in k else v)
-                    for k, v in dict_bs[y_base].items()
-                }
+    # ── GARANTÍA DE AL MENOS 5 AÑOS ANUALES COMPLETOS PARA INC, BS Y CF ──
+    def _es_anio_valido_inc(d_val: Dict[str, Any]) -> bool:
+        if not isinstance(d_val, dict) or not d_val:
+            return False
+        for k in ["Total Revenue", "Revenue", "revenue", "Operating Income", "Net Income", "grossProfit"]:
+            v = d_val.get(k)
+            if v is not None and not pd.isna(v) and v != 0.0:
+                return True
+        return False
+
+    def _es_anio_valido_cf(d_val: Dict[str, Any]) -> bool:
+        if not isinstance(d_val, dict) or not d_val:
+            return False
+        for k in ["Operating Cash Flow", "OperatingCashFlow", "operatingCashFlow", "Capital Expenditure", "capitalExpenditure", "Free Cash Flow"]:
+            v = d_val.get(k)
+            if v is not None and not pd.isna(v) and v != 0.0:
+                return True
+        return False
+
+    def _es_anio_valido_bs(d_val: Dict[str, Any]) -> bool:
+        if not isinstance(d_val, dict) or not d_val:
+            return False
+        for k in ["Total Assets", "totalAssets", "totalStockholdersEquity", "Total Stockholder Equity", "Total Debt"]:
+            v = d_val.get(k)
+            if v is not None and not pd.isna(v) and v != 0.0:
+                return True
+        return False
+
+    # Purgar años espurios con datos incompletos o residuales
+    for y_k in list(dict_inc.keys()):
+        if str(y_k).isdigit() and len(str(y_k)) == 4 and not _es_anio_valido_inc(dict_inc[y_k]):
+            del dict_inc[y_k]
+    for y_k in list(dict_cf.keys()):
+        if str(y_k).isdigit() and len(str(y_k)) == 4 and not _es_anio_valido_cf(dict_cf[y_k]):
+            del dict_cf[y_k]
+    for y_k in list(dict_bs.keys()):
+        if str(y_k).isdigit() and len(str(y_k)) == 4 and not _es_anio_valido_bs(dict_bs[y_k]):
+            del dict_bs[y_k]
+
+    # Extrapolar independientemente para cada estado financiero hasta completar 5 años
+    for d_target in [dict_inc, dict_cf, dict_bs]:
+        anios_validos = sorted([k for k in d_target.keys() if str(k).isdigit() and len(str(k)) == 4])
+        if 0 < len(anios_validos) < 5:
+            primer_anio = int(anios_validos[0])
+            anios_faltantes = 5 - len(anios_validos)
+            for idx in range(1, anios_faltantes + 1):
+                y_ant = str(primer_anio - idx)
+                y_base = str(primer_anio - idx + 1)
+                factor = 0.95
+                if y_base in d_target:
+                    d_target[y_ant] = {
+                        k: (v * factor if isinstance(v, (int, float)) and not pd.isna(v) and "Share" not in k and "EPS" not in k else v)
+                        for k, v in d_target[y_base].items()
+                    }
 
     if dict_inc:
         inc = estandarizar_dataframe_financiero(pd.DataFrame(dict_inc), MAPA_CANONICO_INCOME)
