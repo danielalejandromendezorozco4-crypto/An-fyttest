@@ -312,3 +312,128 @@ def test_financial_metrics_modules_real_values(ticker: str):
     )
     v_intr = res_dcf["valor_intrinseco"]
     assert v_intr > 10.0, f"Valor intrínseco DCF para {ticker} cayó en el fallback residual ($0.20), obtenido: ${v_intr}"
+
+
+def test_criterio_1_googl_cash_flow_capex_and_fcf_discount():
+    """
+    Criterio 1: En 'GOOGL', el gráfico de flujos muestra la barra diferenciada de CapEx
+    y el FCF refleja el descuento real del CapEx sobre el OCF (FCF = OCF - CapEx).
+    """
+    info, inc, bs, cf = fetch_datos_fundamentales("GOOGL")
+    assert not cf.empty, "El estado de flujos de efectivo de GOOGL no debe estar vacío"
+    assert "Capital Expenditure" in cf.index, "Capital Expenditure debe estar estandarizado en cf.index"
+    assert "Operating Cash Flow" in cf.index, "Operating Cash Flow debe estar en cf.index"
+    assert "Free Cash Flow" in cf.index, "Free Cash Flow debe estar en cf.index"
+
+    cols_anuales = sorted([c for c in cf.columns if str(c).isdigit() and len(str(c)) == 4])
+    assert len(cols_anuales) >= 4, f"Se esperaban al menos 4 años anuales para GOOGL, obtenidos: {cols_anuales}"
+
+    s_ocf = cf.loc["Operating Cash Flow", cols_anuales]
+    s_capex = cf.loc["Capital Expenditure", cols_anuales].abs()
+    s_fcf = cf.loc["Free Cash Flow", cols_anuales]
+
+    # Verificar para cada año con datos válidos que FCF = OCF - CapEx
+    valid_years = 0
+    for col in cols_anuales:
+        v_ocf = s_ocf.get(col)
+        v_cap = s_capex.get(col)
+        v_fcf = s_fcf.get(col)
+        if pd.notna(v_ocf) and pd.notna(v_cap) and pd.notna(v_fcf) and v_ocf > 0:
+            valid_years += 1
+            # CapEx diferenciado y sustancial (> $10B para Alphabet)
+            assert v_cap > 10_000_000_000.0, f"CapEx para GOOGL en {col} (${v_cap:,.0f}) debe ser > $10B"
+            # FCF refleja el descuento real de CapEx sobre OCF
+            diferencia = abs(v_fcf - (v_ocf - v_cap))
+            assert diferencia < 1e6, f"FCF ({v_fcf}) no coincide con OCF ({v_ocf}) - CapEx ({v_cap}) en {col}"
+
+    assert valid_years >= 3, f"Se requerían al menos 3 años con datos completos de flujos para GOOGL, encontrados: {valid_years}"
+
+
+def test_criterio_2_googl_margins_operating_and_net():
+    """
+    Criterio 2: En 'GOOGL', el gráfico de márgenes visualiza las dos series:
+    Margen Neto y Margen Operativo.
+    """
+    info, inc, bs, cf = fetch_datos_fundamentales("GOOGL")
+    assert not inc.empty, "El estado de resultados de GOOGL no debe estar vacío"
+    assert "Total Revenue" in inc.index or "Revenue" in inc.index
+    assert "Operating Income" in inc.index or "EBIT" in inc.index
+    assert "Net Income" in inc.index
+
+    cols_anuales = sorted([c for c in inc.columns if str(c).isdigit() and len(str(c)) == 4])
+    s_rev = inc.loc["Total Revenue" if "Total Revenue" in inc.index else "Revenue", cols_anuales]
+    s_op = inc.loc["Operating Income" if "Operating Income" in inc.index else "EBIT", cols_anuales]
+    s_ni = inc.loc["Net Income", cols_anuales]
+
+    valid_years = 0
+    for col in cols_anuales:
+        r = s_rev.get(col)
+        op = s_op.get(col)
+        ni = s_ni.get(col)
+        if pd.notna(r) and r > 0 and pd.notna(op) and pd.notna(ni):
+            valid_years += 1
+            op_margin = (op / r) * 100.0
+            net_margin = (ni / r) * 100.0
+            # Ambas series calculables y positivas
+            assert 20.0 <= op_margin <= 40.0, f"Margen Operativo ({op_margin:.1f}%) fuera del rango esperado para GOOGL"
+            assert 15.0 <= net_margin <= 40.0, f"Margen Neto ({net_margin:.1f}%) fuera del rango esperado para GOOGL"
+
+    assert valid_years >= 3, f"Se requerían al menos 3 años de márgenes para GOOGL, encontrados: {valid_years}"
+
+
+def test_criterio_3_hover_tooltips_nominal_and_yoy_calculation():
+    """
+    Criterio 3: Al pasar el cursor sobre cualquier barra de ambos gráficos, el tooltip
+    muestra claramente el monto nominal formateado y la variación porcentual interanual (YoY %).
+    """
+    from engine.metrics import calcular_variacion_yoy
+
+    # Caso estándar con crecimiento y caída
+    serie_nom = [100.0, 120.0, 110.0, 143.0]
+    yoy_res = calcular_variacion_yoy(serie_nom)
+    assert yoy_res[0] == "Base", "El primer año t=0 debe reportar 'Base'"
+    assert yoy_res[1] == "+20.0%", "El incremento de 100 a 120 debe ser +20.0%"
+    assert yoy_res[2] == "-8.3%", "El decremento de 120 a 110 debe ser -8.3%"
+    assert yoy_res[3] == "+30.0%", "El incremento de 110 a 143 debe ser +30.0%"
+
+    # Manejo de cero en el denominador (evitar división por cero)
+    serie_con_cero = [50.0, 0.0, 75.0]
+    yoy_cero = calcular_variacion_yoy(serie_con_cero)
+    assert yoy_cero[0] == "Base"
+    assert yoy_cero[1] == "-100.0%"
+    assert yoy_cero[2] == "N/A", "División por cero debe retornar 'N/A'"
+
+    # Serie de un único año
+    serie_uno = [250.0]
+    assert calcular_variacion_yoy(serie_uno) == ["Base"]
+
+
+def test_criterio_4_resilience_incomplete_financial_statements():
+    """
+    Criterio 4: La app compila y ejecuta sin errores ante activos con estados financieros incompletos
+    (auto-reconciliación de CapEx y FCF, DataFrames vacíos o con columnas faltantes).
+    """
+    from data.financial_fetcher import estandarizar_dataframe_financiero, MAPA_CANONICO_CASHFLOW
+
+    # Caso A: CF con OCF y FCF pero sin CapEx (debe auto-derivar CapEx = OCF - FCF)
+    cf_sin_capex = pd.DataFrame({
+        "2023": [100.0, 70.0],
+        "2024": [120.0, 85.0],
+    }, index=["Operating Cash Flow", "Free Cash Flow"])
+    cf_std_a = estandarizar_dataframe_financiero(cf_sin_capex, MAPA_CANONICO_CASHFLOW)
+    assert "Capital Expenditure" in cf_std_a.index
+    assert cf_std_a.loc["Capital Expenditure", "2023"] == 30.0
+    assert cf_std_a.loc["Capital Expenditure", "2024"] == 35.0
+
+    # Caso B: CF con OCF y CapEx pero FCF idéntico a OCF (debe corregir FCF = OCF - CapEx)
+    cf_fcf_igual_ocf = pd.DataFrame({
+        "2023": [200.0, 50.0, 200.0],
+        "2024": [250.0, 60.0, 250.0],
+    }, index=["Operating Cash Flow", "Capital Expenditure", "Free Cash Flow"])
+    cf_std_b = estandarizar_dataframe_financiero(cf_fcf_igual_ocf, MAPA_CANONICO_CASHFLOW)
+    assert cf_std_b.loc["Free Cash Flow", "2023"] == 150.0
+    assert cf_std_b.loc["Free Cash Flow", "2024"] == 190.0
+
+    # Caso C: DataFrame vacío
+    df_vacio = pd.DataFrame()
+    assert estandarizar_dataframe_financiero(df_vacio, MAPA_CANONICO_CASHFLOW).empty

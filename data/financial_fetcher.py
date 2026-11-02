@@ -604,13 +604,20 @@ MAPA_CANONICO_INCOME: Dict[str, str] = {
     "totalrevenue": "Total Revenue",
     "revenue": "Total Revenue",
     "operatingrevenue": "Total Revenue",
+    "totaloperatingrevenue": "Total Revenue",
     "grossprofit": "Gross Profit",
     "operatingincome": "Operating Income",
     "operatingprofit": "Operating Income",
     "ebit": "Operating Income",
+    "totaloperatingincomeasreported": "Operating Income",
+    "operatingincomeloss": "Operating Income",
+    "netoperatingincome": "Operating Income",
     "netincome": "Net Income",
     "netincomecommonstockholders": "Net Income",
     "netincometocommon": "Net Income",
+    "netincomecontinuousoperations": "Net Income",
+    "netincomeincludingnoncontrollinginterests": "Net Income",
+    "netincomefromcontinuingoperationnetminorityinterest": "Net Income",
     "dilutedaverageshares": "Diluted Average Shares",
     "basicaverageshares": "Basic Average Shares",
     "weightedaveragesharesdiluted": "Diluted Average Shares",
@@ -655,10 +662,16 @@ MAPA_CANONICO_CASHFLOW: Dict[str, str] = {
     "cashflowfromcontinuingoperatingactivities": "Operating Cash Flow",
     "totalcashfromoperatingactivities": "Operating Cash Flow",
     "netcashprovidedbyoperatingactivities": "Operating Cash Flow",
+    "netcashprovidedbyusedinoperatingactivities": "Operating Cash Flow",
+    "netcashfromoperatingactivities": "Operating Cash Flow",
     "capitalexpenditure": "Capital Expenditure",
     "capitalexpenditures": "Capital Expenditure",
     "purchaseofpropertyplantandequipment": "Capital Expenditure",
     "investmentsinpropertyplantandequipment": "Capital Expenditure",
+    "paymentstoacquirepropertyplantandequipment": "Capital Expenditure",
+    "purchaseofppe": "Capital Expenditure",
+    "netppepurchaseandsale": "Capital Expenditure",
+    "purchaseofbusiness": "Capital Expenditure",
     "freecashflow": "Free Cash Flow",
     "repurchaseofcapitalstock": "Repurchase Of Capital Stock",
     "paymentsforrepurchaseofcommonstock": "Repurchase Of Capital Stock",
@@ -668,6 +681,8 @@ MAPA_CANONICO_CASHFLOW: Dict[str, str] = {
     "depreciation&amortization": "Depreciation & Amortization",
     "depreciationandamortization": "Depreciation & Amortization",
     "dividendspaid": "Dividends Paid",
+    "cashdividendspaid": "Dividends Paid",
+    "commondividends": "Dividends Paid",
 }
 
 
@@ -675,7 +690,7 @@ def estandarizar_dataframe_financiero(df: pd.DataFrame, mapa_canonico: Dict[str,
     """
     Estandariza tempranamente las etiquetas de filas a nombres canónicos consistentes.
     Permite accesos directos indexados O(1) en cálculos y gráficos, manteniendo compatibilidad
-    con filas existentes.
+    con filas existentes y reconciliando discrepancias de CapEx, FCF y EBIT.
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return df
@@ -696,6 +711,45 @@ def estandarizar_dataframe_financiero(df: pd.DataFrame, mapa_canonico: Dict[str,
     if nuevas_filas:
         df_nuevas = pd.DataFrame(nuevas_filas).T
         df_out = pd.concat([df_out, df_nuevas])
+
+    # Reconciliación cruzada de Operating Income y EBIT
+    if "Operating Income" in df_out.index and "EBIT" not in df_out.index:
+        df_out.loc["EBIT"] = df_out.loc["Operating Income"]
+    elif "EBIT" in df_out.index and "Operating Income" not in df_out.index:
+        df_out.loc["Operating Income"] = df_out.loc["EBIT"]
+
+    # Reconciliación cruzada para Cash Flow: CapEx y FCF (FCF = OCF - CapEx)
+    if "Operating Cash Flow" in df_out.index:
+        s_ocf = df_out.loc["Operating Cash Flow"]
+        if isinstance(s_ocf, pd.DataFrame):
+            s_ocf = s_ocf.iloc[0]
+
+        if "Capital Expenditure" in df_out.index:
+            s_cap = df_out.loc["Capital Expenditure"].abs()
+            if isinstance(s_cap, pd.DataFrame):
+                s_cap = s_cap.iloc[0]
+        else:
+            s_cap = pd.Series(0.0, index=df_out.columns)
+
+        if "Free Cash Flow" in df_out.index:
+            s_fcf = df_out.loc["Free Cash Flow"]
+            if isinstance(s_fcf, pd.DataFrame):
+                s_fcf = s_fcf.iloc[0]
+        else:
+            s_fcf = pd.Series(0.0, index=df_out.columns)
+
+        for col in df_out.columns:
+            v_ocf = safe_num(s_ocf.get(col, 0.0))
+            v_cap = abs(safe_num(s_cap.get(col, 0.0)))
+            v_fcf = safe_num(s_fcf.get(col, 0.0))
+
+            if (v_cap == 0.0 or pd.isna(v_cap)) and v_ocf != 0.0 and v_fcf != 0.0 and v_ocf != v_fcf:
+                s_cap[col] = abs(v_ocf - v_fcf)
+            if (v_fcf == 0.0 or v_fcf == v_ocf or pd.isna(v_fcf)) and v_cap > 0.0 and v_ocf != 0.0:
+                s_fcf[col] = v_ocf - v_cap
+
+        df_out.loc["Capital Expenditure"] = s_cap
+        df_out.loc["Free Cash Flow"] = s_fcf
 
     return df_out
 
@@ -2615,7 +2669,8 @@ def obtener_capex_historico(cf: pd.DataFrame) -> List[float]:
     """
     Extrae el Gasto de Capital (CapEx) del estado de flujos de efectivo y lo
     retorna como lista de valores positivos (gasto real), ordenados del más
-    reciente al más antiguo.
+    reciente al más antiguo. Si CapEx no está explícito o es nulo, lo infiere
+    a partir de la diferencia entre Flujo Operativo (OCF) y Flujo Libre (FCF).
     """
     posibles_filas = [
         "Capital Expenditure",
@@ -2625,12 +2680,23 @@ def obtener_capex_historico(cf: pd.DataFrame) -> List[float]:
         "Capital Expenditures",
         "Purchase Of Property Plant And Equipment",
         "Purchases Of Property, Plant And Equipment",
+        "Payments To Acquire Property Plant And Equipment",
         "Capital Expenditure Reported",
         "Purchase Of PPE",
         "Net PPE Purchase And Sale",
         "capitalExpenditures",
     ]
     vals = _extraer_serie(cf, posibles_filas, absval=True)
+    if not vals or all(v == 0.0 for v in vals):
+        ocf_vals = _extraer_serie(cf, [
+            "Operating Cash Flow", "OperatingCashFlow", "operatingCashFlow",
+            "Cash Flow From Continuing Operating Activities", "Total Cash From Operating Activities"
+        ])
+        fcf_vals = _extraer_serie(cf, ["Free Cash Flow", "FreeCashFlow", "freeCashFlow"])
+        if ocf_vals and fcf_vals:
+            derived = [abs(safe_num(o) - safe_num(f)) for o, f in zip(ocf_vals, fcf_vals)]
+            if any(d > 0.0 for d in derived):
+                return derived
     return vals if vals else []
 
 

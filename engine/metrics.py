@@ -8,6 +8,27 @@ import numpy as np
 import pandas as pd
 
 
+def calcular_variacion_yoy(valores: list) -> list:
+    """
+    Calcula la variacion porcentual interanual (YoY %) respecto al ano inmediato anterior:
+    ((Valor_t - Valor_{t-1}) / |Valor_{t-1}|) * 100.
+    Para el primer ano (t=0) retorna 'Base'. Si el ano anterior es 0 o NaN, retorna 'N/A'.
+    """
+    yoy = []
+    for i, v in enumerate(valores):
+        if i == 0 or v is None:
+            yoy.append('Base')
+        else:
+            prev = valores[i - 1]
+            if prev is None or prev == 0:
+                yoy.append('N/A')
+            else:
+                pct = ((v - prev) / abs(prev)) * 100.0
+                sign = '+' if pct > 0 else ''
+                yoy.append(f"{sign}{pct:.1f}%")
+    return yoy
+
+
 def safe_get(d: Any, keys: list, default: Any = 0) -> Any:
     """Helper defensivo para extraer valores de diccionarios anidados o listas."""
     if not isinstance(d, dict):

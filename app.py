@@ -39,6 +39,7 @@ from data.financial_fetcher import (
     extraer_metricas_ttm,
     obtener_rf_tnx,
     obtener_consenso_wall_street,
+    _normalizar_nombre_fila,
 )
 from engine.metrics import (
     calcular_altman_zscore,
@@ -55,6 +56,27 @@ from services.ai_service import (
     obtener_perfil_corporativo,
 )
 from reports.pdf_generator import generar_pdf_reporte
+
+def _calcular_variacion_yoy(valores: list) -> list:
+    """
+    Calcula la variación porcentual interanual (YoY %) respecto al año inmediato anterior:
+    ((Valor_t - Valor_{t-1}) / |Valor_{t-1}|) * 100.
+    Para el primer año (t=0) retorna 'Base'. Si el año anterior es 0 o NaN, retorna 'N/A'.
+    """
+    yoy = []
+    for i, v in enumerate(valores):
+        if i == 0 or v is None or pd.isna(v):
+            yoy.append("Base")
+        else:
+            prev = valores[i - 1]
+            if prev is None or pd.isna(prev) or prev == 0:
+                yoy.append("N/A")
+            else:
+                pct = ((v - prev) / abs(prev)) * 100.0
+                sign = "+" if pct > 0 else ""
+                yoy.append(f"{sign}{pct:.1f}%")
+    return yoy
+
 
 def calcular_hash_parametros_pdf(data: dict) -> str:
     """Calcula un hash SHA256 determinista a partir de los parámetros serializables del análisis."""
@@ -904,6 +926,9 @@ else:
                 c9_by.metric(f"{col_by} Buyback Yield", f"{buyback_yield:.1f}%", help=h_by)
                 c9_div.metric("💵 Dividendos", val_div_metric, help=msg_div_tooltip)
                 
+                
+
+
                 # --- GRÁFICOS MÓDULO 2 ---
                 g_col1, g_col2 = st.columns(2)
                 
@@ -911,46 +936,98 @@ else:
                     st.write("**Comparativa de Márgenes (5 Años)**")
                     # Acceso directo indexado O(1) a métricas estandarizadas
                     row_rev = 'Total Revenue' if 'Total Revenue' in inc.index else ('Revenue' if 'Revenue' in inc.index else None)
-                    row_op = 'Operating Income' if 'Operating Income' in inc.index else ('Operating Profit' if 'Operating Profit' in inc.index else None)
+                    row_op = 'Operating Income' if 'Operating Income' in inc.index else ('Operating Profit' if 'Operating Profit' in inc.index else ('EBIT' if 'EBIT' in inc.index else None))
                     row_ni = 'Net Income' if 'Net Income' in inc.index else ('Net Income Common Stockholders' if 'Net Income Common Stockholders' in inc.index else None)
 
-                    if not inc.empty and row_rev and row_op and row_ni:
+                    if not inc.empty and row_rev and (row_op or row_ni):
                         try:
-                            # Filtrar columnas anuales numéricas (hasta 5 años)
                             cols_anuales = sorted([c for c in inc.columns if str(c).isdigit() and len(str(c)) == 4])
-                            if len(cols_anuales) > 5:
-                                cols_anuales = cols_anuales[-5:]
                             if not cols_anuales:
                                 cols_anuales = [c for c in inc.columns if c not in ["MRQ", "TTM"]]
                             if not cols_anuales:
                                 cols_anuales = list(inc.columns)
 
-                            s_rev = inc.loc[row_rev, cols_anuales]
+                            s_rev = inc.loc[row_rev, cols_anuales] if row_rev else pd.Series(0.0, index=cols_anuales)
                             if isinstance(s_rev, pd.DataFrame): s_rev = s_rev.iloc[0]
-                            s_op = inc.loc[row_op, cols_anuales]
+                            s_op = inc.loc[row_op, cols_anuales] if row_op else pd.Series(0.0, index=cols_anuales)
                             if isinstance(s_op, pd.DataFrame): s_op = s_op.iloc[0]
-                            s_ni = inc.loc[row_ni, cols_anuales]
+                            s_ni = inc.loc[row_ni, cols_anuales] if row_ni else pd.Series(0.0, index=cols_anuales)
                             if isinstance(s_ni, pd.DataFrame): s_ni = s_ni.iloc[0]
 
-                            rev_seguro = s_rev.replace(0, np.nan)
-                            df_margins = pd.DataFrame({
-                                "Margen Operativo (%)": (s_op / rev_seguro) * 100,
-                                "Margen Neto (%)": (s_ni / rev_seguro) * 100
-                            }, index=cols_anuales).dropna()
-                            
-                            df_margins.index = [str(x) for x in df_margins.index]
-                            df_margins = df_margins.sort_index()
-                            fig_m = px.bar(df_margins, barmode='group', text_auto='.1f', color_discrete_sequence=['#0A192F', '#0284C7'])
-                            fig_m.update_layout(
-                                xaxis_title="", yaxis_title="Porcentaje (%)", legend_title="",
-                                font=dict(color='#0A192F', family='Trebuchet MS', size=11),
-                                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='#0A192F', size=11)),
-                                margin=dict(l=0, r=0, t=30, b=0),
-                                xaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11)),
-                                yaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11))
-                            )
-                            st.plotly_chart(fig_m, use_container_width=True)
+                            cols_validas_m = [
+                                c for c in cols_anuales
+                                if pd.notna(s_rev.get(c)) and safe_num(s_rev.get(c)) > 0
+                            ]
+                            if len(cols_validas_m) > 5:
+                                cols_validas_m = cols_validas_m[-5:]
+
+                            if cols_validas_m:
+                                x_years = [str(c) for c in cols_validas_m]
+                                rev_vals = [safe_num(s_rev.get(c, 0.0)) for c in cols_validas_m]
+
+                                op_vals_nom = [safe_num(s_op.get(c, 0.0)) / 1e6 for c in cols_validas_m]
+                                op_pcts = [((safe_num(s_op.get(c, 0.0)) / r) * 100.0) if r > 0 else 0.0 for c, r in zip(cols_validas_m, rev_vals)]
+                                yoy_op_m = _calcular_variacion_yoy(op_pcts)
+
+                                ni_vals_nom = [safe_num(s_ni.get(c, 0.0)) / 1e6 for c in cols_validas_m]
+                                ni_pcts = [((safe_num(s_ni.get(c, 0.0)) / r) * 100.0) if r > 0 else 0.0 for c, r in zip(cols_validas_m, rev_vals)]
+                                yoy_ni_m = _calcular_variacion_yoy(ni_pcts)
+
+                                fig_m = go.Figure()
+
+                                if row_op or any(v != 0 for v in op_pcts):
+                                    customdata_op = [[nom, yoy] for nom, yoy in zip(op_vals_nom, yoy_op_m)]
+                                    fig_m.add_trace(go.Bar(
+                                        name="Margen Operativo (%)",
+                                        x=x_years,
+                                        y=op_pcts,
+                                        text=[f"{v:.1f}%" for v in op_pcts],
+                                        textposition="outside",
+                                        marker_color='#0A192F',
+                                        customdata=customdata_op,
+                                        hovertemplate=(
+                                            "<b>Año:</b> %{x}<br>"
+                                            "<b>Métrica:</b> Margen Operativo (%)<br>"
+                                            "<b>Margen:</b> %{y:.1f}%<br>"
+                                            "<b>EBIT Nominal:</b> $%{customdata[0]:,.0f} M<br>"
+                                            "<b>Variación YoY:</b> %{customdata[1]}"
+                                            "<extra></extra>"
+                                        )
+                                    ))
+
+                                if row_ni or any(v != 0 for v in ni_pcts):
+                                    customdata_ni = [[nom, yoy] for nom, yoy in zip(ni_vals_nom, yoy_ni_m)]
+                                    fig_m.add_trace(go.Bar(
+                                        name="Margen Neto (%)",
+                                        x=x_years,
+                                        y=ni_pcts,
+                                        text=[f"{v:.1f}%" for v in ni_pcts],
+                                        textposition="outside",
+                                        marker_color='#0284C7',
+                                        customdata=customdata_ni,
+                                        hovertemplate=(
+                                            "<b>Año:</b> %{x}<br>"
+                                            "<b>Métrica:</b> Margen Neto (%)<br>"
+                                            "<b>Margen:</b> %{y:.1f}%<br>"
+                                            "<b>Utilidad Neta Nominal:</b> $%{customdata[0]:,.0f} M<br>"
+                                            "<b>Variación YoY:</b> %{customdata[1]}"
+                                            "<extra></extra>"
+                                        )
+                                    ))
+
+                                fig_m.update_layout(
+                                    barmode='group',
+                                    xaxis_title="", yaxis_title="Porcentaje (%)", legend_title="",
+                                    font=dict(color='#0A192F', family='Trebuchet MS', size=11),
+                                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='#0A192F', size=11)),
+                                    margin=dict(l=0, r=0, t=30, b=0),
+                                    xaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11)),
+                                    yaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11))
+                                )
+                                st.plotly_chart(fig_m, use_container_width=True)
+                            else:
+                                st.write("Gráfico de márgenes no disponible para este ticker.")
                         except Exception:
                             st.write("Gráfico de márgenes no disponible para este ticker.")
                     else:
@@ -962,12 +1039,9 @@ else:
                     row_fcf = 'Free Cash Flow' if 'Free Cash Flow' in cf.index else None
                     row_capex = 'Capital Expenditure' if 'Capital Expenditure' in cf.index else None
 
-                    if not cf.empty and (row_ocf or row_fcf):
+                    if not cf.empty and (row_ocf or row_fcf or row_capex):
                         try:
-                            # Filtrar columnas anuales numéricas (hasta 5 años)
                             cols_anuales_cf = sorted([c for c in cf.columns if str(c).isdigit() and len(str(c)) == 4])
-                            if len(cols_anuales_cf) > 5:
-                                cols_anuales_cf = cols_anuales_cf[-5:]
                             if not cols_anuales_cf:
                                 cols_anuales_cf = [c for c in cf.columns if c not in ["MRQ", "TTM"]]
                             if not cols_anuales_cf:
@@ -976,41 +1050,114 @@ else:
                             s_ocf = cf.loc[row_ocf, cols_anuales_cf] if row_ocf else pd.Series(0.0, index=cols_anuales_cf)
                             if isinstance(s_ocf, pd.DataFrame): s_ocf = s_ocf.iloc[0]
 
-                            if row_capex:
-                                s_capex = cf.loc[row_capex, cols_anuales_cf].abs()
-                                if isinstance(s_capex, pd.DataFrame): s_capex = s_capex.iloc[0]
-                            else:
-                                s_capex = pd.Series(0.0, index=cols_anuales_cf)
+                            s_capex = cf.loc[row_capex, cols_anuales_cf].abs() if row_capex else pd.Series(0.0, index=cols_anuales_cf)
+                            if isinstance(s_capex, pd.DataFrame): s_capex = s_capex.iloc[0]
 
-                            if row_fcf:
-                                s_fcf = cf.loc[row_fcf, cols_anuales_cf]
-                                if isinstance(s_fcf, pd.DataFrame): s_fcf = s_fcf.iloc[0]
-                                if not row_capex and row_ocf:
-                                    s_capex = (s_ocf.fillna(0.0) - s_fcf.fillna(0.0)).abs()
-                            elif row_capex and row_ocf:
-                                s_fcf = s_ocf.fillna(0.0) - s_capex.fillna(0.0)
-                            else:
-                                s_fcf = s_ocf
+                            s_fcf = cf.loc[row_fcf, cols_anuales_cf] if row_fcf else pd.Series(0.0, index=cols_anuales_cf)
+                            if isinstance(s_fcf, pd.DataFrame): s_fcf = s_fcf.iloc[0]
 
-                            df_cf = pd.DataFrame({
-                                "Flujo Operativo (OCF)": s_ocf / 1e6,
-                                "CapEx (Inversión Capital)": s_capex / 1e6,
-                                "Flujo Libre (FCF)": s_fcf / 1e6
-                            }, index=cols_anuales_cf).dropna(how='all')
-                            
-                            df_cf.index = [str(x) for x in df_cf.index]
-                            df_cf = df_cf.sort_index()
-                            fig_cf = px.bar(df_cf, barmode='group', text_auto=',.0f', color_discrete_sequence=['#0284C7', '#F59E0B', '#059669'])
-                            fig_cf.update_layout(
-                                xaxis_title="", yaxis_title="Millones USD ($)", legend_title="",
-                                font=dict(color='#0A192F', family='Trebuchet MS', size=11),
-                                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='#0A192F', size=11)),
-                                margin=dict(l=0, r=0, t=30, b=0),
-                                xaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11)),
-                                yaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11))
-                            )
-                            st.plotly_chart(fig_cf, use_container_width=True)
+                            # Reconciliación cruzada de flujos: FCF = OCF - CapEx
+                            for c in cols_anuales_cf:
+                                v_ocf = safe_num(s_ocf.get(c, 0.0))
+                                v_cap = abs(safe_num(s_capex.get(c, 0.0)))
+                                v_fcf = safe_num(s_fcf.get(c, 0.0))
+
+                                if (v_cap == 0.0 or pd.isna(v_cap)) and v_ocf != 0.0 and v_fcf != 0.0 and v_ocf != v_fcf:
+                                    v_cap = abs(v_ocf - v_fcf)
+                                    s_capex[c] = v_cap
+                                if (v_fcf == 0.0 or v_fcf == v_ocf or pd.isna(v_fcf)) and v_cap > 0.0 and v_ocf != 0.0:
+                                    v_fcf = v_ocf - v_cap
+                                    s_fcf[c] = v_fcf
+                                if v_cap > 0.0 and v_ocf != 0.0:
+                                    s_fcf[c] = v_ocf - v_cap
+
+                            cols_validas_cf = [
+                                c for c in cols_anuales_cf
+                                if (pd.notna(s_ocf.get(c)) and safe_num(s_ocf.get(c)) != 0) or
+                                   (pd.notna(s_capex.get(c)) and safe_num(s_capex.get(c)) != 0)
+                            ]
+                            if len(cols_validas_cf) > 5:
+                                cols_validas_cf = cols_validas_cf[-5:]
+
+                            if cols_validas_cf:
+                                x_cf_years = [str(c) for c in cols_validas_cf]
+                                ocf_nom = [safe_num(s_ocf.get(c, 0.0)) / 1e6 for c in cols_validas_cf]
+                                capex_nom = [abs(safe_num(s_capex.get(c, 0.0))) / 1e6 for c in cols_validas_cf]
+                                fcf_nom = [safe_num(s_fcf.get(c, 0.0)) / 1e6 for c in cols_validas_cf]
+
+                                yoy_ocf = _calcular_variacion_yoy(ocf_nom)
+                                yoy_capex = _calcular_variacion_yoy(capex_nom)
+                                yoy_fcf = _calcular_variacion_yoy(fcf_nom)
+
+                                fig_cf = go.Figure()
+
+                                customdata_ocf = [[yoy] for yoy in yoy_ocf]
+                                fig_cf.add_trace(go.Bar(
+                                    name="Flujo Operativo (OCF)",
+                                    x=x_cf_years,
+                                    y=ocf_nom,
+                                    text=[f"${v:,.0f}" for v in ocf_nom],
+                                    textposition="outside",
+                                    marker_color='#0284C7',
+                                    customdata=customdata_ocf,
+                                    hovertemplate=(
+                                        "<b>Año:</b> %{x}<br>"
+                                        "<b>Flujo:</b> Flujo Operativo (OCF)<br>"
+                                        "<b>Monto Nominal:</b> $%{y:,.0f} M<br>"
+                                        "<b>Variación YoY:</b> %{customdata[0]}"
+                                        "<extra></extra>"
+                                    )
+                                ))
+
+                                customdata_capex = [[yoy] for yoy in yoy_capex]
+                                fig_cf.add_trace(go.Bar(
+                                    name="CapEx (Inversión Capital)",
+                                    x=x_cf_years,
+                                    y=capex_nom,
+                                    text=[f"${v:,.0f}" for v in capex_nom],
+                                    textposition="outside",
+                                    marker_color='#F59E0B',
+                                    customdata=customdata_capex,
+                                    hovertemplate=(
+                                        "<b>Año:</b> %{x}<br>"
+                                        "<b>Flujo:</b> CapEx (Inversión Capital)<br>"
+                                        "<b>Monto Nominal:</b> $%{y:,.0f} M<br>"
+                                        "<b>Variación YoY:</b> %{customdata[0]}"
+                                        "<extra></extra>"
+                                    )
+                                ))
+
+                                customdata_fcf = [[yoy] for yoy in yoy_fcf]
+                                fig_cf.add_trace(go.Bar(
+                                    name="Flujo Libre (FCF)",
+                                    x=x_cf_years,
+                                    y=fcf_nom,
+                                    text=[f"${v:,.0f}" for v in fcf_nom],
+                                    textposition="outside",
+                                    marker_color='#059669',
+                                    customdata=customdata_fcf,
+                                    hovertemplate=(
+                                        "<b>Año:</b> %{x}<br>"
+                                        "<b>Flujo:</b> Flujo Libre (FCF)<br>"
+                                        "<b>Monto Nominal:</b> $%{y:,.0f} M<br>"
+                                        "<b>Variación YoY:</b> %{customdata[0]}"
+                                        "<extra></extra>"
+                                    )
+                                ))
+
+                                fig_cf.update_layout(
+                                    barmode='group',
+                                    xaxis_title="", yaxis_title="Millones USD ($)", legend_title="",
+                                    font=dict(color='#0A192F', family='Trebuchet MS', size=11),
+                                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color='#0A192F', size=11)),
+                                    margin=dict(l=0, r=0, t=30, b=0),
+                                    xaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11)),
+                                    yaxis=dict(color='#0A192F', showgrid=True, gridcolor='rgba(10, 25, 47, 0.15)', tickfont=dict(color='#0A192F', size=11))
+                                )
+                                st.plotly_chart(fig_cf, use_container_width=True)
+                            else:
+                                st.write("Gráfico de flujos no disponible para este ticker.")
                         except Exception:
                             st.write("Gráfico de flujos no disponible para este ticker.")
                     else:
