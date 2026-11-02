@@ -308,24 +308,7 @@ else:
                     0.0
                 )
 
-            # Blindaje para histórico si está vacío o incompleto pero disponemos de precio actual (24 meses)
-            if (hist.empty or len(hist) < 24) and precio_actual > 0:
-                dates_24m = pd.date_range(end=pd.Timestamp.now(), periods=24, freq="ME")
-                if ticker_input.upper() == "MA":
-                    precios_curve = np.array([
-                        346.5, 348.2, 355.0, 362.4, 370.1, 381.5, 378.0, 385.2,
-                        398.0, 405.5, 412.0, 425.8, 438.2, 452.0, 465.5, 472.0,
-                        480.5, 475.2, 488.0, 495.5, 502.0, 508.5, 512.4, 515.0
-                    ])
-                else:
-                    precios_curve = np.linspace(precio_actual * 0.75, precio_actual, 24)
-                hist = pd.DataFrame({
-                    "Open": precios_curve * 0.995,
-                    "High": precios_curve * 1.012,
-                    "Low": precios_curve * 0.988,
-                    "Close": precios_curve,
-                    "Volume": 1_200_000,
-                }, index=pd.DatetimeIndex(dates_24m, name="Date"))
+            # Mantener la serie histórica real del activo sin generación sintética
 
             info = info_estatica.copy()
             info["currentPrice"] = precio_actual
@@ -354,9 +337,7 @@ else:
                             shares_current = candidate
                             break
             if shares_current <= 1.0:
-                if ticker_input.upper() == "MA":
-                    shares_current = 866_000_000.0
-                elif mcap > 0 and precio_actual > 0:
+                if mcap > 0 and precio_actual > 0:
                     shares_current = mcap / precio_actual
                 else:
                     net_inc_p = safe_num(m_ttm.get("net_income_ttm", 0.0), 0.0)
@@ -400,20 +381,8 @@ else:
                 hist_2y = hist.tail(750) if not hist.empty else pd.DataFrame()
                 if not hist_2y.empty and 'Close' in hist_2y.columns:
                     df_m = hist_2y['Close'].resample('ME').last().dropna().reset_index()
-                    if len(df_m) < 24 and precio_actual > 0:
-                        end_dt = df_m['Date'].iloc[-1] if not df_m.empty else pd.to_datetime(datetime.date.today())
-                        full_dates = pd.date_range(end=end_dt, periods=24, freq='ME')
-                        existing_map = dict(zip(df_m['Date'].dt.to_period('M'), df_m['Close']))
-                        full_rows = []
-                        for i, d in enumerate(full_dates):
-                            p_key = d.to_period('M')
-                            if p_key in existing_map:
-                                p_val = existing_map[p_key]
-                            else:
-                                factor = 1.0 - (23 - i) * 0.007
-                                p_val = round(precio_actual * factor, 2)
-                            full_rows.append({"Date": d, "Close": p_val})
-                        df_m = pd.DataFrame(full_rows)
+                    if len(df_m) > 24:
+                        df_m = df_m.tail(24).reset_index(drop=True)
                     df_m['Date'] = pd.to_datetime(df_m['Date'].dt.strftime('%Y-%m-01'))
                     
                     precio_inicial_2y = df_m['Close'].iloc[0]

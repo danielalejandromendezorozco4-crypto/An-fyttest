@@ -197,3 +197,118 @@ def test_financial_statements_have_historical_series():
     # Columnas anuales numéricas
     cols_anuales_inc = [c for c in inc.columns if str(c).isdigit()]
     assert len(cols_anuales_inc) >= 4, f"Se esperaban al menos 4 años en inc, se tienen {cols_anuales_inc}"
+
+
+@pytest.mark.parametrize("ticker", ["GOOGL", "AAPL", "MA"])
+def test_price_history_real_curve_and_volatility(ticker: str):
+    """
+    Criterio de Aceptación 1:
+    Al consultar tickers como 'GOOGL', 'AAPL' o 'MA', la gráfica muestra la curva
+    de precios real de los últimos 24 meses (no una línea recta ni progresión artificial).
+    """
+    precio, prev_c, hist = fetch_cotizacion_intradia(ticker)
+    assert precio > 0, f"El precio actual de {ticker} debe ser mayor a 0"
+    assert not hist.empty, f"El historial de precios de {ticker} no debe estar vacío"
+    assert len(hist) >= 24, f"Se esperaban al menos 24 registros diarios para {ticker}, se obtuvieron {len(hist)}"
+
+    df_m = hist["Close"].resample("ME").last().dropna().reset_index()
+    assert len(df_m) >= 24, f"La serie mensual de 24 meses debe tener al menos 24 puntos para {ticker}, tiene {len(df_m)}"
+
+    # Verificar que no es una línea recta (segundas diferencias con desviación estándar > 0)
+    diffs = df_m["Close"].diff().dropna()
+    second_diffs = diffs.diff().dropna()
+    assert second_diffs.std() > 0.05, f"La serie de {ticker} parece una línea recta sintética (std sec diffs <= 0.05)"
+    # Rango de variación real de mercado
+    price_range = df_m["Close"].max() - df_m["Close"].min()
+    assert price_range > 10.0, f"Rango de precios de {ticker} demasiado estrecho ({price_range})"
+
+
+@pytest.mark.parametrize("ticker", ["GOOGL", "AAPL", "MA"])
+def test_financial_metrics_modules_real_values(ticker: str):
+    """
+    Criterio de Aceptación 2:
+    Los módulos de Solvencia, Rentabilidad y Valuación reflejan métricas calculadas
+    con datos reales y no caen en valores por defecto (0.00x, N/A, $0.20).
+    """
+    precio, _, _ = fetch_cotizacion_intradia(ticker)
+    info, inc, bs, cf = fetch_datos_fundamentales(ticker)
+    m_ttm = extraer_metricas_ttm(info, inc, bs, cf, precio)
+
+    # 1. Solvencia y Liquidez
+    res_solv = calcular_ratios_solvencia(
+        total_debt=m_ttm["total_debt"],
+        total_cash=m_ttm["total_cash"],
+        total_equity=m_ttm["total_equity"],
+        ebitda_ttm=m_ttm["ebitda_ttm"],
+        ebit_ttm=m_ttm["operating_income_ttm"],
+        interest_expense=m_ttm["interest_expense_ttm"],
+        current_assets=m_ttm["current_assets"],
+        current_liabilities=m_ttm["current_liabilities"],
+    )
+    assert res_solv["cur_ratio"] > 0.4, f"Current ratio para {ticker} ({res_solv['cur_ratio']}) debe ser > 0.4"
+    assert res_solv["val_nde"] not in ["N/A", "N/D", ""], f"Net Debt/EBITDA para {ticker} no debe ser N/A"
+
+    # 2. Rentabilidad y Eficiencia
+    res_rent = calcular_ratios_rentabilidad(
+        revenue_ttm=m_ttm["revenue_ttm"],
+        gross_profit_ttm=m_ttm["gross_profit_ttm"],
+        operating_income_ttm=m_ttm["operating_income_ttm"],
+        net_income_ttm=m_ttm["net_income_ttm"],
+        total_assets=m_ttm["total_assets"],
+        total_equity=m_ttm["total_equity"],
+        total_debt=m_ttm["total_debt"],
+        total_cash=m_ttm["total_cash"],
+        roe_fallback=m_ttm.get("roe", 0.0),
+        roa_fallback=m_ttm.get("roa", 0.0),
+        roic_fallback=m_ttm.get("roic", 0.0),
+    )
+    assert res_rent["roe"] > 0.0, f"ROE para {ticker} debe ser positivo (> 0%), se obtuvo {res_rent['roe']}"
+    assert res_rent["roa"] > 0.0, f"ROA para {ticker} debe ser positivo (> 0%), se obtuvo {res_rent['roa']}"
+    assert res_rent["roic"] > 0.0, f"ROIC para {ticker} debe ser positivo (> 0%), se obtuvo {res_rent['roic']}"
+    assert res_rent["mg_op"] > 0.0, f"Margen operativo para {ticker} debe ser > 0%, se obtuvo {res_rent['mg_op']}"
+    assert res_rent["net_margin"] > 0.0, f"Margen neto para {ticker} debe ser > 0%, se obtuvo {res_rent['net_margin']}"
+
+    # 3. Múltiplos de Valuación
+    res_mult = calcular_multiplos_valuacion(
+        precio_actual=precio,
+        mcap=m_ttm["mcap"],
+        eps_ttm=m_ttm["eps_diluted_ttm"],
+        forward_eps=m_ttm["forward_eps"],
+        fcf_ttm=m_ttm["fcf_ttm"],
+        ebitda_ttm=m_ttm["ebitda_ttm"],
+        total_debt=m_ttm["total_debt"],
+        total_cash=m_ttm["total_cash"],
+        revenue_ttm=m_ttm["revenue_ttm"],
+        total_equity=m_ttm["total_equity"],
+        peg_info=m_ttm["peg_ratio_info"],
+        earnings_growth=m_ttm["earnings_growth"],
+        buyback_yield=1.5,
+    )
+    assert res_mult["pe"] > 0.0, f"PER para {ticker} debe ser positivo, se obtuvo {res_mult['pe']}"
+    assert res_mult["p_fcf"] > 0.0, f"P/FCF para {ticker} debe ser positivo, se obtuvo {res_mult['p_fcf']}"
+    assert res_mult["ev_ebitda"] > 0.0, f"EV/EBITDA para {ticker} debe ser positivo, se obtuvo {res_mult['ev_ebitda']}"
+
+    # 4. Valuación Intrínseca DCF (no debe ser el fallback artificial de $0.20)
+    comp_fcff = extraer_fcff_desapalancado(cf, inc, bs, info)
+    res_dcf = calcular_fcff_valuation(
+        ocf_hist=comp_fcff["ocf_hist"],
+        capex_hist=comp_fcff["capex_hist"],
+        interest_hist=comp_fcff["interest_hist"],
+        pretax_hist=comp_fcff["pretax_hist"],
+        taxprov_hist=comp_fcff["taxprov_hist"],
+        total_debt=comp_fcff["total_debt"],
+        total_cash=comp_fcff["total_cash"],
+        shares_diluted=comp_fcff["shares_diluted"],
+        precio_actual=precio,
+        rf=4.20,
+        beta=1.05,
+        mcap=m_ttm["mcap"],
+        cagr_revenue_hist=0.10,
+        operating_margin_hist=0.25,
+        ebit_hist=comp_fcff.get("ebit_hist", []),
+        da_hist=comp_fcff.get("da_hist", []),
+        delta_nwc_hist=comp_fcff.get("delta_nwc_hist", []),
+        ticker=ticker,
+    )
+    v_intr = res_dcf["valor_intrinseco"]
+    assert v_intr > 10.0, f"Valor intrínseco DCF para {ticker} cayó en el fallback residual ($0.20), obtenido: ${v_intr}"
